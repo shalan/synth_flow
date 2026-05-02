@@ -1,0 +1,7 @@
+# delay_retime — DELAY: retiming-enabled for pipelined datapaths
+strash; ifraig; scorr; dc2; dretime; strash;
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+stime

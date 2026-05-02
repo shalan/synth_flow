@@ -1,0 +1,6 @@
+# balanced_struct — STRUCTURAL: GIA structural cleanup before mapping
+strash;
+&get -n; &st; &scl; &lcorr; &dch;
+&nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+stime

@@ -1,0 +1,7 @@
+# balanced_resyn — BALANCED: classic resyn2-equivalent + GIA mapping
+strash;
+balance; rewrite; refactor; balance; rewrite;
+rewrite -z; balance; refactor -z; rewrite -z; balance;
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+stime

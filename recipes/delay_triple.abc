@@ -1,0 +1,8 @@
+# delay_triple — DELAY: triple-pass remap with sizing between each
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+stime

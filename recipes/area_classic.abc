@@ -1,0 +1,8 @@
+# area_classic — AREA: classic rewriting + scorr/dc2 + GIA delay mapping
+strash; ifraig;
+balance; rewrite; refactor; balance; rewrite;
+rewrite -z; balance; refactor -z; rewrite -z; balance;
+scorr; dc2;
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+stime

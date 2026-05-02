@@ -1,0 +1,6 @@
+# delay_choice_deep — DELAY: choice-driven
+&get -n; &st; &dch;
+&nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D}; upsize {D}; dnsize {D};
+stime

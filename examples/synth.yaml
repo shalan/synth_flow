@@ -1,0 +1,73 @@
+# synth.yaml — example configuration for synth_flow.py
+# SPDX-License-Identifier: Apache-2.0
+# Author: Mohamed Shalan <mshalan@aucegypt.edu>
+#
+# All paths support env vars ($VAR) and ~ expansion.
+# All file lists support glob patterns.
+
+# ===== Required =====
+rtl_files:
+  - rtl/*.v
+  - $PROJECT_ROOT/common/*.v
+
+lib_typ: $PDK_ROOT/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+top: my_soc
+
+# ===== STA corners (omit + set run_sta:false to skip) =====
+lib_fast: $PDK_ROOT/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_n40C_1v95.lib
+lib_slow: $PDK_ROOT/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_100C_1v60.lib
+
+# ===== GLS (omit + set run_gls:false to skip) =====
+tb_files:
+  - tb/tb_my_soc.v
+tb_top: tb_my_soc
+primitives_dir: $PDK_ROOT/sky130_fd_sc_hd/verilog
+sdf_back_annotate: true
+
+# ===== Design parameters =====
+period_ps: 8000              # 125 MHz
+clock_port: clk
+objective: pareto            # delay | area | fastest | pareto | balanced
+
+# Optional: Verilog parameter overrides per module
+# params:
+#   my_soc:
+#     CLOCK_DIV: 4
+#     DATA_WIDTH: 32
+
+# Optional: explicit module list. Omit for auto-detection.
+# modules:
+#   - cpu_core
+#   - uart
+#   - my_soc
+
+# Optional: subset of recipes. Omit for all 14.
+# recipes:
+#   - area_safe
+#   - balanced_resyn
+
+# ===== ABC constraints =====
+driving_cell: sky130_fd_sc_hd__inv_1
+load_ff: 33.0
+
+# ===== Tool paths (override via env vars: YOSYS, OPENSTA, IVERILOG, VVP) =====
+yosys: yosys
+opensta: sta
+iverilog: iverilog
+vvp: vvp
+
+# ===== Execution =====
+parallel: 0                  # 0 = use all cores
+work_dir: work
+results_dir: results
+
+# ===== Behavior =====
+run_sta: true
+run_gls: true
+fail_on_timing: true         # exit code 2 if any winner has setup violation
+
+# ===== Experimental =====
+# abc_sequential: when true, ABC is invoked with -dff for sequential
+# optimizations (retiming, scorr). Breaks LEC, may misbehave with async
+# resets and clock gating. Default false.
+abc_sequential: false

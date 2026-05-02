@@ -1,0 +1,7 @@
+# area_lut6 — AREA: heavy scorr + dc2 + dretime + rewriting + GIA mapping
+strash; ifraig; scorr; dc2; dc2; dretime; strash;
+balance; rewrite; refactor; balance; rewrite;
+rewrite -z; balance; refactor -z; rewrite -z; balance;
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+stime

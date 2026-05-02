@@ -1,0 +1,26 @@
+# lazy_man — Heavy PULP-style: 8 opt iterations + 8 opt+map iterations
+strash;
+&get -n;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b;
+&put;
+&get -n;
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b; &st; &nf {D};
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b; &st; &nf {D};
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b; &st; &nf {D};
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b; &st; &nf {D};
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b; &st; &nf {D};
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b; &st; &nf {D};
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b; &st; &nf {D};
+&st; &if -y -K 6; &syn2; &if -K 6; &st; &b; &st; &nf {D};
+&put; topo; stime;
+buffer;
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+stime

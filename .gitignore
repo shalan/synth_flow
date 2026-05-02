@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Author: Mohamed Shalan <mshalan@aucegypt.edu>
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Build artifacts
+work/
+results/
+tmp/

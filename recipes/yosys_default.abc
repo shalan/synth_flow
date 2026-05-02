@@ -1,0 +1,5 @@
+# yosys_default — Yosys default with -D (the baseline most people compare against)
+strash; ifraig; scorr; dc2; dretime; strash;
+&get -n; &dch -f; &nf {D}; &put;
+buffer; upsize {D}; dnsize {D};
+stime -p

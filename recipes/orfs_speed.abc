@@ -1,0 +1,6 @@
+# orfs_speed — Direct port of ORFS speed recipe (matches OpenLane DELAY 0)
+strash;
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+stime -p; print_stats -m

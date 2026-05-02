@@ -1,0 +1,11 @@
+# balanced_resyn2x — BALANCED: two rewriting passes + double mapping
+strash;
+balance; rewrite; refactor; balance; rewrite;
+rewrite -z; balance; refactor -z; rewrite -z; balance;
+balance; rewrite; balance; rewrite;
+rewrite -z; balance; rewrite -z; balance;
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo; upsize {D}; dnsize {D};
+stime
