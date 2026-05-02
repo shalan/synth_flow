@@ -108,10 +108,15 @@ class Config:
     # --- design parameters ---
     period_ps: int = 10000
     clock_port: str = 'clk'
+    clock_port_2: Optional[str] = None
+    period_ps_2: Optional[int] = None
     objective: str = 'delay'  # delay | area | fastest | pareto | balanced
     modules: list[str] = field(default_factory=list)  # empty = auto-detect
     recipes: list[str] = field(default_factory=list)  # empty = all available
     params: dict = field(default_factory=dict)  # {module: {param: value}}
+    verilog_defines: list[str] = field(default_factory=list)  # -D flags
+    pre_read_files: list[str] = field(default_factory=list)  # DFFRAM netlists etc.
+    keep_hierarchy_modules: list[str] = field(default_factory=list)  # preserve hierarchy
 
     # --- ABC constraints (Sky130 HD defaults) ---
     driving_cell: str = 'sky130_fd_sc_hd__inv_2'
@@ -160,7 +165,7 @@ class Config:
             if key in data and isinstance(data[key], str):
                 data[key] = os.path.expandvars(os.path.expanduser(data[key]))
         # Glob expansion for file lists
-        for key in ('rtl_files', 'tb_files'):
+        for key in ('rtl_files', 'tb_files', 'pre_read_files'):
             if key in data:
                 expanded = []
                 for pat in data[key]:
@@ -330,8 +335,10 @@ class RecipeResult:
 # with 1:1 register correspondence to the RTL.
 YOSYS_DRIVER_STD = """\
 # generated yosys driver (standard combinational-ABC flow)
+{pre_read_section}
 {read_verilog_lines}
 hierarchy -top {module} {param_flags}
+{keep_hierarchy_section}
 synth -top {module} -flatten -noabc
 write_verilog -noattr {syn_netlist}
 dfflibmap -liberty {liberty}
@@ -351,8 +358,10 @@ write_verilog -noattr -noexpr {out_netlist}
 # flop semantics. Use only when you understand the implications.
 YOSYS_DRIVER_SEQ = """\
 # generated yosys driver (experimental: ABC sequential mode)
+{pre_read_section}
 {read_verilog_lines}
 hierarchy -top {module} {param_flags}
+{keep_hierarchy_section}
 synth -top {module} -flatten -noabc
 write_verilog -noattr {syn_netlist}
 # ABC with -dff: generic flops are part of the optimization
@@ -371,13 +380,14 @@ write_verilog -noattr -noexpr {out_netlist}
 # ABC can re-optimize across the flattened boundary for better QoR.
 YOSYS_DRIVER_HIER = """\
 # generated yosys driver (hierarchical bottom-up)
-# Read cell blackbox stubs so netlists resolve correctly
-read_verilog {cell_blackbox}
+{cell_blackbox_line}
+{pre_read_section}
 # Read pre-synthesized sub-module netlists
 {read_netlist_lines}
 # Read top-level RTL (parameters in netlists are already resolved)
 {read_verilog_lines}
 hierarchy -top {module} {param_flags}
+{keep_hierarchy_section}
 synth -top {module} -flatten -noabc
 write_verilog -noattr {syn_netlist}
 dfflibmap -liberty {liberty}
@@ -391,8 +401,10 @@ write_verilog -noattr -noexpr {out_netlist}
 
 YOSYS_DRIVER_DEPTH = """\
 # generated yosys driver (depth-only analysis)
+{pre_read_section}
 {read_verilog_lines}
 hierarchy -top {module} {param_flags}
+{keep_hierarchy_section}
 proc; flatten; opt_expr; opt_clean
 opt
 techmap; opt
@@ -400,10 +412,63 @@ tee -o {stats_json} stat -json
 ltp
 """
 
-def _read_verilog_lines(rtl_files: list[str]) -> str:
+YOSYS_DRIVER_DUAL_CLK = """\
+# generated yosys driver (dual-clock domain-partitioned ABC)
+{pre_read_section}
+{read_verilog_lines}
+hierarchy -top {module} {param_flags}
+{keep_hierarchy_section}
+synth -top {module} -flatten -noabc
+write_verilog -noattr {syn_netlist}
+
+# Partition into clock domains
+select -set ffs_1 n:{clock_port} %co
+select -set ffs_2 n:{clock_port_2} %co
+select -set ffs @ffs_1 @ffs_2
+
+select -set domain_1 @ffs_1 %x:+@ffs %d %xe*:+@ffs_1 @ffs_1
+select -set domain_2 @ffs_2 %x:+@ffs %d %xe*:+@ffs_2 @ffs_2
+
+# Inter-domain cells -> faster domain
+select -set domain_2 @domain_2 @domain_1 %d
+
+# ABC on domain 1 (fast clock)
+abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} @domain_1
+
+# ABC on domain 2 (slow clock)
+abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps_2} @domain_2
+
+dfflibmap -liberty {liberty}
+setundef -zero
+splitnets
+opt_clean -purge
+tee -o {stats_json} stat -liberty {liberty} -json
+write_verilog -noattr -noexpr {out_netlist}
+"""
+
+def _read_verilog_lines(rtl_files: list[str], verilog_defines: list[str] = None) -> str:
     lines = []
     for f in rtl_files:
-        lines.append(f"read_verilog -sv {f}")
+        cmd = "read_verilog -sv"
+        if verilog_defines:
+            for d in verilog_defines:
+                cmd += f" -D{d}"
+        cmd += f" {f}"
+        lines.append(cmd)
+    return '\n'.join(lines)
+
+def _pre_read_section(cfg: dict) -> str:
+    lines = []
+    if cfg.get('pre_read_files'):
+        lines.append(f'read_liberty -lib {cfg["lib_typ"]}')
+        for f in cfg['pre_read_files']:
+            lines.append(f'read_verilog -sv {f}')
+    return '\n'.join(lines)
+
+def _keep_hierarchy_section(cfg: dict) -> str:
+    lines = []
+    for m in cfg.get('keep_hierarchy_modules', []):
+        lines.append(f'setattr -mod -set keep_hierarchy 1 {m}')
     return '\n'.join(lines)
 
 def _param_flags(params: dict, module: str) -> str:
@@ -465,7 +530,9 @@ def run_depth(args: dict) -> DepthResult:
     yscript = workdir / 'depth.ys'
 
     yscript.write_text(YOSYS_DRIVER_DEPTH.format(
-        read_verilog_lines=_read_verilog_lines(cfg['rtl_files']),
+        pre_read_section=_pre_read_section(cfg),
+        keep_hierarchy_section=_keep_hierarchy_section(cfg),
+        read_verilog_lines=_read_verilog_lines(cfg['rtl_files'], cfg.get('verilog_defines')),
         module=module,
         param_flags=_param_flags(cfg.get('params', {}), module),
         stats_json=stats_json,
@@ -541,16 +608,13 @@ def run_recipe(args: dict) -> RecipeResult:
 
     rtl_files = cfg['rtl_files']
     if dep_modules:
-        # Filter RTL: keep files for modules NOT replaced by netlists,
-        # plus the current module.  For the current module's file, strip
-        # parameter overrides from instantiations of netlist modules.
+        dep_lower = {m.lower() for m in dep_modules}
         filtered = []
         for f in rtl_files:
             stem = Path(f).stem
-            if stem in dep_modules:
+            if stem.lower() in dep_lower:
                 continue
-            if stem == module:
-                # Preprocess: strip #(.PARAM(val)) from dep module insts
+            if stem.lower() == module.lower():
                 filtered.append(_strip_param_overrides(f, dep_modules, workdir))
             else:
                 filtered.append(f)
@@ -562,17 +626,27 @@ def run_recipe(args: dict) -> RecipeResult:
         template = YOSYS_DRIVER_HIER
     elif cfg.get('abc_sequential', False):
         template = YOSYS_DRIVER_SEQ
+    elif cfg.get('clock_port_2') and cfg.get('dual_clock_synthesis', False):
+        template = YOSYS_DRIVER_DUAL_CLK
     else:
         template = YOSYS_DRIVER_STD
+    bb = cfg.get('cell_blackbox', '') or ''
+    bb_line = f'# Read cell blackbox stubs\nread_verilog {bb}' if bb else ''
     yscript.write_text(template.format(
-        read_verilog_lines=_read_verilog_lines(rtl_files),
+        pre_read_section=_pre_read_section(cfg),
+        keep_hierarchy_section=_keep_hierarchy_section(cfg),
+        read_verilog_lines=_read_verilog_lines(rtl_files, cfg.get('verilog_defines')),
         read_netlist_lines=_read_netlist_lines(dep_netlists),
-        cell_blackbox=cfg.get('cell_blackbox', ''),
+        cell_blackbox=bb,
+        cell_blackbox_line=bb_line,
         module=module,
         liberty=cfg['lib_typ'],
         constr=constr,
         recipe=recipe_path,
         period_ps=cfg['period_ps'],
+        period_ps_2=cfg.get('period_ps_2', cfg['period_ps']),
+        clock_port=cfg['clock_port'],
+        clock_port_2=cfg.get('clock_port_2', ''),
         param_flags=_param_flags(cfg.get('params', {}), module),
         stats_json=stats,
         syn_netlist=syn_nl,
@@ -629,6 +703,7 @@ read_liberty {liberty}
 read_verilog {netlist}
 link_design {module}
 create_clock -name clk -period {period_ns} [get_ports {clock_port}]
+{clock_2_section}
 set_input_delay  -clock clk [expr {{{period_ns} * 0.2}}] [all_inputs]
 set_output_delay -clock clk [expr {{{period_ns} * 0.2}}] [all_outputs]
 report_wns
@@ -636,14 +711,28 @@ report_tns
 exit
 """
 
+QSTA_CLK2 = """\
+create_clock -name clk2 -period {period_2_ns} [get_ports {clock_port_2}]
+set_clock_groups -asynchronous -group clk -group clk2
+"""
+
 def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
-               period_ps: int, clock_port: str, log_path: Path) -> tuple[Optional[float], Optional[float]]:
+               period_ps: int, clock_port: str, log_path: Path,
+               clock_port_2: str = None, period_ps_2: int = None) -> tuple[Optional[float], Optional[float]]:
     """Run a quick STA at typical corner. Returns (wns_ns, tns_ns) or (None, None)."""
     period_ns = period_ps / 1000.0
+    if clock_port_2 and period_ps_2:
+        clk2 = QSTA_CLK2.format(
+            period_2_ns=period_ps_2 / 1000.0,
+            clock_port_2=clock_port_2,
+        )
+    else:
+        clk2 = ''
     with tempfile.NamedTemporaryFile('w', suffix='.tcl', delete=False) as f:
         f.write(QSTA_TCL.format(
             liberty=liberty, netlist=netlist, module=module,
             period_ns=period_ns, clock_port=clock_port,
+            clock_2_section=clk2,
         ))
         tcl = f.name
     try:
@@ -714,6 +803,16 @@ def _pareto_front(cands: list[Candidate]) -> list[str]:
 def select_winner(cands: list[Candidate], objective: str) -> Selection:
     valid = [c for c in cands if c.wns_ns is not None]
     if not valid:
+        succeeded = [c for c in cands if c.netlist]
+        if succeeded:
+            winner = min(succeeded, key=lambda c: (c.area, _stability_idx(c.recipe)))
+            return Selection(
+                module='',
+                objective=objective,
+                winner=winner.recipe,
+                candidates=cands,
+                rationale=f'no WNS data; fallback to min area ({winner.area:.1f} um²)',
+            )
         return Selection(
             module='',  # filled by caller
             objective=objective,
@@ -791,6 +890,7 @@ read_liberty -corner slow {lib_slow}
 read_verilog {netlist}
 link_design {module}
 create_clock -name clk -period {period_ns} [get_ports {clock_port}]
+{clock_2_section}
 set_driving_cell -lib_cell {driving_cell} [all_inputs]
 set_load {load_pf} [all_outputs]
 set_input_delay  -clock clk [expr {{{period_ns} * 0.2}}] [all_inputs]
@@ -830,6 +930,15 @@ write_sdf -corner slow {sdf_out}
 exit
 """
 
+CORNER_STA_CLK2 = """\
+create_clock -name clk2 -period {period_2_ns} [get_ports {clock_port_2}]
+set_clock_uncertainty -setup 0.25 [get_clocks clk]
+set_clock_uncertainty -setup 0.25 [get_clocks clk2]
+set_clock_uncertainty -hold 0.10 [get_clocks clk]
+set_clock_uncertainty -hold 0.10 [get_clocks clk2]
+set_clock_groups -asynchronous -group [get_clocks clk] -group [get_clocks clk2]
+"""
+
 @dataclass
 class CornerResult:
     module: str
@@ -856,10 +965,18 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
     tcl  = out_dir / 'sta.tcl'
 
     period_ns = cfg.period_ps / 1000.0
+    if cfg.clock_port_2 and cfg.period_ps_2:
+        clk2 = CORNER_STA_CLK2.format(
+            period_2_ns=cfg.period_ps_2 / 1000.0,
+            clock_port_2=cfg.clock_port_2,
+        )
+    else:
+        clk2 = ''
     tcl.write_text(CORNER_STA_TCL.format(
         lib_fast=cfg.lib_fast, lib_typ=cfg.lib_typ, lib_slow=cfg.lib_slow,
         netlist=netlist, module=module,
         period_ns=period_ns, clock_port=cfg.clock_port,
+        clock_2_section=clk2,
         driving_cell=cfg.driving_cell,
         load_pf=cfg.load_ff / 1000.0,  # OpenSTA wants pF
         sdf_out=sdf,
@@ -1355,6 +1472,8 @@ def main() -> int:
             wns, tns = _quick_sta(
                 cfg.opensta, qsta_lib, r.netlist, module,
                 cfg.period_ps, cfg.clock_port, qsta_log,
+                clock_port_2=cfg.clock_port_2,
+                period_ps_2=cfg.period_ps_2,
             )
             cands.append(Candidate(
                 recipe=r.recipe, netlist=r.netlist,

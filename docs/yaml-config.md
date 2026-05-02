@@ -81,10 +81,15 @@ These are required only when `run_gls: true` (the default). Set
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `period_ps` | int | `10000` | Target clock period in picoseconds. Substituted into `{D}` in every recipe. |
-| `clock_port` | string | `clk` | Name of the clock port on every module being synthesized. (Currently uniform across modules.) |
+| `clock_port` | string | `clk` | Name of the primary clock port. Used for synthesis and STA. |
+| `clock_port_2` | string or null | `null` | Name of a second (asynchronous) clock port. When set, STA creates two clock groups with `set_clock_groups -asynchronous`. |
+| `period_ps_2` | int or null | `null` | Period in picoseconds for `clock_port_2`. Required when `clock_port_2` is set. |
 | `objective` | enum | `delay` | Recipe selection criterion. One of: `delay`, `area`, `fastest`, `pareto`, `balanced`. See [Objectives](#objectives). |
 | `modules` | list of strings | `[]` | Modules to synthesize separately. **Empty means auto-detect** — all modules defined in RTL but not instantiated by any other module are picked. Set this explicitly when auto-detection misses something or picks too many. |
 | `recipes` | list of strings | `[]` | Subset of recipe names (without `.abc`) to sweep. **Empty means all available** in `recipes_dir`. Use this to restrict during fast iteration: `recipes: [balanced]`. |
+| `verilog_defines` | list of strings | `[]` | Verilog `-D` flags passed to every `read_verilog` invocation. Example: `[NRV_SINGLE_PORT_REGF, NRV_SHARED_ADDER]`. |
+| `pre_read_files` | list of strings | `[]` | Files read *before* RTL (after loading liberty). Used for pre-mapped IP netlists (e.g. DFFRAM) that reference library cells. Globs allowed. |
+| `keep_hierarchy_modules` | list of strings | `[]` | Module names to mark with `keep_hierarchy` before `synth -flatten`. Preserves hand-crafted structures (e.g. DFFRAM) from being re-optimized by ABC. |
 
 ### ABC constraints
 
@@ -129,6 +134,7 @@ uppercase (e.g. `YOSYS=/opt/yosys/bin/yosys`).
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `abc_sequential` | bool | `false` | Enable ABC `-dff` for sequential optimizations (retiming, scorr). Reorders the flow to `abc -dff` → `dfflibmap`. **Breaks LEC**, may misbehave with async resets and clock gating. See README's "Experimental" section. |
+| `dual_clock_synthesis` | bool | `false` | When `true` *and* `clock_port_2` is set, partitions the design into clock domains using Yosys `select` expressions and runs `abc -dff` on each domain with its own period. Experimental; requires all FFs to be driven by exactly one of the two clock ports. |
 
 ## Objectives
 
@@ -289,6 +295,24 @@ recipes: [area_safe, area_classic, area_lut6, area_max]
 period_ps: 20000     # loose period; area matters more
 ```
 
+### Dual-clock design with pre-mapped IP
+
+```yaml
+period_ps: 8000
+clock_port: sysclk
+clock_port_2: clk_iop
+period_ps_2: 33333
+verilog_defines: [NRV_SINGLE_PORT_REGF, NRV_SHARED_ADDER, NRV_SERIAL_SHIFT]
+pre_read_files:
+  - models/dffram_gen/dffram_combined.nl.v
+  - models/dffram_gen/dffram_wrapper.v
+keep_hierarchy_modules: [DFFRAM, RAM128, RAM32]
+```
+
+STA creates two asynchronous clock groups. Synthesis targets the primary
+clock period (conservative for the second domain). Set
+`dual_clock_synthesis: true` to enable per-domain ABC optimization.
+
 ### CI-friendly
 
 ```yaml
@@ -330,9 +354,14 @@ primitives_dir:   <path>
 # Design
 period_ps:        <int>          # default 10000
 clock_port:       <ident>        # default "clk"
+clock_port_2:     <ident>        # default null
+period_ps_2:      <int>          # default null
 objective:        delay | area | fastest | pareto | balanced   # default "delay"
 modules:          [<ident>, ...] # default [] -> auto-detect
 recipes:          [<name>, ...]  # default [] -> all in recipes_dir
+verilog_defines:  [<define>, ...] # default []
+pre_read_files:   [<path>, ...]  # default [], globs allowed
+keep_hierarchy_modules: [<ident>, ...] # default []
 
 # ABC
 driving_cell:     <ident>        # default "sky130_fd_sc_hd__inv_2"
@@ -359,4 +388,5 @@ sdf_back_annotate: <bool>        # default true
 
 # Experimental
 abc_sequential:   <bool>         # default false
+dual_clock_synthesis: <bool>     # default false
 ```

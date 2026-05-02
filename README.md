@@ -20,6 +20,11 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
   netlists reused by parents
 - **Gate-level simulation** — iverilog + vvp with optional SDF
   back-annotation
+- **Multi-clock STA** — defines two asynchronous clock groups with
+  independent periods for setup/hold analysis
+- **Verilog defines** — `-D` flags passed to `read_verilog`
+- **Pre-read netlists** — pre-mapped IP (e.g. DFFRAM) loaded with liberty
+  before RTL, preserved via `keep_hierarchy_modules`
 - **Verilog parameter overrides** — `params` config field maps to Yosys
   `-chparam`
 - **Pareto front analysis** — identifies area-delay trade-off candidates
@@ -59,6 +64,23 @@ python3 synth_flow.py --config synth.yaml --recipes area_safe balanced_resyn
 # Fast depth-only Fmax estimate (no ABC)
 python3 synth_flow.py --config synth.yaml --depth-only
 ```
+
+### Dual-clock design (e.g. AttoIO)
+
+```yaml
+period_ps: 8000
+clock_port: sysclk
+clock_port_2: clk_iop
+period_ps_2: 33333
+verilog_defines: [NRV_SINGLE_PORT_REGF, NRV_SHARED_ADDER, NRV_SERIAL_SHIFT]
+pre_read_files: [models/dffram_gen/dffram_combined.nl.v, models/dffram_gen/dffram_wrapper.v]
+keep_hierarchy_modules: [DFFRAM, RAM128, RAM32]
+```
+
+When `clock_port_2` is set, STA creates two asynchronous clock groups.
+Synthesis still targets `clock_port` / `period_ps` for ABC (conservative
+for the second domain). Set `dual_clock_synthesis: true` to enable
+experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 
 ## CLI Reference
 
