@@ -37,9 +37,8 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
 
 ```yaml
 rtl_files: [rtl/*.v]
-lib_typ:   lib/sky130_fd_sc_hd__tt.lib
-lib_fast:  lib/sky130_fd_sc_hd__ff.lib
-lib_slow:  lib/sky130_fd_sc_hd__ss.lib
+lib_typ:   sky130/hd_124_tt.lib
+lib_slow:  sky130/hd_124_ss.lib
 top: my_design
 period_ps: 8000
 clock_port: clk
