@@ -1,0 +1,8 @@
+# delay_choice_deep_v2 — extra sizing round (3 total)
+&get -n; &st; &dch;
+&nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+stime

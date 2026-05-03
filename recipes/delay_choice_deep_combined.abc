@@ -1,0 +1,8 @@
+# delay_choice_deep_combined — balance + dch -f + extra sizing
+&get -n; &st; &b; &dch -f;
+&nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+stime

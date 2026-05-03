@@ -1,0 +1,7 @@
+# delay_choice_deep_v4 — balance for depth before choice computation
+&get -n; &st; &b; &dch;
+&nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+stime

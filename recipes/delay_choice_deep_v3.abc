@@ -1,0 +1,7 @@
+# delay_choice_deep_v3 — force more choice nodes (&dch -f)
+&get -n; &st; &dch -f;
+&nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+stime

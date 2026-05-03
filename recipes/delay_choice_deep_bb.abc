@@ -1,0 +1,7 @@
+# delay_choice_deep_bb — double balance for deeper rebalancing
+&get -n; &st; &b; &b; &dch;
+&nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+stime
