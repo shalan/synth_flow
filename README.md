@@ -37,8 +37,8 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
 
 ```yaml
 rtl_files: [rtl/*.v]
-lib_typ:   sky130/hd_124_tt.lib
-lib_slow:  sky130/hd_124_ss.lib
+lib_typ:   sky130/hd_120_tt.lib
+lib_slow:  sky130/hd_120_ss.lib
 top: my_design
 period_ps: 8000
 clock_port: clk
@@ -182,7 +182,7 @@ synth_flow/
   test_synth_flow.py  # Unit tests (no EDA tools needed)
   recipes/            # 14 ABC recipe scripts
   sky130/             # Curated Sky130 HD PDK subset
-    hd_124_tt.lib     # Stripped TT liberty (synthesis)
+    hd_120_tt.lib     # Stripped TT liberty (synthesis)
     abc_constr.txt    # ABC constraints
     sky130_hd-clean.v # Behavioral Verilog (GLS)
   docs/

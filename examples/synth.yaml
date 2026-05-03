@@ -10,12 +10,12 @@ rtl_files:
   - rtl/*.v
   - $PROJECT_ROOT/common/*.v
 
-lib_typ: sky130/hd_124_tt.lib
+lib_typ: sky130/hd_120_tt.lib
 top: my_soc
 
 # ===== STA corners (omit + set run_sta:false to skip) =====
 lib_fast: $PDK_ROOT/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_n40C_1v95.lib
-lib_slow: sky130/hd_124_ss.lib
+lib_slow: sky130/hd_120_ss.lib
 
 # ===== GLS (omit + set run_gls:false to skip) =====
 tb_files:
