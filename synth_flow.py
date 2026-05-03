@@ -63,6 +63,7 @@ RECIPE_PRIORITY = [
     'delay_triple',
     'delay_choice_deep',
     'delay_iter_heavy',
+    'delay_aggressive',
     'balanced_resyn',
     'balanced_resyn2x',
     'balanced_struct',

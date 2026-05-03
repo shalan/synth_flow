@@ -73,7 +73,7 @@ print('\n[2] Recipe discovery')
 
 recipes = discover_recipes(DEFAULT_RECIPES_DIR, [])
 names = [r[0] for r in recipes]
-check('finds all 14 recipes', len(recipes) == 14, f'got {len(recipes)}: {names}')
+check('finds all 15 recipes', len(recipes) == 15, f'got {len(recipes)}: {names}')
 check('delay_retime is first by stability', names[0] == 'delay_retime', f'got={names[0]}')
 check('delay_triple before balanced_resyn',
       names.index('delay_triple') < names.index('balanced_resyn'),

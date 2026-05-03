@@ -1,0 +1,24 @@
+# delay_aggressive — DELAY: full cleanup + 4-pass mapping + aggressive sizing
+strash; ifraig;
+balance; rewrite; refactor; balance; rewrite;
+rewrite -z; balance; refactor -z; rewrite -z; balance;
+scorr; dc2;
+balance; rewrite; refactor; balance; rewrite;
+rewrite -z; balance; refactor -z; rewrite -z; balance;
+strash;
+&get -n; &st; &scl; &lcorr; &dch;
+&nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+&get -n; &st; &dch; &nf {D}; &put;
+buffer; topo;
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+upsize {D}; dnsize {D};
+stime
