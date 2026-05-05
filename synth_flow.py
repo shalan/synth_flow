@@ -142,6 +142,7 @@ class Config:
     recipes: list[str] = field(default_factory=list)  # empty = all available
     params: dict = field(default_factory=dict)  # {module: {param: value}}
     verilog_defines: list[str] = field(default_factory=list)  # -D flags
+    verilog_includes: list[str] = field(default_factory=list) # -I include dirs
     pre_read_files: list[str] = field(default_factory=list)  # DFFRAM netlists etc.
     keep_hierarchy_modules: list[str] = field(default_factory=list)  # preserve hierarchy
 
@@ -520,13 +521,17 @@ tee -o {stats_json} stat -liberty {liberty} -json
 write_verilog -noattr -noexpr {out_netlist}
 """
 
-def _read_verilog_lines(rtl_files: list[str], verilog_defines: list[str] = None) -> str:
+def _read_verilog_lines(rtl_files: list[str], verilog_defines: list[str] = None,
+                        verilog_includes: list[str] = None) -> str:
     lines = []
     for f in rtl_files:
         cmd = "read_verilog -sv"
         if verilog_defines:
             for d in verilog_defines:
                 cmd += f" -D{d}"
+        if verilog_includes:
+            for inc in verilog_includes:
+                cmd += f" -I{inc}"
         cmd += f" {f}"
         lines.append(cmd)
     return '\n'.join(lines)
@@ -650,7 +655,7 @@ def run_depth(args: dict) -> DepthResult:
         pre_read_section=_pre_read_section(cfg),
         macro_lib_section=_macro_lib_yosys_section(cfg, 'typ'),
         keep_hierarchy_section=_keep_hierarchy_section(cfg),
-        read_verilog_lines=_read_verilog_lines(cfg['rtl_files'], cfg.get('verilog_defines')),
+        read_verilog_lines=_read_verilog_lines(cfg['rtl_files'], cfg.get('verilog_defines'), cfg.get('verilog_includes')),
         module=module,
         param_flags=_param_flags(cfg.get('params', {}), module),
         stats_json=stats_json,
@@ -755,7 +760,7 @@ def run_recipe(args: dict) -> RecipeResult:
         liberty_lib_section=_liberty_lib_section(cfg),
         macro_lib_section=_macro_lib_yosys_section(cfg, 'typ'),
         keep_hierarchy_section=_keep_hierarchy_section(cfg),
-        read_verilog_lines=_read_verilog_lines(rtl_files, cfg.get('verilog_defines')),
+        read_verilog_lines=_read_verilog_lines(rtl_files, cfg.get('verilog_defines'), cfg.get('verilog_includes')),
         read_netlist_lines=_read_netlist_lines(dep_netlists),
         cell_blackbox=bb,
         cell_blackbox_line=bb_line,

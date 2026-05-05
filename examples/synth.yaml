@@ -61,6 +61,13 @@ objective: pareto            # delay | area | fastest | pareto | balanced
 #   - NRV_SINGLE_PORT_REGF
 #   - NRV_SHARED_ADDER
 
+# Optional: Verilog include directories passed to read_verilog (-I flags).
+# Needed when any source uses `include "header.vh" and the header isn't
+# in the same directory as the .v file.
+# verilog_includes:
+#   - $PROJECT_ROOT/rtl
+#   - $PROJECT_ROOT/cpu/hdl
+
 # Optional: pre-read netlists loaded with liberty before RTL.
 # Used for pre-mapped IP (e.g. DFFRAM) that references library cells.
 # pre_read_files:
