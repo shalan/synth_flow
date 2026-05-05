@@ -452,6 +452,7 @@ YOSYS_DRIVER_HIER = """\
 # generated yosys driver (hierarchical bottom-up)
 {cell_blackbox_line}
 {pre_read_section}
+{liberty_lib_section}
 {macro_lib_section}
 # Read pre-synthesized sub-module netlists
 {read_netlist_lines}
@@ -537,6 +538,15 @@ def _pre_read_section(cfg: dict) -> str:
         for f in cfg['pre_read_files']:
             lines.append(f'read_verilog -sv {f}')
     return '\n'.join(lines)
+
+
+def _liberty_lib_section(cfg: dict) -> str:
+    """Load the standard cell library as a Yosys -lib (blackbox) library.
+    Used by the hierarchical driver before reading pre-synthesised
+    sub-module netlists, which reference std-cell names directly. Without
+    this, Yosys aborts on the first std-cell reference."""
+    lib = cfg.get('lib_typ')
+    return f'read_liberty -lib {lib}' if lib else ''
 
 
 def _macro_lib_yosys_section(cfg: dict, corner: str = 'typ') -> str:
@@ -742,6 +752,7 @@ def run_recipe(args: dict) -> RecipeResult:
     bb_line = f'# Read cell blackbox stubs\nread_verilog {bb}' if bb else ''
     yscript.write_text(template.format(
         pre_read_section=_pre_read_section(cfg),
+        liberty_lib_section=_liberty_lib_section(cfg),
         macro_lib_section=_macro_lib_yosys_section(cfg, 'typ'),
         keep_hierarchy_section=_keep_hierarchy_section(cfg),
         read_verilog_lines=_read_verilog_lines(rtl_files, cfg.get('verilog_defines')),
