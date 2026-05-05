@@ -102,6 +102,27 @@ class Config:
     lib_fast: Optional[str] = None
     lib_slow: Optional[str] = None
 
+    # --- hard macro liberty (optional) ---
+    # Additional liberty files for hard macros (SRAM, PLL, ADC, …) loaded
+    # alongside the standard cell library so Yosys recognizes the macro as
+    # a blackbox cell and OpenSTA gets real timing arcs for paths through
+    # the macro. Two YAML formats are accepted:
+    #
+    #   Format A (flat list, same file used in every STA corner):
+    #     macro_libs:
+    #       - path/to/sram_tt.lib
+    #       - path/to/pll_tt.lib
+    #
+    #   Format B (per-corner, lets the slow corner use the ss model etc.):
+    #     macro_libs:
+    #       typ:  [path/to/sram_tt.lib]
+    #       fast: [path/to/sram_ff.lib]
+    #       slow: [path/to/sram_ss.lib]
+    #
+    # Internally always normalised to a dict with keys typ/fast/slow, each
+    # mapping to a list[str]. Yosys uses `typ`; STA uses each corner.
+    macro_libs: dict = field(default_factory=dict)
+
     # --- hierarchical synthesis (optional) ---
     cell_blackbox: Optional[str] = None
 
@@ -179,6 +200,9 @@ class Config:
                     matches = sorted(glob.glob(pat))
                     expanded.extend(matches if matches else [pat])
                 data[key] = expanded
+        # Normalise macro_libs to {typ:[..], fast:[..], slow:[..]}
+        if 'macro_libs' in data:
+            data['macro_libs'] = _normalise_macro_libs(data['macro_libs'])
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
     def merge_env(self) -> None:
@@ -207,6 +231,11 @@ class Config:
                 errs.append(f"lib_fast missing or not set (required for STA)")
             if not self.lib_slow or not Path(self.lib_slow).exists():
                 errs.append(f"lib_slow missing or not set (required for STA)")
+        # macro_libs: every file must exist
+        for corner in ('typ', 'fast', 'slow'):
+            for f in self.macro_libs.get(corner, []):
+                if not Path(f).exists():
+                    errs.append(f"macro_libs[{corner}] missing: {f}")
         if self.run_gls:
             if not self.tb_files:
                 errs.append("tb_files required for GLS")
@@ -221,6 +250,39 @@ class Config:
 
     def effective_parallel(self) -> int:
         return self.parallel if self.parallel > 0 else (os.cpu_count() or 1)
+
+
+def _normalise_macro_libs(raw) -> dict:
+    """Accept either a flat list or a per-corner dict; return a dict with
+    keys typ/fast/slow each mapping to a list[str] of resolved paths.
+
+    A flat list is mirrored to all three corners. A dict may omit corners;
+    missing corners fall back to `typ` if present, else stay empty.
+    """
+    def _expand(items):
+        out = []
+        for p in items:
+            p = os.path.expandvars(os.path.expanduser(p))
+            hits = sorted(glob.glob(p))
+            out.extend(hits if hits else [p])
+        return out
+
+    if raw is None:
+        return {}
+    if isinstance(raw, list):
+        flat = _expand(raw)
+        return {'typ': list(flat), 'fast': list(flat), 'slow': list(flat)}
+    if isinstance(raw, dict):
+        out = {k: _expand(raw.get(k, [])) for k in ('typ', 'fast', 'slow')}
+        # Fill missing corners from typ
+        if out['typ']:
+            if not out['fast']:
+                out['fast'] = list(out['typ'])
+            if not out['slow']:
+                out['slow'] = list(out['typ'])
+        return out
+    raise ValueError(f"macro_libs must be a list or a dict, got {type(raw).__name__}")
+
 
 # ============================================================================
 # Module discovery
@@ -342,6 +404,7 @@ class RecipeResult:
 YOSYS_DRIVER_STD = """\
 # generated yosys driver (standard combinational-ABC flow)
 {pre_read_section}
+{macro_lib_section}
 {read_verilog_lines}
 hierarchy -top {module} {param_flags}
 {keep_hierarchy_section}
@@ -365,6 +428,7 @@ write_verilog -noattr -noexpr {out_netlist}
 YOSYS_DRIVER_SEQ = """\
 # generated yosys driver (experimental: ABC sequential mode)
 {pre_read_section}
+{macro_lib_section}
 {read_verilog_lines}
 hierarchy -top {module} {param_flags}
 {keep_hierarchy_section}
@@ -388,6 +452,7 @@ YOSYS_DRIVER_HIER = """\
 # generated yosys driver (hierarchical bottom-up)
 {cell_blackbox_line}
 {pre_read_section}
+{macro_lib_section}
 # Read pre-synthesized sub-module netlists
 {read_netlist_lines}
 # Read top-level RTL (parameters in netlists are already resolved)
@@ -408,6 +473,7 @@ write_verilog -noattr -noexpr {out_netlist}
 YOSYS_DRIVER_DEPTH = """\
 # generated yosys driver (depth-only analysis)
 {pre_read_section}
+{macro_lib_section}
 {read_verilog_lines}
 hierarchy -top {module} {param_flags}
 {keep_hierarchy_section}
@@ -421,6 +487,7 @@ ltp
 YOSYS_DRIVER_DUAL_CLK = """\
 # generated yosys driver (dual-clock domain-partitioned ABC)
 {pre_read_section}
+{macro_lib_section}
 {read_verilog_lines}
 hierarchy -top {module} {param_flags}
 {keep_hierarchy_section}
@@ -470,6 +537,40 @@ def _pre_read_section(cfg: dict) -> str:
         for f in cfg['pre_read_files']:
             lines.append(f'read_verilog -sv {f}')
     return '\n'.join(lines)
+
+
+def _macro_lib_yosys_section(cfg: dict, corner: str = 'typ') -> str:
+    """Emit `read_liberty -lib <macro.lib>` lines for Yosys so each macro
+    is recognised as a blackbox cell during synth/dfflibmap. Empty if no
+    macro liberty is configured."""
+    libs = (cfg.get('macro_libs') or {}).get(corner, [])
+    if not libs:
+        return ''
+    return '\n'.join(f'read_liberty -lib {f}' for f in libs)
+
+
+def _macro_lib_sta_section(cfg, corner: str) -> str:
+    """Emit `read_liberty -corner <corner> <macro.lib>` lines for OpenSTA
+    so timing arcs through hard macros are honoured at this corner."""
+    macro_libs = getattr(cfg, 'macro_libs', None) or (
+        cfg.get('macro_libs') if isinstance(cfg, dict) else {}
+    ) or {}
+    libs = macro_libs.get(corner, [])
+    if not libs:
+        return ''
+    return '\n'.join(f'read_liberty -corner {corner} {f}' for f in libs)
+
+
+def _macro_lib_quick_sta_section(cfg) -> str:
+    """Emit `read_liberty <macro.lib>` lines for the single-corner quick STA
+    used in winner selection. Uses the typ corner."""
+    macro_libs = getattr(cfg, 'macro_libs', None) or (
+        cfg.get('macro_libs') if isinstance(cfg, dict) else {}
+    ) or {}
+    libs = macro_libs.get('typ', [])
+    if not libs:
+        return ''
+    return '\n'.join(f'read_liberty {f}' for f in libs)
 
 def _keep_hierarchy_section(cfg: dict) -> str:
     lines = []
@@ -537,6 +638,7 @@ def run_depth(args: dict) -> DepthResult:
 
     yscript.write_text(YOSYS_DRIVER_DEPTH.format(
         pre_read_section=_pre_read_section(cfg),
+        macro_lib_section=_macro_lib_yosys_section(cfg, 'typ'),
         keep_hierarchy_section=_keep_hierarchy_section(cfg),
         read_verilog_lines=_read_verilog_lines(cfg['rtl_files'], cfg.get('verilog_defines')),
         module=module,
@@ -640,6 +742,7 @@ def run_recipe(args: dict) -> RecipeResult:
     bb_line = f'# Read cell blackbox stubs\nread_verilog {bb}' if bb else ''
     yscript.write_text(template.format(
         pre_read_section=_pre_read_section(cfg),
+        macro_lib_section=_macro_lib_yosys_section(cfg, 'typ'),
         keep_hierarchy_section=_keep_hierarchy_section(cfg),
         read_verilog_lines=_read_verilog_lines(rtl_files, cfg.get('verilog_defines')),
         read_netlist_lines=_read_netlist_lines(dep_netlists),
@@ -706,6 +809,7 @@ def run_recipe(args: dict) -> RecipeResult:
 
 QSTA_TCL = """\
 read_liberty {liberty}
+{macro_lib_section}
 read_verilog {netlist}
 link_design {module}
 create_clock -name clk -period {period_ns} [get_ports {clock_port}]
@@ -724,7 +828,8 @@ set_clock_groups -asynchronous -group clk -group clk2
 
 def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
                period_ps: int, clock_port: str, log_path: Path,
-               clock_port_2: str = None, period_ps_2: int = None) -> tuple[Optional[float], Optional[float]]:
+               clock_port_2: str = None, period_ps_2: int = None,
+               macro_libs: list = None) -> tuple[Optional[float], Optional[float]]:
     """Run a quick STA at typical corner. Returns (wns_ns, tns_ns) or (None, None)."""
     period_ns = period_ps / 1000.0
     if clock_port_2 and period_ps_2:
@@ -734,11 +839,15 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
         )
     else:
         clk2 = ''
+    macro_lib_section = ''
+    if macro_libs:
+        macro_lib_section = '\n'.join(f'read_liberty {f}' for f in macro_libs)
     with tempfile.NamedTemporaryFile('w', suffix='.tcl', delete=False) as f:
         f.write(QSTA_TCL.format(
             liberty=liberty, netlist=netlist, module=module,
             period_ns=period_ns, clock_port=clock_port,
             clock_2_section=clk2,
+            macro_lib_section=macro_lib_section,
         ))
         tcl = f.name
     try:
@@ -893,6 +1002,9 @@ define_corners fast typical slow
 read_liberty -corner fast {lib_fast}
 read_liberty -corner typical {lib_typ}
 read_liberty -corner slow {lib_slow}
+{macro_libs_fast}
+{macro_libs_typ}
+{macro_libs_slow}
 read_verilog {netlist}
 link_design {module}
 create_clock -name clk -period {period_ns} [get_ports {clock_port}]
@@ -978,8 +1090,19 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         )
     else:
         clk2 = ''
+    # Per-corner macro liberty lines. OpenSTA corner is named "typical" in
+    # the Tcl while our internal key is "typ"; map at emission.
+    def _ml_lines(internal_key: str, sta_corner: str) -> str:
+        libs = cfg.macro_libs.get(internal_key, []) if cfg.macro_libs else []
+        if not libs:
+            return ''
+        return '\n'.join(f'read_liberty -corner {sta_corner} {f}' for f in libs)
+
     tcl.write_text(CORNER_STA_TCL.format(
         lib_fast=cfg.lib_fast, lib_typ=cfg.lib_typ, lib_slow=cfg.lib_slow,
+        macro_libs_fast=_ml_lines('fast', 'fast'),
+        macro_libs_typ =_ml_lines('typ',  'typical'),
+        macro_libs_slow=_ml_lines('slow', 'slow'),
         netlist=netlist, module=module,
         period_ns=period_ns, clock_port=cfg.clock_port,
         clock_2_section=clk2,
@@ -1252,6 +1375,10 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--lib', help='typical-corner liberty (synthesis)')
     p.add_argument('--lib-fast', help='fast-corner liberty (STA hold)')
     p.add_argument('--lib-slow', help='slow-corner liberty (STA setup)')
+    p.add_argument('--macro-lib', action='append', dest='macro_lib',
+                   help='hard-macro liberty (e.g. SRAM .lib). Repeatable. '
+                        'Applied to all STA corners (typ/fast/slow). '
+                        'Use the YAML `macro_libs:` dict for per-corner files.')
     p.add_argument('--top', help='top module name')
     p.add_argument('--period-ps', type=int, help='target clock period in ps')
     p.add_argument('--clock-port', help='clock port name (default: clk)')
@@ -1312,6 +1439,9 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
             hits = sorted(glob.glob(os.path.expanduser(pat)))
             expanded.extend(hits if hits else [pat])
         cfg.rtl_files = expanded
+    # macro libs from CLI: flat list, mirrored to every corner
+    if getattr(args, 'macro_lib', None):
+        cfg.macro_libs = _normalise_macro_libs(args.macro_lib)
 
 def discover_recipes(recipes_dir: Path, requested: list[str]) -> list[tuple[str, Path]]:
     available = {p.stem: p for p in recipes_dir.glob('*.abc')}
@@ -1475,11 +1605,13 @@ def main() -> int:
                 continue
             qsta_log = work / module / f'{r.recipe}.qsta.log'
             qsta_lib = cfg.lib_slow if cfg.lib_slow else cfg.lib_typ
+            qsta_corner = 'slow' if cfg.lib_slow else 'typ'
             wns, tns = _quick_sta(
                 cfg.opensta, qsta_lib, r.netlist, module,
                 cfg.period_ps, cfg.clock_port, qsta_log,
                 clock_port_2=cfg.clock_port_2,
                 period_ps_2=cfg.period_ps_2,
+                macro_libs=cfg.macro_libs.get(qsta_corner, []) if cfg.macro_libs else [],
             )
             cands.append(Candidate(
                 recipe=r.recipe, netlist=r.netlist,

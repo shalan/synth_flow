@@ -90,6 +90,7 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--lib FILE` | Typical-corner liberty |
 | `--lib-fast FILE` | Fast-corner liberty |
 | `--lib-slow FILE` | Slow-corner liberty |
+| `--macro-lib FILE` | Hard-macro liberty (SRAM, PLL, …). Repeatable. Applied to all STA corners. Use the YAML `macro_libs:` dict for per-corner files. |
 | `--top NAME` | Top module name |
 | `--period-ps N` | Clock period in picoseconds |
 | `--clock-port NAME` | Clock port name (default: `clk`) |
@@ -107,6 +108,55 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--list-modules` | Print auto-detected modules and exit |
 | `--work-dir DIR` | Working directory (default: `work`) |
 | `--results-dir DIR` | Results directory (default: `results`) |
+
+## Hard macros (SRAM, PLL, …)
+
+Designs with hard macros need their `.lib` files loaded alongside the
+standard cell library so that:
+
+1. Yosys recognises the macro name as a real cell instead of an unknown
+   blackbox (no orphan instances after `dfflibmap`).
+2. OpenSTA gets timing arcs for paths that touch the macro — without
+   this the SRAM input setup, clock-to-Q, and output transition are all
+   silently zero, producing optimistic WNS and missed setup violations.
+
+Configure via the `macro_libs` YAML field. Two formats:
+
+```yaml
+# Format A — flat list, used in every STA corner.
+macro_libs:
+  - $PDK_ROOT/sram_macro/lib/sram_tt.lib
+  - $PDK_ROOT/pll/lib/pll_tt.lib
+```
+
+```yaml
+# Format B — per-corner. Each corner reads its matching PVT model.
+# Missing corners fall back to `typ`.
+macro_libs:
+  typ:  [path/to/sram_tt_180V_25C.lib]
+  fast: [path/to/sram_ff_195V_n40C.lib]
+  slow: [path/to/sram_ss_160V_100C.lib]
+```
+
+What happens under the hood:
+
+- **Yosys synth (all driver flavors):** emits `read_liberty -lib <file>`
+  for each `typ` macro lib before `read_verilog`. The `-lib` flag tells
+  Yosys these are blackbox cells; their internals are not synthesised.
+- **OpenSTA winner-selection STA (`_quick_sta`):** emits
+  `read_liberty <file>` for each `slow`-corner macro lib (or `typ` if no
+  slow lib is set) so WNS ranking is timing-accurate.
+- **OpenSTA multi-corner STA:** emits `read_liberty -corner fast|typical|slow <file>`
+  for each macro lib in each corner.
+
+CLI:
+
+```bash
+python3 synth_flow.py --config synth.yaml \
+        --macro-lib path/sram_tt.lib --macro-lib path/pll_tt.lib
+```
+
+CLI form is flat-list only; use the YAML dict for per-corner control.
 
 ## Recipes
 
