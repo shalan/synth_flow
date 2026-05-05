@@ -17,6 +17,29 @@ top: my_soc
 lib_fast: $PDK_ROOT/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_n40C_1v95.lib
 lib_slow: sky130/hd_120_ss.lib
 
+# ===== Hard-macro liberty (optional) =====
+# Additional liberty files for hard macros (SRAM, PLL, ADC, …) read
+# alongside the standard cell library. Yosys recognises the macro as a
+# blackbox cell during synth/dfflibmap; OpenSTA gets real timing arcs
+# for paths that touch the macro.
+#
+# Two formats are accepted.
+#
+# (A) Flat list — same liberty used in every STA corner. Fine for a
+#     macro that ships only a typ-corner .lib:
+# macro_libs:
+#   - $PDK_ROOT/sram_macro/lib/sram_tt.lib
+#
+# (B) Per-corner dict — each corner gets the matching PVT model.
+#     Missing corners fall back to `typ`.
+# macro_libs:
+#   typ:  [$PDK_ROOT/sram_macro/lib/sram_tt_180V_25C.lib]
+#   fast: [$PDK_ROOT/sram_macro/lib/sram_ff_195V_n40C.lib]
+#   slow: [$PDK_ROOT/sram_macro/lib/sram_ss_160V_100C.lib]
+#
+# Synthesis always uses the `typ` entry. The CLI flag --macro-lib (repeat
+# for multiple files) sets the flat-list form from the command line.
+
 # ===== GLS (omit + set run_gls:false to skip) =====
 tb_files:
   - tb/tb_my_soc.v
