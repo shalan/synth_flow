@@ -102,6 +102,20 @@ class Config:
     lib_fast: Optional[str] = None
     lib_slow: Optional[str] = None
 
+    # --- separate synthesis library (optional) ---
+    # If set, Yosys / dfflibmap / ABC / stat will use this liberty instead
+    # of lib_typ. Useful when you want to synthesise at the SS corner for
+    # robustness while still reporting STA at multiple corners (lib_typ
+    # = TT, lib_slow = SS, lib_synth = SS).
+    lib_synth: Optional[str] = None
+
+    # --- user-supplied SDC (optional) ---
+    # Path to an SDC file sourced by OpenSTA after create_clock and before
+    # set_input_delay/set_output_delay. The SDC is the right place for
+    # false_path / set_clock_groups / set_multicycle_path / set_max_delay
+    # exceptions, and per-port input/output delay overrides.
+    sdc: Optional[str] = None
+
     # --- hard macro liberty (optional) ---
     # Additional liberty files for hard macros (SRAM, PLL, ADC, …) loaded
     # alongside the standard cell library so Yosys recognizes the macro as
@@ -188,8 +202,9 @@ class Config:
             raise RuntimeError("PyYAML not installed; install with: pip install pyyaml")
         data = yaml.safe_load(path.read_text()) or {}
         # Expand ~ and env vars in path-like fields
-        for key in ('lib_typ', 'lib_fast', 'lib_slow', 'primitives_dir',
-                    'work_dir', 'results_dir', 'recipes_dir', 'cell_blackbox'):
+        for key in ('lib_typ', 'lib_fast', 'lib_slow', 'lib_synth', 'sdc',
+                    'primitives_dir', 'work_dir', 'results_dir', 'recipes_dir',
+                    'cell_blackbox'):
             if key in data and isinstance(data[key], str):
                 data[key] = os.path.expandvars(os.path.expanduser(data[key]))
         # Glob expansion for file lists
@@ -550,7 +565,7 @@ def _liberty_lib_section(cfg: dict) -> str:
     Used by the hierarchical driver before reading pre-synthesised
     sub-module netlists, which reference std-cell names directly. Without
     this, Yosys aborts on the first std-cell reference."""
-    lib = cfg.get('lib_typ')
+    lib = cfg.get('lib_synth') or cfg.get('lib_typ')
     return f'read_liberty -lib {lib}' if lib else ''
 
 
@@ -574,6 +589,16 @@ def _macro_lib_sta_section(cfg, corner: str) -> str:
     if not libs:
         return ''
     return '\n'.join(f'read_liberty -corner {corner} {f}' for f in libs)
+
+
+def _user_sdc_section(cfg) -> str:
+    """Source a user-provided SDC file after create_clock has run. The SDC
+    is where false_path / clock_groups / multicycle / per-port I/O delay
+    exceptions belong. Empty if no `sdc:` is configured."""
+    sdc = getattr(cfg, 'sdc', None) or (
+        cfg.get('sdc') if isinstance(cfg, dict) else None
+    )
+    return f'source {sdc}' if sdc else ''
 
 
 def _macro_lib_quick_sta_section(cfg) -> str:
@@ -765,7 +790,7 @@ def run_recipe(args: dict) -> RecipeResult:
         cell_blackbox=bb,
         cell_blackbox_line=bb_line,
         module=module,
-        liberty=cfg['lib_typ'],
+        liberty=cfg.get('lib_synth') or cfg['lib_typ'],
         constr=constr,
         recipe=recipe_path,
         period_ps=cfg['period_ps'],
@@ -1031,6 +1056,8 @@ set_input_delay  -clock clk [expr {{{period_ns} * 0.2}}] [all_inputs]
 set_output_delay -clock clk [expr {{{period_ns} * 0.2}}] [all_outputs]
 catch {{ set_false_path -from [get_ports hresetn] }}
 catch {{ set_false_path -from [get_ports rst_n] }}
+# User-supplied exceptions (false_path, multicycle, set_clock_groups, ...)
+{user_sdc_section}
 
 # --- setup at slow ---
 puts ">>> SETUP_SLOW_BEGIN"
@@ -1119,6 +1146,7 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         macro_libs_fast=_ml_lines('fast', 'fast'),
         macro_libs_typ =_ml_lines('typ',  'typical'),
         macro_libs_slow=_ml_lines('slow', 'slow'),
+        user_sdc_section=_user_sdc_section(cfg),
         netlist=netlist, module=module,
         period_ns=period_ns, clock_port=cfg.clock_port,
         clock_2_section=clk2,
