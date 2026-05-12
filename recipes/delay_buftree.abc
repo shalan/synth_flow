@@ -1,0 +1,19 @@
+# delay_buftree — fanout-limited buffer tree (no dnsize collapse).
+#
+# Most other delay/area recipes end with `buffer; topo; upsize {D}; dnsize
+# {D};`. On designs with a handful of very-high-fanout nets (e.g. the
+# SRAM write-enable in a flat MCU netlist) the trailing `dnsize {D}` is
+# greedy enough to collapse the buffer tree back to a single `clkbuf_1`
+# driving 40+ sinks, producing 10+ ns of wire-load tail at SS corner
+# even though the underlying logic is clean.
+#
+# This recipe drops `dnsize` and runs two `buffer -N 16; topo; upsize {D};`
+# iterations after the GIA mapper. Cost: ~+8% cells, ~+20% area on large
+# designs. Benefit on the nc_mcu nc_lib reference: SS setup WNS improved
+# from -24.6 ns to -8.8 ns (~+60% Fmax at SS).
+
+strash; ifraig; scorr; dc2; dc2; dretime; strash;
+balance; rewrite; refactor; balance; rewrite;
+&get -n; &st; &dch; &nf {D}; &put;
+buffer -N 16; topo; upsize {D}; buffer -N 16; topo; upsize {D};
+stime

@@ -170,6 +170,7 @@ subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
 |--------|-------|----------|---------|
 | `delay_retime` | Delay | Retiming + double-pass GIA mapping | 1.3× |
 | `delay_triple` | Delay | Triple-pass remap with sizing | 1.4× |
+| `delay_buftree` | Delay | Two-pass fanout-bounded buffer tree (no dnsize) — wins when a few nets have huge fanout (e.g. SRAM write-enable in flat MCUs); ~+20% area | 1.2× |
 | `delay_choice_deep` | Delay | Choice-driven, high conflict limit | 1.0× |
 | `delay_iter_heavy` | Delay | Quadruple-pass explicit unrolling | 1.7× |
 | `balanced_resyn` | Balanced | Inlined resyn2 + single GIA map | 1.0× |
