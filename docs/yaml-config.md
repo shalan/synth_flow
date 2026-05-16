@@ -52,7 +52,7 @@ primitives_dir: $PDK/sky130_fd_sc_hd/verilog
 | Field | Type | Description |
 |---|---|---|
 | `rtl_files` | list of strings | Verilog/SystemVerilog source files. Globs allowed. Must be non-empty and all paths must resolve. |
-| `lib_typ` | string | Path to typical-corner liberty file. Used for synthesis ABC mapping and quick-STA winner selection. |
+| `lib_typ` | string | Path to typical-corner liberty file. Final fallback for synthesis when neither `lib_synth` nor `lib_slow` is set. |
 | `top` | string | Name of the project top module. Used as the GLS netlist filename and report title. Does not need to be in `modules` (auto-detection still scans it). |
 
 ### Required for STA
@@ -63,7 +63,13 @@ These are required only when `run_sta: true` (the default). Set
 | Field | Type | Description |
 |---|---|---|
 | `lib_fast` | string | Fast-corner liberty (lowest delay, used for hold checks). |
-| `lib_slow` | string | Slow-corner liberty (highest delay, used for setup checks). |
+| `lib_slow` | string | Slow-corner liberty (highest delay, used for setup checks). **Also the default synthesis library** — Yosys/ABC see SS-corner cell delays during mapping. Override with `lib_synth`. |
+
+### Optional synthesis-library override
+
+| Field | Type | Description |
+|---|---|---|
+| `lib_synth` | string | Explicit liberty for synthesis (Yosys / dfflibmap / ABC / stat). Bypasses the default `lib_slow → lib_typ` resolution. Use `lib_synth: <lib_typ_path>` to fall back to the older optimistic-synth-at-TT flow. |
 
 ### Required for GLS
 

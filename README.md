@@ -11,7 +11,7 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
 
 - **Recipe sweep** — runs multiple ABC optimization recipes in parallel,
   picks the best result per module using the slow-corner (SS) for WNS ranking
-- **14 built-in recipes** — delay, balanced, area, and specialty strategies
+- **15 built-in recipes** — delay, balanced, area, and specialty strategies
   (all verified on ABC 1.01+)
 - **5 optimization objectives** — `delay`, `area`, `fastest`, `pareto`,
   `balanced`
@@ -160,7 +160,7 @@ CLI form is flat-list only; use the YAML dict for per-corner control.
 
 ## Recipes
 
-14 ABC scripts in `recipes/*.abc`, all compatible with ABC 1.01+. Each recipe
+15 ABC scripts in `recipes/*.abc`, all compatible with ABC 1.01+. Each recipe
 uses only commands confirmed available: `strash`, `ifraig`, `scorr`, `dc2`,
 `dretime`, `balance`, `rewrite`, `refactor`, `dch`, `map`, `mfs`, and the GIA
 subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
@@ -180,6 +180,7 @@ subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
 | `area_lut6` | Area | Heavy scorr + dc2 + dretime + rewriting | 1.2× |
 | `area_max` | Area | Double everything + retiming + double map | 1.3× |
 | `lazy_man` | Heavy | PULP-style: 8 opt + 8 opt+map iterations | 1.0× |
+| `lms` | Heavy | PULP LMS port: opt iters + placement-aware buffering | 1.1× |
 | `orfs_speed` | Reference | ORFS/OpenLane DELAY 0 port | 0.8× |
 | `yosys_default` | Reference | Yosys default flow baseline | 0.8× |
 

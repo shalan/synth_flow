@@ -77,6 +77,7 @@ RECIPE_PRIORITY = [
     'area_lut6',
     'area_max',
     'lazy_man',
+    'lms',
     'orfs_speed',
     'yosys_default',
 ]
@@ -103,10 +104,14 @@ class Config:
     lib_slow: Optional[str] = None
 
     # --- separate synthesis library (optional) ---
-    # If set, Yosys / dfflibmap / ABC / stat will use this liberty instead
-    # of lib_typ. Useful when you want to synthesise at the SS corner for
-    # robustness while still reporting STA at multiple corners (lib_typ
-    # = TT, lib_slow = SS, lib_synth = SS).
+    # Resolution order for what Yosys / dfflibmap / ABC / stat use:
+    #   1. lib_synth  (explicit override)
+    #   2. lib_slow   (SS — default for robust worst-case synthesis)
+    #   3. lib_typ    (TT — final fallback when no SS lib was provided)
+    # Synthesising against SS by default makes ABC see worst-case cell
+    # delays during mapping, so optimisation effort matches the corner
+    # the design is signed off against. Set lib_synth: <path> to override
+    # (e.g. lib_synth: hd_120_tt.lib for the older optimistic-synth flow).
     lib_synth: Optional[str] = None
 
     # --- user-supplied SDC (optional) ---
@@ -551,10 +556,19 @@ def _read_verilog_lines(rtl_files: list[str], verilog_defines: list[str] = None,
         lines.append(cmd)
     return '\n'.join(lines)
 
+def _synth_lib(cfg) -> str:
+    """Pick the liberty used for synthesis (Yosys / dfflibmap / ABC / stat).
+    Order: explicit lib_synth > lib_slow (SS, robust default) > lib_typ.
+    Accepts both Config dataclasses (attribute access) and plain dicts."""
+    if hasattr(cfg, 'lib_typ'):
+        return (cfg.lib_synth or cfg.lib_slow or cfg.lib_typ)
+    return cfg.get('lib_synth') or cfg.get('lib_slow') or cfg.get('lib_typ')
+
+
 def _pre_read_section(cfg: dict) -> str:
     lines = []
     if cfg.get('pre_read_files'):
-        lines.append(f'read_liberty -lib {cfg["lib_typ"]}')
+        lines.append(f'read_liberty -lib {_synth_lib(cfg)}')
         for f in cfg['pre_read_files']:
             lines.append(f'read_verilog -sv {f}')
     return '\n'.join(lines)
@@ -565,7 +579,7 @@ def _liberty_lib_section(cfg: dict) -> str:
     Used by the hierarchical driver before reading pre-synthesised
     sub-module netlists, which reference std-cell names directly. Without
     this, Yosys aborts on the first std-cell reference."""
-    lib = cfg.get('lib_synth') or cfg.get('lib_typ')
+    lib = _synth_lib(cfg)
     return f'read_liberty -lib {lib}' if lib else ''
 
 
@@ -790,7 +804,7 @@ def run_recipe(args: dict) -> RecipeResult:
         cell_blackbox=bb,
         cell_blackbox_line=bb_line,
         module=module,
-        liberty=cfg.get('lib_synth') or cfg['lib_typ'],
+        liberty=_synth_lib(cfg),
         constr=constr,
         recipe=recipe_path,
         period_ps=cfg['period_ps'],
@@ -807,7 +821,7 @@ def run_recipe(args: dict) -> RecipeResult:
     try:
         with open(log, 'w') as logf:
             r = subprocess.run(
-                [cfg['yosys'], '-q', '-s', str(yscript)],
+                [cfg['yosys'], '-s', str(yscript)],
                 stdout=logf, stderr=subprocess.STDOUT,
                 timeout=3600,
             )
@@ -855,6 +869,9 @@ read_verilog {netlist}
 link_design {module}
 create_clock -name clk -period {period_ns} [get_ports {clock_port}]
 {clock_2_section}
+catch {{ set_false_path -from [get_ports hresetn] }}
+catch {{ set_false_path -from [get_ports rst_n] }}
+{user_sdc_section}
 set_input_delay  -clock clk [expr {{{period_ns} * 0.2}}] [all_inputs]
 set_output_delay -clock clk [expr {{{period_ns} * 0.2}}] [all_outputs]
 report_wns
@@ -870,7 +887,8 @@ set_clock_groups -asynchronous -group clk -group clk2
 def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
                period_ps: int, clock_port: str, log_path: Path,
                clock_port_2: str = None, period_ps_2: int = None,
-               macro_libs: list = None) -> tuple[Optional[float], Optional[float]]:
+               macro_libs: list = None,
+               sdc: Optional[str] = None) -> tuple[Optional[float], Optional[float]]:
     """Run a quick STA at typical corner. Returns (wns_ns, tns_ns) or (None, None)."""
     period_ns = period_ps / 1000.0
     if clock_port_2 and period_ps_2:
@@ -889,6 +907,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
             period_ns=period_ns, clock_port=clock_port,
             clock_2_section=clk2,
             macro_lib_section=macro_lib_section,
+            user_sdc_section=(f'source {sdc}' if sdc else ''),
         ))
         tcl = f.name
     try:
@@ -1656,6 +1675,7 @@ def main() -> int:
                 clock_port_2=cfg.clock_port_2,
                 period_ps_2=cfg.period_ps_2,
                 macro_libs=cfg.macro_libs.get(qsta_corner, []) if cfg.macro_libs else [],
+                sdc=cfg.sdc,
             )
             cands.append(Candidate(
                 recipe=r.recipe, netlist=r.netlist,

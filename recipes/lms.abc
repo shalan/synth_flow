@@ -1,0 +1,56 @@
+# lms — PULP LMS-inspired ABC optimization (adapted for sky130)
+# Source: nc_lib/scripts/syn_ppa/abc_lms.script
+# Heavier than lazy_man: prints stats between iterations and uses
+# placement-aware fanout-bounded buffering at the end.
+
+print_stats
+
+# strash can fix some yosys-conversion edge-cases — run first.
+strash
+
+# Record library for delay optimization (commented — AIG not bundled).
+# rec_start3 /path/to/lazy_man_synth_library.aig
+
+# Main optimization iteration (LMS paper: &if -y -K 6; &syn2; &if -K 6).
+alias &opt_iter "&st; &if -y -K 6; &syn2; &if -K 6; &st; &b"
+
+# Mapping iteration (delay-driven tech mapping).
+alias &map_iter "&st; &nf {D}; &ps"
+
+# Initial high-effort delay optimization (no mapping yet).
+&get -n
+echo "Initial network:"
+&ps
+echo "High effort delay optimization..."
+&opt_iter; &opt_iter; &ps;
+&opt_iter; &opt_iter; &ps;
+&opt_iter; &opt_iter; &ps;
+&opt_iter; &opt_iter; &ps;
+&put
+
+# Opt+mapping iterations (LMS converges in ~5-10 rounds).
+&get -n
+echo "Opt+mapping Iterations..."
+&opt_iter; &map_iter;
+&opt_iter; &map_iter;
+&opt_iter; &map_iter;
+&opt_iter; &map_iter;
+&opt_iter; &map_iter;
+&opt_iter; &map_iter;
+&opt_iter; &map_iter;
+&opt_iter; &map_iter;
+&put
+
+topo
+stime
+
+echo "buffering for delay and fanout..."
+buffer -p -N 6
+echo "resizing cells..."
+upsize {D}
+dnsize {D}
+upsize {D}
+dnsize {D}
+
+echo "Final timing:"
+stime
