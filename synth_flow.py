@@ -427,7 +427,8 @@ YOSYS_DRIVER_STD = """\
 {pre_read_section}
 {macro_lib_section}
 {read_verilog_lines}
-hierarchy -top {module} {param_flags}
+{param_flags}
+hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc
 write_verilog -noattr {syn_netlist}
@@ -451,7 +452,8 @@ YOSYS_DRIVER_SEQ = """\
 {pre_read_section}
 {macro_lib_section}
 {read_verilog_lines}
-hierarchy -top {module} {param_flags}
+{param_flags}
+hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc
 write_verilog -noattr {syn_netlist}
@@ -479,7 +481,8 @@ YOSYS_DRIVER_HIER = """\
 {read_netlist_lines}
 # Read top-level RTL (parameters in netlists are already resolved)
 {read_verilog_lines}
-hierarchy -top {module} {param_flags}
+{param_flags}
+hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc
 write_verilog -noattr {syn_netlist}
@@ -497,7 +500,8 @@ YOSYS_DRIVER_DEPTH = """\
 {pre_read_section}
 {macro_lib_section}
 {read_verilog_lines}
-hierarchy -top {module} {param_flags}
+{param_flags}
+hierarchy -top {module}
 {keep_hierarchy_section}
 proc; flatten; opt_expr; opt_clean
 opt
@@ -511,7 +515,8 @@ YOSYS_DRIVER_DUAL_CLK = """\
 {pre_read_section}
 {macro_lib_section}
 {read_verilog_lines}
-hierarchy -top {module} {param_flags}
+{param_flags}
+hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc
 write_verilog -noattr {syn_netlist}
@@ -633,13 +638,16 @@ def _keep_hierarchy_section(cfg: dict) -> str:
     return '\n'.join(lines)
 
 def _param_flags(params: dict, module: str) -> str:
-    """Generate Yosys -chparam flags for the given module."""
+    """Generate Yosys `chparam -set` commands for the given module.
+    Emits one command per parameter. We use the standalone `chparam`
+    command rather than `hierarchy -chparam` because the latter cannot
+    decode Verilog string literals (e.g. SBOX_IMPL="LOGIC")."""
     if not params or module not in params:
         return ''
-    flags = []
-    for k, v in params[module].items():
-        flags.append(f'-chparam {k} {v}')
-    return ' '.join(flags)
+    return '\n'.join(
+        f'chparam -set {k} {v} {module}'
+        for k, v in params[module].items()
+    )
 
 def _read_netlist_lines(netlists: dict[str, str]) -> str:
     """Generate Yosys read_verilog -overwrite for pre-synthesized netlists."""
