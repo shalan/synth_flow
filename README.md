@@ -234,6 +234,7 @@ synth_flow/
   recipes/            # 14 ABC recipe scripts
   sky130/             # Curated Sky130 HD PDK subset
     hd_120_tt.lib     # Stripped TT liberty (synthesis)
+    hd_120e_*.lib     # ss/tt/ff + edfxtp/edfxbp enable flops restored
     abc_constr.txt    # ABC constraints
     sky130_hd-clean.v # Behavioral Verilog (GLS)
   docs/
@@ -241,6 +242,17 @@ synth_flow/
   examples/
     synth.yaml        # Example configuration
 ```
+
+## Standard-cell libraries
+
+`sky130/hd_120_{ss,tt,ff}.lib` are stripped corner subsets. The companion
+`sky130/hd_120e_{ss,tt,ff}.lib` add the `edfxtp`/`edfxbp` **enable flip-flops**
+restored from the full Sky130 HD PDK at the matching corners (`ss_100C_1v60` /
+`tt_025C_1v80` / `ff_n40C_1v95`). Without an enable flop, a clock-enable register
+(`if (en) q <= d`) maps to a plain DFF **plus a feedback mux in the data path**;
+with `hd_120e_*` it maps to a single `edfxtp` (enable on the CE pin) — smaller and
+faster for enabled / register-heavy datapaths. Point `lib_typ` / `lib_slow` /
+`lib_fast` at the `hd_120e_*` files to use them.
 
 ## Requirements
 
