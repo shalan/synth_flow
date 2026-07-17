@@ -267,6 +267,13 @@ class Config:
             errs.append(f"objective must be delay|area|fastest|pareto|balanced, got {self.objective}")
         if self.parallel < 0:
             errs.append("parallel must be >= 0")
+        if self.run_sta:
+            # opensta may be a path or a PATH binary (or a docker wrapper script)
+            if not (shutil.which(self.opensta) or Path(self.opensta).is_file()):
+                errs.append(
+                    f"opensta not found: {self.opensta!r} "
+                    f"(set opensta: in YAML or OPENSTA=/path/to/sta)"
+                )
         return errs
 
     def effective_parallel(self) -> int:
@@ -371,7 +378,13 @@ class ModuleScanner:
 
         deps: dict[str, set[str]] = {m: set() for m in defined}
         mod_re = re.compile(r'^\s*module\s+(\w+)', re.M)
-        inst_re = re.compile(r'\b(\w+)\s*#\s*\(')
+        # Match both parameterized (`leaf #(.W(1)) u0 (`) and plain
+        # (`leaf u0 (`) instantiations. Previously only `#(` forms were
+        # detected, which broke hierarchical bottom-up for most RTL.
+        inst_re = re.compile(
+            r'\b(\w+)\s+(?:#\s*\([^;]*?\)\s*)?(\w+)\s*\(',
+            re.S,
+        )
         for chunk in re.split(r'endmodule', clean):
             mm = mod_re.search(chunk)
             if not mm:
@@ -870,26 +883,42 @@ def run_recipe(args: dict) -> RecipeResult:
 # Quick STA for winner selection
 # ============================================================================
 
+# Common async-reset port names (APB / AHB / generic). Applied via catch so
+# designs that lack a given port are unaffected. PRESETn is the nc_lib
+# convention and was previously missing (WNS dominated by reset recovery).
+_ASYNC_RESET_FALSE_PATHS = """\
+catch {{ set_false_path -from [get_ports PRESETn] }}
+catch {{ set_false_path -from [get_ports PRESETN] }}
+catch {{ set_false_path -from [get_ports aresetn] }}
+catch {{ set_false_path -from [get_ports HRESETn] }}
+catch {{ set_false_path -from [get_ports hresetn] }}
+catch {{ set_false_path -from [get_ports rst_n] }}
+catch {{ set_false_path -from [get_ports resetn] }}
+"""
+
 QSTA_TCL = """\
 read_liberty {liberty}
 {macro_lib_section}
 read_verilog {netlist}
 link_design {module}
-create_clock -name clk -period {period_ns} [get_ports {clock_port}]
+# Clock object name matches the port (common SDC style). User SDC may redefine
+# the same name; default I/O delays use get_clocks with that name.
+create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]
 {clock_2_section}
-catch {{ set_false_path -from [get_ports hresetn] }}
-catch {{ set_false_path -from [get_ports rst_n] }}
+""" + _ASYNC_RESET_FALSE_PATHS + """\
 {user_sdc_section}
-set_input_delay  -clock clk [expr {{{period_ns} * 0.2}}] [all_inputs]
-set_output_delay -clock clk [expr {{{period_ns} * 0.2}}] [all_outputs]
-report_wns
+# OpenSTA: all_inputs -no_clocks excludes registered clocks (no remove_from_collection)
+set_input_delay  -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_inputs -no_clocks]
+set_output_delay -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_outputs]
+# Prefer report_worst_slack: report_wns can print 0.00 even when paths have slack.
+report_worst_slack -max
 report_tns
 exit
 """
 
 QSTA_CLK2 = """\
-create_clock -name clk2 -period {period_2_ns} [get_ports {clock_port_2}]
-set_clock_groups -asynchronous -group clk -group clk2
+create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]
+set_clock_groups -asynchronous -group {clock_port} -group {clock_port_2}
 """
 
 def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
@@ -902,6 +931,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
     if clock_port_2 and period_ps_2:
         clk2 = QSTA_CLK2.format(
             period_2_ns=period_ps_2 / 1000.0,
+            clock_port=clock_port,
             clock_port_2=clock_port_2,
         )
     else:
@@ -927,10 +957,17 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
         Path(log_path).write_text(out)
         wns = tns = None
         for line in out.splitlines():
-            m = re.search(r'wns\s+([-0-9.eE+]+)', line, re.I)
+            # report_worst_slack -max → "worst slack <n>"
+            m = re.search(r'^worst slack\s+([-0-9.eE+]+)', line, re.I)
             if m and wns is None:
                 wns = float(m.group(1))
-            m = re.search(r'tns\s+([-0-9.eE+]+)', line, re.I)
+                continue
+            # Fallback: report_wns → "wns <n>"
+            m = re.search(r'^wns\s+([-0-9.eE+]+)', line, re.I)
+            if m and wns is None:
+                wns = float(m.group(1))
+                continue
+            m = re.search(r'(?:^tns|total negative slack)\s+([-0-9.eE+]+)', line, re.I)
             if m and tns is None:
                 tns = float(m.group(1))
         return wns, tns
@@ -1075,16 +1112,17 @@ read_liberty -corner slow {lib_slow}
 {macro_libs_slow}
 read_verilog {netlist}
 link_design {module}
-create_clock -name clk -period {period_ns} [get_ports {clock_port}]
+create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]
 {clock_2_section}
-set_driving_cell -lib_cell {driving_cell} [all_inputs]
-set_load {load_pf} [all_outputs]
-set_input_delay  -clock clk [expr {{{period_ns} * 0.2}}] [all_inputs]
-set_output_delay -clock clk [expr {{{period_ns} * 0.2}}] [all_outputs]
-catch {{ set_false_path -from [get_ports hresetn] }}
-catch {{ set_false_path -from [get_ports rst_n] }}
+""" + _ASYNC_RESET_FALSE_PATHS + """\
 # User-supplied exceptions (false_path, multicycle, set_clock_groups, ...)
+# Applied before default I/O delay so SDC can fully own constraints if desired.
 {user_sdc_section}
+# OpenSTA has no remove_from_collection; use all_inputs -no_clocks.
+set_driving_cell -lib_cell {driving_cell} [all_inputs -no_clocks]
+set_load {load_pf} [all_outputs]
+set_input_delay  -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_inputs -no_clocks]
+set_output_delay -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_outputs]
 
 # --- setup at slow ---
 puts ">>> SETUP_SLOW_BEGIN"
@@ -1119,12 +1157,12 @@ exit
 """
 
 CORNER_STA_CLK2 = """\
-create_clock -name clk2 -period {period_2_ns} [get_ports {clock_port_2}]
-set_clock_uncertainty -setup 0.25 [get_clocks clk]
-set_clock_uncertainty -setup 0.25 [get_clocks clk2]
-set_clock_uncertainty -hold 0.10 [get_clocks clk]
-set_clock_uncertainty -hold 0.10 [get_clocks clk2]
-set_clock_groups -asynchronous -group [get_clocks clk] -group [get_clocks clk2]
+create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]
+set_clock_uncertainty -setup 0.25 [get_clocks {clock_port}]
+set_clock_uncertainty -setup 0.25 [get_clocks {clock_port_2}]
+set_clock_uncertainty -hold 0.10 [get_clocks {clock_port}]
+set_clock_uncertainty -hold 0.10 [get_clocks {clock_port_2}]
+set_clock_groups -asynchronous -group [get_clocks {clock_port}] -group [get_clocks {clock_port_2}]
 """
 
 @dataclass
@@ -1156,6 +1194,7 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
     if cfg.clock_port_2 and cfg.period_ps_2:
         clk2 = CORNER_STA_CLK2.format(
             period_2_ns=cfg.period_ps_2 / 1000.0,
+            clock_port=cfg.clock_port,
             clock_port_2=cfg.clock_port_2,
         )
     else:
@@ -1386,9 +1425,12 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
             status = '⚠️ setup'
         if corner and corner.wns_hold_fast is not None and corner.wns_hold_fast < 0:
             status = '⚠️ hold' if status == '✅' else '⚠️ both'
+        wns_cell = (f'{win.wns_ns:.3f}' if win and win.wns_ns is not None else '—')
+        cells_s = f'{win.cells}' if win else '—'
+        area_s = f'{win.area:.1f}' if win else '—'
         md.append(
             f'| `{m}` | `{sel.winner}` | '
-            f'{win.wns_ns:.3f} | {win.cells} | {win.area:.1f} | '
+            f'{wns_cell} | {cells_s} | {area_s} | '
             f'{setup_slow} | {setup_typ} | {hold_fast} | {hold_typ} | {status} |'
         )
     md.append('')
@@ -1698,12 +1740,14 @@ def main() -> int:
 
         if sel.winner:
             win = next(c for c in cands if c.recipe == sel.winner)
+            wns_s = (f'{win.wns_ns:.3f}ns' if win.wns_ns is not None else 'n/a')
             log.info(f"[winner] {module}: {sel.winner}  "
-                     f"WNS={win.wns_ns:.3f}ns  area={win.area:.1f}  ({sel.rationale})")
+                     f"WNS={wns_s}  area={win.area:.1f}  ({sel.rationale})")
             mod_results = results / module
             mod_results.mkdir(parents=True, exist_ok=True)
-            shutil.copy(win.netlist, mod_results / 'winner.v')
-            winner_netlists[module] = str(mod_results / 'winner.v')
+            if win.netlist:
+                shutil.copy(win.netlist, mod_results / 'winner.v')
+                winner_netlists[module] = str(mod_results / 'winner.v')
             (mod_results / 'selection.json').write_text(
                 json.dumps({
                     'winner': sel.winner,
