@@ -958,7 +958,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
         wns = tns = None
         for line in out.splitlines():
             # report_worst_slack -max → "worst slack <n>"
-            m = re.search(r'^worst slack\s+([-0-9.eE+]+)', line, re.I)
+            m = re.search(r'^worst slack(?:\s+(?:max|min))?\s+([-0-9.eE+]+)', line, re.I)
             if m and wns is None:
                 wns = float(m.group(1))
                 continue
@@ -1240,7 +1240,7 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         hold_typ_sec = section('>>> HOLD_TYP_BEGIN', '>>> HOLD_TYP_END')
 
         def grab_wns(text):
-            m = re.search(r'^worst slack\s+([-0-9.eE+]+)', text, re.M)
+            m = re.search(r'^worst slack(?:\s+(?:max|min))?\s+([-0-9.eE+]+)', text, re.M)
             return float(m.group(1)) if m else None
 
         def grab_tns(text):
