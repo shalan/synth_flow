@@ -55,6 +55,45 @@ with tempfile.TemporaryDirectory() as td:
     tops = ModuleScanner.scan([str(td/'a.v')])
     check('single-module file', tops == ['solo'], f'got={tops}')
 
+# Hierarchical dependencies: plain + parameterized instantiations
+with tempfile.TemporaryDirectory() as td:
+    td = Path(td)
+    (td / 'a.v').write_text('''
+module leaf (input wire a, output wire y);
+  assign y = ~a;
+endmodule
+module mid (input wire a, output wire y);
+  leaf u0 (.a(a), .y(y));
+endmodule
+module top (input wire a, output wire y);
+  mid m0 (.a(a), .y(y));
+endmodule
+''')
+    deps = ModuleScanner.dependencies([str(td / 'a.v')])
+    check('hier deps: plain inst mid→leaf',
+          deps.get('mid') == {'leaf'}, f'got={deps}')
+    check('hier deps: plain inst top→mid',
+          deps.get('top') == {'mid'}, f'got={deps}')
+
+with tempfile.TemporaryDirectory() as td:
+    td = Path(td)
+    (td / 'b.v').write_text('''
+module leaf (input wire a, output wire y);
+  assign y = ~a;
+endmodule
+module mid (input wire a, output wire y);
+  leaf #(.W(1)) u0 (.a(a), .y(y));
+endmodule
+module top (input wire a, output wire y);
+  mid #() m0 (.a(a), .y(y));
+endmodule
+''')
+    deps = ModuleScanner.dependencies([str(td / 'b.v')])
+    check('hier deps: param inst mid→leaf',
+          deps.get('mid') == {'leaf'}, f'got={deps}')
+    check('hier deps: param inst top→mid',
+          deps.get('top') == {'mid'}, f'got={deps}')
+
 # Comment stripping
 with tempfile.TemporaryDirectory() as td:
     td = Path(td)

@@ -32,13 +32,13 @@ falling back to ABC-internal estimates or asking the user to install it.
 
 Async resets (`PRESETn`, `hresetn`, `rst_n`) create spurious recovery
 violations on the reset distribution buffer (often -100+ ns at SS).
-`synth_flow` auto-applies `set_false_path` on `hresetn` and `rst_n`, but
-**not** on `PRESETn`. For APB peripherals, point `cfg.sdc` at an SDC
-file containing at minimum:
+`synth_flow` auto-applies `set_false_path` (via `catch`) on a common set:
 
-```tcl
-set_false_path -from [get_ports PRESETn]
-```
+`PRESETn`, `PRESETN`, `aresetn`, `HRESETn`, `hresetn`, `rst_n`, `resetn`.
+
+Still prefer an IP SDC for design-specific async inputs (UART RX, GPIO,
+etc.). Default I/O delay no longer applies to clock ports or those
+async-reset names.
 
 Without this, every recipe's WNS is dominated by the reset path and
 winner ranking becomes meaningless.
