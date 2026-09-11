@@ -197,6 +197,13 @@ class Config:
     # OpenSTA-guided drive-strength sizing of each module's winner (resize.py).
     # Sizing only, function preserved; measured on the bench: TNS down on every
     # failing design for <1 % area on most (docs/architecture.md §2.7).
+    # Yosys front-end options (Phase 5 sweep dimension). Tokens:
+    #   booth                 synth -booth (Booth-encoded $mul)
+    #   adder=<arch>          synth -extra-map +/choices/<arch>.v
+    #                         (kogge-stone | han-carlson | sklansky; default ripple/Brent-Kung)
+    #   noshare               synth -noshare
+    #   hieropt               synth -hieropt
+    yosys_opts: list[str] = field(default_factory=list)
     resize_winner: bool = False
     resize_iters: int = 25
     resize_wns_tol_ps: int = 150       # WNS regression tolerated for a TNS gain ('tns' policy)
@@ -481,7 +488,7 @@ YOSYS_DRIVER_STD = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
 dfflibmap -liberty {liberty}
 abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
@@ -503,7 +510,7 @@ YOSYS_DRIVER_GROUPS = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
 dfflibmap -liberty {liberty}
 {group_section}
@@ -528,7 +535,7 @@ YOSYS_DRIVER_SEQ = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
 # ABC with -dff: generic flops are part of the optimization
 abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
@@ -557,7 +564,7 @@ YOSYS_DRIVER_HIER = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
 dfflibmap -liberty {liberty}
 abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
@@ -591,7 +598,7 @@ YOSYS_DRIVER_DUAL_CLK = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
 
 # Partition into clock domains
@@ -618,6 +625,28 @@ opt_clean -purge
 tee -o {stats_json} stat -liberty {liberty} -json
 write_verilog -noattr -noexpr {out_netlist}
 """
+
+_ADDER_ARCHS = ('kogge-stone', 'han-carlson', 'sklansky')
+
+
+def _synth_flags(yosys_opts) -> str:
+    """Translate cfg.yosys_opts tokens into `synth` flags."""
+    flags: list[str] = []
+    for tok in yosys_opts or []:
+        t = str(tok).strip().lower()
+        if t == 'booth':
+            flags.append('-booth')
+        elif t.startswith('adder='):
+            arch = t.split('=', 1)[1]
+            if arch not in _ADDER_ARCHS:
+                raise ValueError(f"yosys_opts: unknown adder architecture '{arch}' (choose from {_ADDER_ARCHS})")
+            flags.append(f'-extra-map +/choices/{arch}.v')
+        elif t in ('noshare', 'hieropt', 'nofsm', 'noalumacc'):
+            flags.append(f'-{t}')
+        elif t:
+            raise ValueError(f"yosys_opts: unknown token '{tok}'")
+    return ' '.join(flags)
+
 
 def _read_verilog_lines(rtl_files: list[str], verilog_defines: list[str] = None,
                         verilog_includes: list[str] = None) -> str:
@@ -1138,6 +1167,7 @@ def run_recipe(args: dict) -> RecipeResult:
         out_netlist=netlist,
         group_section=(_group_section(groups_spec, _synth_lib(cfg), constr, recipe_path, str(groups_txt))
                        if groups_spec else ''),
+        synth_flags=_synth_flags(cfg.get('yosys_opts')),
     ))
 
     start = time.time()
@@ -1690,6 +1720,9 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
             'recipes': cfg.recipes,
             'modules': list(selections.keys()),
             'abc_sequential': cfg.abc_sequential,
+            'yosys_opts': cfg.yosys_opts,
+            'abc_target': cfg.abc_target,
+            'resize_winner': cfg.resize_winner,
         },
         'modules': {
             m: {
@@ -2006,6 +2039,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--path-groups', action='store_true', help='EXPERIMENTAL: per-path-group ABC delay targets (see docs/architecture.md §2.5)')
     p.add_argument('--abc-target', help="ABC -D: 'none' (default, min-delay mapping), 'period', 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
+    p.add_argument('--yosys-opts', nargs='+', help='front-end options: booth, adder=kogge-stone|han-carlson|sklansky, noshare, hieropt')
     p.add_argument('--objective', choices=['delay', 'area', 'fastest', 'pareto', 'balanced'])
     p.add_argument('--modules', nargs='+', help='modules to synthesize')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep')
@@ -2056,6 +2090,8 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.abc_target = args.abc_target
     if getattr(args, 'resize', False):
         cfg.resize_winner = True
+    if getattr(args, 'yosys_opts', None):
+        cfg.yosys_opts = list(args.yosys_opts)
     if args.abc_sequential:
         cfg.abc_sequential = True
     if args.hierarchical:
@@ -2107,6 +2143,13 @@ def main() -> int:
     if errs:
         for e in errs:
             log.error(f"config error: {e}")
+        return EXIT_CONFIG_ERR
+
+    try:
+        if cfg.yosys_opts:
+            log.info(f"yosys front-end flags: {_synth_flags(cfg.yosys_opts)}")
+    except ValueError as e:
+        log.error(str(e))
         return EXIT_CONFIG_ERR
 
     # ----- SDC: constraints for synthesis (OpenSTA sources the file itself) -----

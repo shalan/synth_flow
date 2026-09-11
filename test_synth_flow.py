@@ -12,7 +12,7 @@ from synth_flow import (
     select_winner, _pareto_front, _stability_idx,
     discover_recipes, RecipeResult,
     DEFAULT_RECIPES_DIR, _strip_signed_decls, apply_sdc_overrides,
-    build_path_groups, resolve_abc_target, _group_section, _materialize_recipe,
+    build_path_groups, resolve_abc_target, _group_section, _materialize_recipe, _synth_flags,
 )
 
 failures = []
@@ -144,6 +144,12 @@ check('reg2reg target = T - t_cq - t_su - unc', d == int(10000 - lt.t_cq_ps - lt
 cfg.abc_target = 'period'; check("'period' target", resolve_abc_target(cfg)[0] == 10000)
 cfg.abc_target = 'none'; check("'none' target (default) -> 0", resolve_abc_target(cfg)[0] == 0 and Config().abc_target == 'none')
 check('resize is opt-in', Config().resize_winner is False and Config().resize_final == 'tns')
+check('synth flags: booth + adder', _synth_flags(['booth', 'adder=kogge-stone']) == '-booth -extra-map +/choices/kogge-stone.v')
+check('synth flags: empty', _synth_flags([]) == '' and _synth_flags(None) == '')
+try:
+    _synth_flags(['adder=ripple']); check('unknown adder rejected', False)
+except ValueError:
+    check('unknown adder rejected', True)
 from resize import drive_families, next_size, retype, instance_types
 fam = drive_families(str(LIB_SS))
 check('drive families parsed', fam.get('sky130_fd_sc_hd__nand2') == [1, 2, 4, 8], str(fam.get('sky130_fd_sc_hd__nand2')))
