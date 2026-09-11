@@ -24,3 +24,7 @@ Thumbs.db
 work/
 results/
 tmp/
+
+# Benchmark scratch
+bench/external/
+bench/work/

@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# synth_flow benchmark constraints — zx16_core_ahb
+set T 10.0
+create_clock -name HCLK -period $T [get_ports HCLK]
+set_clock_uncertainty -setup 0.25 [get_clocks HCLK]
+set_clock_uncertainty -hold  0.10 [get_clocks HCLK]
+set_false_path -from [get_ports HRESETn]
+set_input_delay  -clock HCLK -max [expr 0.25 * $T] [all_inputs -no_clocks]
+set_input_delay  -clock HCLK -min 0.0 [all_inputs -no_clocks]
+set_output_delay -clock HCLK -max [expr 0.25 * $T] [all_outputs]
+set_output_delay -clock HCLK -min 0.0 [all_outputs]
+set_driving_cell -lib_cell sky130_fd_sc_hd__inv_1 [all_inputs -no_clocks]
+set_load 0.033 [all_outputs]

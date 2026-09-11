@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: Apache-2.0
+# synth_flow benchmark manifest. Paths are relative to bench/.
+# External designs live under bench/external/ (run ./fetch_external.sh first).
+#
+# Fields: name, category, top, files (globs), includes (optional), clock,
+# period_ps, clock_2/period_ps_2 (optional), sdc (optional), external (optional
+# repo name), defines (optional), notes.
+designs:
+  # ---------------- datapath ----------------
+  - name: alu32
+    category: datapath
+    top: alu32
+    files: [designs/alu32/alu32.v]
+    clock: clk
+    period_ps: 6000
+    sdc: designs/alu32/constraints.sdc
+    notes: 32-bit ALU, shifter, popcount, clz; registered result.
+  - name: mul16_pipe
+    category: datapath
+    top: mul16_pipe
+    files: [designs/mul16_pipe/mul16_pipe.v]
+    clock: clk
+    period_ps: 6000
+    sdc: designs/mul16_pipe/constraints.sdc
+    notes: 16x16 signed multiplier between register stages. Booth sweep target.
+  - name: mul32_mac
+    category: datapath
+    top: mul32_mac
+    files: [designs/mul32_mac/mul32_mac.v]
+    clock: clk
+    period_ps: 10000
+    sdc: designs/mul32_mac/constraints.sdc
+    notes: 32x32 MAC with 64-bit accumulator. Largest single-cone datapath.
+  - name: fir8
+    category: dsp
+    top: fir8
+    files: [designs/fir8/fir8.v]
+    clock: clk
+    period_ps: 8000
+    sdc: designs/fir8/constraints.sdc
+    notes: 8-tap FIR with constant coefficients; constant-multiplier optimization.
+  # ---------------- logic / crypto ----------------
+  - name: aes_round
+    category: crypto
+    top: aes_round
+    files: [designs/aes_round/aes_round.v]
+    clock: clk
+    period_ps: 8000
+    sdc: designs/aes_round/constraints.sdc
+    notes: One AES-128 round; 16 S-box lookups plus MixColumns. Wide XOR logic.
+  - name: sha256_core
+    category: crypto
+    top: sha256_core
+    files: [designs/sha256_core/sha256_core.v]
+    clock: clk
+    period_ps: 8000
+    sdc: designs/sha256_core/constraints.sdc
+    notes: SHA-256 round engine; adder chains and rotates, K ROM.
+  - name: crc32_8
+    category: logic
+    top: crc32_8
+    files: [designs/crc32_8/crc32_8.v]
+    clock: clk
+    period_ps: 4000
+    sdc: designs/crc32_8/constraints.sdc
+    notes: Parallel CRC-32, 8 bits per cycle. Pure XOR network.
+  - name: rr_arbiter16
+    category: logic
+    top: rr_arbiter16
+    files: [designs/rr_arbiter16/rr_arbiter16.v]
+    clock: clk
+    period_ps: 4000
+    sdc: designs/rr_arbiter16/constraints.sdc
+    notes: Round-robin arbiter; rotate, priority encode, rotate back.
+  # ---------------- control ----------------
+  - name: uart
+    category: control
+    top: uart
+    files: [designs/uart/uart.v]
+    clock: clk
+    period_ps: 4000
+    sdc: designs/uart/constraints.sdc
+    notes: 8N1 UART TX/RX with 16x oversampling.
+  - name: spi_master
+    category: control
+    top: spi_master
+    files: [designs/spi_master/spi_master.v]
+    clock: clk
+    period_ps: 4000
+    sdc: designs/spi_master/constraints.sdc
+    notes: SPI master FSM, CPOL/CPHA, variable frame length.
+  - name: apb_timer
+    category: peripheral
+    top: apb_timer
+    files: [designs/apb_timer/apb_timer.v]
+    clock: PCLK
+    period_ps: 5000
+    sdc: designs/apb_timer/constraints.sdc
+    notes: APB3 timer with prescaler and IRQ; exercises PRESETn async-reset false path.
+  - name: fifo_sync
+    category: memory
+    top: fifo_sync
+    files: [designs/fifo_sync/fifo_sync.v]
+    clock: clk
+    period_ps: 4000
+    sdc: designs/fifo_sync/constraints.sdc
+    notes: 16x32 flop-based FIFO; memory-to-register mapping and read mux.
+  # ---------------- external (shalan/*) ----------------
+  - name: zx16_core_ahb
+    category: cpu
+    external: zx16
+    top: zx16_core_ahb
+    files: [external/zx16/rtl/zx16_core.v, external/zx16/rtl/zx16_alu.v, external/zx16/rtl/ahb/zx16_core_ahb.v]
+    clock: HCLK
+    period_ps: 10000
+    sdc: designs/zx16_core_ahb/constraints.sdc
+    notes: ZX16 16-bit CPU core with AHB-Lite instruction and data ports.
+  - name: zxip
+    category: soc_ip
+    external: zxip
+    top: zxip_top
+    files: [external/zxip/rtl/*.v]
+    includes: [external/zxip/rtl]
+    clock: hclk
+    period_ps: 10000
+    clock_2: pclk
+    period_ps_2: 10000
+    sdc: external/zxip/sta/zxip_top.sdc
+    notes: XIP flash controller with cache, AHB slave, APB registers. Dual clock; repo SDC.
+  - name: ms_psram_ahb
+    category: soc_ip
+    external: ms_psram_ahb
+    top: ms_psram_ahb
+    files: [external/ms_psram_ahb/rtl/*.v]
+    clock: hclk
+    period_ps: 8000
+    sdc: external/ms_psram_ahb/syn/psram.sdc
+    notes: PSRAM AHB controller with cache and CSRs. Repo SDC with I/O delays.
+  - name: uart_apb_sys
+    category: soc_ip
+    external: uart_apb_master
+    top: uart_apb_sys
+    files: [external/uart_apb_master/rtl/*.v]
+    clock: clk
+    period_ps: 10000
+    sdc: designs/uart_apb_sys/constraints.sdc
+    notes: UART-driven APB master with command parser and splitter.
