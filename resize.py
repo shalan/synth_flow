@@ -62,6 +62,15 @@ def drive_families(liberty: str) -> dict[str, list[int]]:
     return {k: sorted(v) for k, v in fam.items()}
 
 
+def prev_size(cell: str, fam: dict[str, list[int]]) -> Optional[str]:
+    dm = _DRIVE_RE.match(cell)
+    if not dm:
+        return None
+    base, n = dm.group(1), int(dm.group(2))
+    smaller = [s for s in fam.get(base, []) if s < n]
+    return f'{base}_{smaller[-1]}' if smaller else None
+
+
 def next_size(cell: str, fam: dict[str, list[int]]) -> Optional[str]:
     dm = _DRIVE_RE.match(cell)
     if not dm:
@@ -230,7 +239,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            out_dir: Path, *, sdc=None, iters=10, margin_ps=0, yosys='yosys', opensta='sta',
            driving_cell='sky130_fd_sc_hd__inv_2', load_ff=17.65, unc_setup_ps=250, unc_hold_ps=100,
            wire_load_model='auto', io_delay_frac=0.2, clock_port_2=None, period_ps_2=None,
-           per_path=1, max_paths=200, wns_tol=0.15, wns_repair_iters=8, final='tns', log=print) -> dict:
+           per_path=1, max_paths=200, wns_tol=0.15, wns_repair_iters=8, final='tns',
+           recover_area=False, recover_rounds=6, log=print) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     constraints = sf._sta_constraints(
         clock_port=clock_port, period_ns=period_ps / 1000.0, clock_port_2=clock_port_2,
@@ -341,13 +351,63 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             types.update(moves)
             total_moves.update(moves)
             states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+    # Phase 3 (optional): area recovery. Downsize cells that are not on any
+    # path within `guard` of the margin, in batches bisected on rejection.
+    # Accepted only while WNS stays >= min(start WNS, margin) and TNS does not
+    # drop, so timing never pays for area.
+    if recover_area:
+        guard = 0.3
+        floor_wns = min(sta.wns, margin)
+        tried3: set[str] = set()
+        for rnd in range(recover_rounds):
+            near = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, f'near{rnd}', k=2000,
+                           slack_max=margin + guard)
+            protected = {st.inst for pth in near.paths for st in pth.stages}
+            cands = {i: prev_size(t, fam) for i, t in types.items()
+                     if i not in protected and i not in tried3 and prev_size(t, fam)}
+            if not cands:
+                log('area recovery: no downsizing candidates; done')
+                break
+            batch = sorted(cands)
+            done_round = False
+            while batch and it < iters + recover_rounds * 8:
+                it += 1
+                sub = {i: cands[i] for i in batch}
+                new, new_text, sta_new = evaluate(sub, f'it{it}')
+                ok = (sta_new.ok and sta_new.wns >= floor_wns - 1e-6 and sta_new.tns >= sta.tns - 1e-6)
+                steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
+                                  wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
+                log(f'it{it} (area): {len(sub)} downsizes -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
+                    f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f} {"ACCEPT" if ok else "reject"}')
+                if ok:
+                    cur, text, sta = new, new_text, sta_new
+                    types.update(sub)
+                    total_moves.update(sub)
+                    states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+                    done_round = True
+                    break
+                if len(batch) == 1:
+                    tried3.add(batch[0])
+                    break
+                batch = batch[:len(batch) // 2]
+            if not done_round and len(cands) <= 1:
+                break
+
     # Final state: best TNS among accepted states that did not regress WNS;
     # if every improvement moved the worst path, best TNS overall (reported).
+    # States that meet timing (WNS >= margin) are always eligible: area
+    # recovery legitimately spends slack above the margin.
     if final == 'wns':
-        pool = [st for st in states if st[1] >= start_wns - 1e-6] or states
-    else:  # 'tns': any accepted state (each already within wns_tol of its predecessor)
-        pool = [st for st in states if st[1] >= start_wns - wns_tol_start - 1e-6] or states
-    best = max(pool, key=lambda st: (st[2], st[1]))
+        pool = [st for st in states if st[1] >= margin - 1e-6 or st[1] >= start_wns - 1e-6] or states
+    else:  # 'tns': bounded WNS regression for a TNS gain
+        pool = [st for st in states if st[1] >= margin - 1e-6 or st[1] >= start_wns - wns_tol_start - 1e-6] or states
+    # Rank: TNS first; then, among states that meet timing (WNS >= margin), the
+    # latest state (area recovery only ever removes area); otherwise best WNS.
+    def rank(i):
+        _, w, t, _ = pool[i]
+        met = w >= margin - 1e-6
+        return (round(t, 4), 1 if met else 0, i if met else round(w, 4))
+    best = pool[max(range(len(pool)), key=rank)]
     wns_regressed = best[1] < start_wns - 1e-6
     if best[0] != cur:
         cur = best[0]
@@ -379,6 +439,8 @@ def main() -> int:
     ap.add_argument('--margin-ps', type=int, default=0); ap.add_argument('--per-path', type=int, default=1)
     ap.add_argument('--max-paths', type=int, default=200)
     ap.add_argument('--wns-tol', type=float, default=0.15, help='ns of WNS regression tolerated when TNS improves')
+    ap.add_argument('--recover-area', action='store_true', help='after timing, downsize off-critical cells while WNS holds')
+    ap.add_argument('--recover-rounds', type=int, default=6)
     ap.add_argument('--final', choices=['tns', 'wns'], default='tns',
                     help="final state: best TNS within --wns-tol of the start WNS (tns), or never regress WNS (wns)")
     ap.add_argument('--driving-cell', default='sky130_fd_sc_hd__inv_2'); ap.add_argument('--load-ff', type=float, default=17.65)
@@ -391,7 +453,8 @@ def main() -> int:
                  sdc=a.sdc, iters=a.iters, margin_ps=a.margin_ps, yosys=a.yosys, opensta=a.opensta,
                  driving_cell=a.driving_cell, load_ff=a.load_ff, wire_load_model=a.wire_load_model,
                  clock_port_2=a.clock_port_2, period_ps_2=a.period_ps_2, per_path=a.per_path,
-                 max_paths=a.max_paths, wns_tol=a.wns_tol, final=a.final, log=log)
+                 max_paths=a.max_paths, wns_tol=a.wns_tol, final=a.final,
+                 recover_area=a.recover_area, recover_rounds=a.recover_rounds, log=log)
     if a.json:
         print(json.dumps(res, indent=2))
     return 0
