@@ -256,9 +256,9 @@ def lec(yosys: str, liberty: str, gold: Path, gate: Path, top: str, out_dir: Pat
     ys.write_text(LEC_YS.format(liberty=liberty, gold=gold, gate=gate, top=top))
     log = out_dir / f'it{it}.lec.log'
     with open(log, 'w') as lf:
-        r = subprocess.run([yosys, '-q', '-s', str(ys)], stdout=lf, stderr=subprocess.STDOUT, timeout=3600)
-    text = log.read_text(errors='ignore')
-    return (r.returncode == 0 and 'Equivalence successfully proven' in text), str(log)
+        r = subprocess.run([yosys, '-s', str(ys)], stdout=lf, stderr=subprocess.STDOUT, timeout=3600)
+    # equiv_status -assert makes yosys exit non-zero on any unproven cell.
+    return r.returncode == 0, str(log)
 
 
 # --------------------------------------------------------------------------
