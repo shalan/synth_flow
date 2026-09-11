@@ -142,6 +142,7 @@ cfg = Config(period_ps=10000, clock_port='clk', clock_uncertainty_setup_ps=250, 
 d, note = resolve_abc_target(cfg)
 check('reg2reg target = T - t_cq - t_su - unc', d == int(10000 - lt.t_cq_ps - lt.t_su_ps - 250), f'{d} ({note})')
 cfg.abc_target = 'period'; check("'period' target", resolve_abc_target(cfg)[0] == 10000)
+cfg.abc_target = 'none'; check("'none' target (default) -> 0", resolve_abc_target(cfg)[0] == 0 and Config().abc_target == 'none')
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
 check('floor applies when budget is negative', resolve_abc_target(cfg)[0] == 250)
@@ -187,6 +188,8 @@ with tempfile.TemporaryDirectory() as td:
     else:
         check('all recipes materialize with -D substituted', True)
     check('recipes without {D} are copied unchanged', _materialize_recipe(DEFAULT_RECIPES_DIR / 'yosys_default.abc', 7, Path(td)).read_text().count('-D 7') == (DEFAULT_RECIPES_DIR / 'yosys_default.abc').read_text().count('{D}'))
+    nod = _materialize_recipe(DEFAULT_RECIPES_DIR / 'orfs_speed.abc', 0, Path(td)).read_text()
+    check('d_ps=0 strips {D} entirely', '{D}' not in nod and '-D' not in nod and '&nf' in nod, nod)
 
 print('\n[1] ModuleScanner — top-level detection')
 # =========================================================================

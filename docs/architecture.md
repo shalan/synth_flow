@@ -196,6 +196,39 @@ Rules that follow, applied to Phases 3–4:
 `path_groups` stays in the code as an opt-in experiment so the result can
 be reproduced (`bench.py --set path_groups=true`).
 
+### 2.6 `{D}` never reached ABC, and that was the best setting
+
+Yosys substitutes `{D}` only in inline scripts (`-script +...`). With
+`-script <file>` the file is sourced by ABC untouched, so every recipe here
+ran `&nf {D}; upsize {D}; dnsize {D}` with the literal token, which ABC
+ignores: minimum-delay mapping, no target. The flow now materializes each
+recipe with `{D}` substituted (or removed) so the target is explicit.
+
+Measured on the bench (16 designs × 16 recipes, OpenSTA at SS, SDCs), each
+target versus no target:
+
+| `abc_target` | mean ΔWNS | rows worse / better (of 256) | mean Δarea | designs meeting timing |
+|---|---|---|---|---|
+| `period` (= T) | −0.59 ns | 190 / 1 | −3.3 % | 6 → 3 |
+| `reg2reg` (T − t_cq − t_su − unc) | −0.22 ns | 72 / 2 | −1.0 % | 6 → 6 |
+| `100000` (very loose) | −1.08 ns | 229 / 1 | −3.9 % | 6 → 3 |
+
+Whole-design un-map/re-map of apb_timer with `orfs_speed` tells the same
+story in one design: no `-D` gives WNS −0.038 ns; `-D 5000` (the period)
+−1.07 ns; `-D 20000` −1.57 ns. ABC's `-D` lets `&nf`, `upsize` and
+`dnsize` relax against ABC's own delay model, which has no wire load and a
+single boundary driver; OpenSTA with the liberty wire-load model does not
+see that slack. The area returned for the lost slack is small.
+
+Consequences:
+
+- `abc_target` defaults to `none`. `period`, `reg2reg` and explicit values
+  remain available for experiments.
+- The per-design `-D` search (Phase 3) is not worth building on this axis:
+  the response is monotone bad. Area recovery has to come from recipe
+  choice and mapper-side knobs (`&nf -R`, area recipes) validated by STA.
+- Any cone or group re-map inside the flow must also run without `-D`.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

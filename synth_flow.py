@@ -185,10 +185,15 @@ class Config:
     # combinational logic into in->reg / reg->out / in->out / relaxed groups
     # and give each its own ABC delay target derived from the SDC and the
     # liberty flop timing. reg->reg logic gets T - t_cq - t_su - uncertainty.
-    # ABC delay target (-D). 'period' = full clock period (ORFS convention),
-    # 'reg2reg' = T - t_cq - t_su - setup uncertainty from the synthesis
-    # liberty (what a reg->reg path really has), or an explicit integer in ps.
-    abc_target: str = 'period'
+    # ABC delay target (-D) substituted for {D} in recipes.
+    #   'none'    (default) no -D: ABC maps for minimum delay in its own model.
+    #             Measured best on the bench: any -D lets ABC relax/downsize
+    #             against a model without wire load, and OpenSTA disagrees
+    #             (period: mean WNS -0.59 ns for -3 % area; see docs/architecture.md §2.6).
+    #   'period'  full clock period (ORFS convention)
+    #   'reg2reg' T - t_cq - t_su - setup uncertainty from the synthesis liberty
+    #   '<ps>'    explicit integer
+    abc_target: str = 'none'
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -849,7 +854,9 @@ def resolve_abc_target(cfg: Config) -> tuple[int, str]:
     """Return (D_ps, note) for ABC's -D from cfg.abc_target."""
     T = cfg.period_ps
     mode = str(cfg.abc_target).strip().lower()
-    if mode in ('', 'period'):
+    if mode in ('', 'none', 'off', 'best'):
+        return 0, 'none: ABC minimum-delay mapping, {D} removed from recipes'
+    if mode == 'period':
         return T, 'full period'
     if mode == 'reg2reg':
         if liberty_timing is None:
@@ -1038,13 +1045,14 @@ def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path) -> Pa
 
     Yosys only substitutes {D} in inline (`-script +...`) scripts; a script
     file is passed to ABC with `source <file>` untouched, so `&nf {D}`,
-    `upsize {D}` and `dnsize {D}` reached ABC literally and the delay target
-    was never applied. The substituted copy lives next to the netlist so a
-    run directory is self-describing."""
+    `upsize {D}` and `dnsize {D}` reached ABC literally. d_ps <= 0 removes
+    {D} (minimum-delay mapping, the measured best default). The copy lives
+    next to the netlist so a run directory is self-describing."""
     src = Path(recipe_path)
     text = src.read_text()
-    text = text.replace('{D}', f'-D {int(d_ps)}')
-    out = out_dir / f'{src.stem}.D{int(d_ps)}.abc'
+    d_ps = int(d_ps or 0)
+    text = text.replace('{D}', f'-D {d_ps}' if d_ps > 0 else '')
+    out = out_dir / (f'{src.stem}.D{d_ps}.abc' if d_ps > 0 else f'{src.stem}.noD.abc')
     out.write_text(text)
     return out
 
@@ -1956,7 +1964,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--clock-port', help='clock port name (default: clk)')
     p.add_argument('--sdc', help='SDC file: sourced by OpenSTA and read for synthesis clocks/budgets')
     p.add_argument('--path-groups', action='store_true', help='EXPERIMENTAL: per-path-group ABC delay targets (see docs/architecture.md §2.5)')
-    p.add_argument('--abc-target', help="ABC -D: 'period' (default), 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
+    p.add_argument('--abc-target', help="ABC -D: 'none' (default, min-delay mapping), 'period', 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
     p.add_argument('--objective', choices=['delay', 'area', 'fastest', 'pareto', 'balanced'])
     p.add_argument('--modules', nargs='+', help='modules to synthesize')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep')

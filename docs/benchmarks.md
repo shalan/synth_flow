@@ -127,7 +127,7 @@ synthesis liberty.
   (`&scl`/`&lcorr` are no-ops on a combinational network).
 - Seven recipes were never min-area or min-ABC-delay anywhere.
 
-### B. `baseline-sta.csv` — 16 recipes, OpenSTA at SS, SDCs applied, recalibrated periods
+### B. `baseline-noD.csv` — 16 recipes, OpenSTA at SS, SDCs applied, recalibrated periods (no ABC -D; the default)
 
 Produced after the STA-consistency fixes (shared constraint preamble,
 wire-load model, uncertainty), the `signed`-declaration fix, recipe
@@ -168,7 +168,14 @@ Observations that drive Phases 2–4:
   per-group `-D` search (Phase 3) should make deterministic.
 
 Reproduce: `./bench.py --use-sdc --tag <name>` with OpenSTA on `PATH`, then
-`./bench.py --compare results/baseline-sta.csv results/<name>.csv`.
+`./bench.py --compare results/baseline-noD.csv results/<name>.csv`.
+
+### C. ABC delay-target sweep — `abc-period.csv`, `abc-reg2reg.csv`, `abc-loose.csv`
+
+Same matrix with `--set abc_target=...`. Every target is worse than none on
+WNS (mean −0.59 / −0.22 / −1.08 ns) for at most 3.9 % area; see
+[architecture.md §2.6](architecture.md#26-d-never-reached-abc-and-that-was-the-best-setting).
+`abc_target` therefore defaults to `none`.
 
 ## Adding a design
 

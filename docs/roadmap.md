@@ -85,21 +85,17 @@ for ([architecture.md §2.5](architecture.md#25-partitioned-mapping-hurts-the-bo
 Kept as an opt-in experiment; default off. The SDC-derived budgets and the
 liberty flop timing are reused by Phase 3.
 
-## Phase 3 — Global ABC target and per-design `-D` search  ◐
+## Phase 3 — ABC delay target  ☑ (evaluated: no target is best)
 
-Deliverables
-- ☑ `abc_target: period | reg2reg | <ps>` — `reg2reg` hands ABC
-  `T − t_cq − t_su − uncertainty` from the synthesis liberty (1.45 ns less
-  than the period on Sky130 HD at SS). Reported in `synth.sdc`.
-- ☐ Bench `abc_target=reg2reg` against `baseline-sta`; pick the default from
-  the data.
-- ☐ Per-design `-D` bisection with OpenSTA WNS/TNS feedback: smallest area
-  that meets slack, capped iterations; reuse the pre-ABC RTLIL
-  (`write_rtlil` after `dfflibmap`) so re-mapping skips `synth`.
-- ☐ Per-design target recorded in `summary.json` and `synth.sdc`.
-
-Acceptance: search converges in ≤ 6 STA calls per design on the bench; the
-result dominates the fixed-`-D` sweep on area at equal or better WNS.
+- ☑ Found that `{D}` in recipe files was never substituted by Yosys, so ABC
+  always mapped for minimum delay. Recipes are now materialized with the
+  target explicit ([architecture.md §2.6](architecture.md#26-d-never-reached-abc-and-that-was-the-best-setting)).
+- ☑ Benched `period`, `reg2reg` and a loose target against no target: every
+  target loses WNS (−0.2 to −1.1 ns mean) for ≤ 4 % area. `abc_target`
+  defaults to `none`.
+- ☐ Area recovery on slack-rich designs via mapper knobs (`&nf -R`, area
+  recipes) validated by STA, replacing the `-D` search idea. `abc_search.py`
+  stays as the grid/bisection harness for any per-design knob.
 
 ## Phase 4 — STA-driven refine loop  ☐
 
@@ -109,7 +105,7 @@ Deliverables
   path per endpoint.
 - Yosys refine script: reload `winner.v` + functional liberty, select failing
   endpoints, full fan-in cones bounded by flops, `flatten @cone`, `abc` with
-  a tight `-D`, a delay recipe and a **cone constraint file naming the
+  **no `-D`** (§2.6), a delay recipe and a **cone constraint file naming the
   driving flop cell and the D-pin load** (§2.5), clean up leftover generic
   gates, delete the imported cell modules, write the netlist.
 - Accept/reject on TNS; iteration cap; classify depth-bound versus
