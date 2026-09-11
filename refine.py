@@ -301,7 +301,8 @@ def refine(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            load_ff: float = 17.65, unc_setup_ps: int = 250, unc_hold_ps: int = 100,
            wire_load_model: str = 'auto', io_delay_frac: float = 0.2, clock_port_2: Optional[str] = None,
            period_ps_2: Optional[int] = None, do_lec: bool = True, max_endpoints: int = 400,
-           extra_recipes: Optional[list] = None, boundary: str = 'flat', log=print) -> dict:
+           extra_recipes: Optional[list] = None, boundary: str = 'flat', whole_only: bool = False,
+           log=print) -> dict:
     extra_recipes = extra_recipes if extra_recipes is not None else DEFAULT_ESCALATION
     out_dir.mkdir(parents=True, exist_ok=True)
     lt = read_liberty_timing(liberty)
@@ -343,7 +344,10 @@ def refine(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     # with (architecture.md §2.6). Escalate through delay recipes instead, and
     # finish with a whole-design remap (all endpoints) as the last attempt.
     d_ps = 0
-    recipes = [Path(recipe)] + [r for r in extra_recipes if Path(r) != Path(recipe)]
+    recipes = [] if whole_only else [Path(recipe)] + [r for r in extra_recipes if Path(r) != Path(recipe)]
+    if whole_only:
+        recipes = []          # attempt 0 is already the whole-design remap
+
     steps: list[Step] = []
     sta = sta0
     area = area0
@@ -353,8 +357,8 @@ def refine(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         if not sta.endpoints:
             log('no endpoints below margin; done')
             break
-        rec = recipes[min(attempt, len(recipes) - 1)]
-        whole = attempt >= len(recipes)          # recipes exhausted: remap everything
+        whole = attempt >= len(recipes)          # recipes exhausted (or whole_only): remap everything
+        rec = recipes[min(attempt, len(recipes) - 1)] if recipes else Path(recipe)
         eps = [e for e, _, _ in sorted(sta.endpoints, key=lambda t: t[1])[:max_endpoints]]
         new, info = yosys_refine(yosys, liberty, cur, top, eps, lt, rec, d_ps, constr, out_dir, it,
                                  whole_design=whole)
@@ -423,6 +427,7 @@ def main() -> int:
     ap.add_argument('--load-ff', type=float, default=17.65)
     ap.add_argument('--wire-load-model', default='auto')
     ap.add_argument('--no-lec', action='store_true')
+    ap.add_argument('--whole-only', action='store_true', help='skip cone attempts; only whole-design remap passes')
     ap.add_argument('--boundary', choices=['flat', 'flop'], default='flat',
                     help="cone constraint file: 'flat' = flow driving cell/load (default), 'flop' = buf_1 / D-pin cap")
     ap.add_argument('--yosys', default='yosys'); ap.add_argument('--opensta', default='sta')
@@ -434,7 +439,8 @@ def main() -> int:
                  sdc=a.sdc, recipe=Path(a.recipe), iters=a.iters, margin_ps=a.margin_ps, yosys=a.yosys,
                  opensta=a.opensta, driving_cell=a.driving_cell, load_ff=a.load_ff,
                  wire_load_model=a.wire_load_model, clock_port_2=a.clock_port_2, period_ps_2=a.period_ps_2,
-                 do_lec=not a.no_lec, max_endpoints=a.max_endpoints, boundary=a.boundary, log=log)
+                 do_lec=not a.no_lec, max_endpoints=a.max_endpoints, boundary=a.boundary,
+                 whole_only=a.whole_only, log=log)
     if a.json:
         print(json.dumps(res, indent=2))
     return 0
