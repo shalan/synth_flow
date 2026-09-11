@@ -41,6 +41,66 @@ with tempfile.TemporaryDirectory() as td:
     check('ports keep ranges', 'input [11:0] a;' in out and 'output [31:0] y;' in out)
     check('idempotent', _strip_signed_decls(nl) == 0)
 
+# =========================================================================
+print('\n[0b] sdc_parse — Tcl-driven SDC reader')
+# =========================================================================
+import shutil as _shutil
+if _shutil.which('tclsh') is None:
+    print('  (skipped: tclsh not found)')
+else:
+    from sdc_parse import parse_sdc, ports_from_verilog
+    with tempfile.TemporaryDirectory() as td:
+        sdc = Path(td) / 't.sdc'
+        sdc.write_text(r"""
+set T 8.0
+create_clock -name clk -period $T [get_ports clk]
+create_clock -name pclk -period 20 [get_ports pclk]
+create_generated_clock -name clk_div2 -source [get_ports clk] -divide_by 2 [get_ports clkdiv]
+set_clock_groups -asynchronous -group {clk clk_div2} -group {pclk}
+set_clock_uncertainty -setup 0.3 [get_clocks clk]
+set_clock_uncertainty 0.1 [all_clocks]
+set_false_path -from [get_ports rst_n]
+set_multicycle_path -setup 2 -to [get_pins r2*/D]
+set bus [get_ports {haddr[*] hwrite}]
+set_input_delay  -clock clk -max [expr 0.25 * $T] $bus
+set_input_delay  -clock clk -min 0.5 $bus
+set_output_delay -clock clk 3.0 [all_outputs]
+set_driving_cell -lib_cell sky130_fd_sc_hd__inv_1 [all_inputs -no_clocks]
+set_load 0.033 [all_outputs]
+set_load -min 0.005 [all_outputs]
+set_input_transition -max 0.4 [all_inputs]
+set_max_fanout 8 [current_design]
+set_dont_use {sky130_fd_sc_hd__probe_p_8 sky130_fd_sc_hd__lpflow*}
+frobnicate_paths -foo 3 [get_ports x]
+""")
+        nl = Path(td) / 'n.v'
+        nl.write_text("module top(clk, pclk, clkdiv, rst_n, haddr, hwrite, hrdata, irq);\n"
+                      "  input clk; input pclk; output clkdiv; input rst_n;\n"
+                      "  input [7:0] haddr; input hwrite; output [31:0] hrdata; output irq;\nendmodule\n")
+        ports = ports_from_verilog(nl, 'top')
+        check('ports_from_verilog directions', ports.get('haddr') == 'input' and ports.get('hrdata') == 'output', str(ports))
+        c = parse_sdc(sdc, ports=ports)
+        check('two primary clocks + one generated', set(c.clocks) == {'clk', 'pclk', 'clk_div2'}, str(list(c.clocks)))
+        check('Tcl variable/expr in period', c.clocks['clk'].period_ns == 8.0)
+        check('generated clock period derived', c.clocks['clk_div2'].period_ns == 16.0, str(c.clocks['clk_div2']))
+        check('uncertainty: specific then all_clocks', c.clocks['clk'].uncertainty_setup_ns == 0.1 and c.clocks['pclk'].uncertainty_hold_ns == 0.1)
+        check('clock groups', c.clock_groups == [[['clk', 'clk_div2'], ['pclk']]], str(c.clock_groups))
+        check('false path from reset port', c.false_path_ports() == {'rst_n'})
+        mc = [e for e in c.exceptions if e.kind == 'multicycle']
+        check('multicycle kept with pin target', mc and mc[0].value == 2 and mc[0].to == ['pin:r2*/D'], str(mc))
+        d = c.input_delay_for('haddr')
+        check('bus pattern haddr[*] -> haddr, max from expr, min separate', d is not None and d.max_ns is None and d.min_ns == 0.5
+              and c.input_delays[0].max_ns == 2.0 and 'hwrite' in c.input_delays[0].ports, str(c.input_delays))
+        od = c.output_delay_for('hrdata')
+        check('all_outputs expanded (no clkdiv? it is an output too)', od is not None and set(od.ports) == {'clkdiv', 'hrdata', 'irq'}, str(od))
+        check('all_inputs -no_clocks excludes clock ports', set(c.driving_cells[0]['ports']) == {'rst_n', 'haddr', 'hwrite'}, str(c.driving_cells))
+        check('load max/min', c.load_for('hrdata') == 0.033)
+        check('input_transition is STA-only', any('set_input_transition' in s for s in c.sta_only))
+        check('max_fanout', c.max_fanout == 8.0)
+        check('dont_use list', c.dont_use == ['sky130_fd_sc_hd__probe_p_8', 'sky130_fd_sc_hd__lpflow*'], str(c.dont_use))
+        check('unknown command recorded, not fatal', c.unknown and c.unknown[0].startswith('-foo 3') or any('frobnicate' in u or '-foo' in u for u in c.unknown), str(c.unknown))
+        check('no warnings on this SDC', not c.warnings, str(c.warnings))
+
 print('\n[1] ModuleScanner — top-level detection')
 # =========================================================================
 
