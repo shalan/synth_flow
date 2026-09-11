@@ -113,33 +113,62 @@ for area, WNS and ABC delay plus mean deltas. Conventions:
 - For recipe pruning, look at which recipes are ever `is_winner` or on the
   Pareto front across designs, not at averages.
 
-## Baseline (2026-09-12)
+## Baselines (2026-09-12)
 
-`results/baseline-full.csv`: 16 designs × 21 recipes, Yosys 0.68 / ABC 1.01,
-slow-corner synthesis, no OpenSTA on the machine (area and ABC proxy only).
-Full matrix runtime: 75 s on an Apple Silicon laptop.
+Two committed baselines, same 16 designs, Yosys 0.68 / ABC 1.01, slow-corner
+synthesis liberty.
 
-Observations that drive Phase 0:
+### A. `baseline-full.csv` — 21 recipes, area only (before OpenSTA was available)
 
-- **Recipe choice matters for area.** Best-to-worst spread per design ranges
-  from 9 % (spi_master) to 62 % (fir8); datapath and crypto designs spread
-  most (alu32 46 %, aes_round 43 %).
-- **Best-of-sweep beats the ORFS reference recipe on every design**, by
-  0.4 % (fifo_sync) to 11.2 % (aes_round), mean −4.6 % area. That is the
-  value the sweep already delivers; the roadmap targets what a fixed recipe
-  set cannot reach.
-- **No recipe dominates.** Ten different recipes are min-area on at least one
-  design; nine different recipes are min-ABC-delay. `area_max` and
-  `delay_choice_deep_v4` are min-area most often (4 designs each).
-- **`balanced_struct` is byte-identical to `orfs_speed` on all 16 designs**:
-  its only additions (`&scl`, `&lcorr`) are sequential and see a
-  combinational network. The other recipes containing dead sequential
-  commands (`scorr`, `dretime`) still differ through their remaining
-  commands, so they are not duplicates; pruning must be data-driven.
-- Recipes never min-area or min-delay on any design: `balanced_resyn`,
-  `balanced_struct`, `delay_choice_deep_bb`, `delay_choice_deep_combined`,
-  `delay_retime`, `lazy_man`, `orfs_speed`. Candidates for pruning once STA
-  numbers confirm.
+- **Recipe choice matters for area.** Best-to-worst spread per design 9 %
+  (spi_master) to 62 % (fir8) at the original, over-tight periods.
+- **Best-of-sweep beats `orfs_speed` on every design**, mean −4.6 % area.
+- **`balanced_struct` is byte-identical to `orfs_speed`** on all designs
+  (`&scl`/`&lcorr` are no-ops on a combinational network).
+- Seven recipes were never min-area or min-ABC-delay anywhere.
+
+### B. `baseline-sta.csv` — 16 recipes, OpenSTA at SS, SDCs applied, recalibrated periods
+
+Produced after the STA-consistency fixes (shared constraint preamble,
+wire-load model, uncertainty), the `signed`-declaration fix, recipe
+retirement and period recalibration. 256 rows, every row has a WNS.
+
+| Metric | Value |
+|---|---|
+| Designs where ≥ 1 recipe meets timing | 7 / 16 |
+| Mean WNS gain, best recipe vs `orfs_speed` | +0.42 ns |
+| Largest WNS gains | ms_psram_ahb +1.25, zxip +1.08, alu32 +1.06 ns |
+| Area spread best-to-worst recipe | 3 % to 15 % |
+| Recipe with best mean WNS rank | `delay_choice_deep_v3` (4.2 / 16) |
+| Recipe most often on the area/WNS Pareto front | `delay_aggressive` (11 / 16 designs) |
+| Recipes that are best-WNS on ≥ 1 design | 7 different recipes |
+
+Observations that drive Phases 2–4:
+
+- **No recipe wins everywhere**, so a sweep is still needed, but the best
+  recipe on a design is within ~0.2 ns of the next two on most designs. The
+  remaining gap to timing (alu32 −0.73, mul32_mac −2.6, zxip −1.24 ns) is
+  not a recipe-selection problem; it needs a different delay target per path
+  group and endpoint-driven resynthesis.
+- **I/O-constrained designs benefit most from real STA.** On zxip and
+  ms_psram_ahb, whose SDCs carry 4 ns and 3.2 ns I/O delays, the ABC `stime`
+  proxy anti-correlates with OpenSTA (Spearman −0.33 and −0.38 on the
+  21-recipe run) while it correlates at +0.9 or better on register-bound
+  designs. Never rank by the proxy when an SDC has I/O delays.
+- **WNS spread across recipes is large on control logic**: apb_timer ranges
+  from −0.07 to −4.94 ns at the same period, and uart from +0.20 to −1.55.
+  The failing recipes there produce high-fanout nets that the wire-load model
+  punishes; this is the sizing/buffering problem the Phase 6 sizing pass
+  targets, and the cone classifier in Phase 4 must route those endpoints to
+  it rather than to remapping.
+- **Area follows WNS rank only loosely.** `area_max` / `area_lut6` are
+  smallest on a few designs but sit at the bottom of the WNS ranking; the
+  smallest netlist that still meets timing is chosen by 6 different recipes
+  across the 7 designs that close. This is exactly the selection the
+  per-group `-D` search (Phase 3) should make deterministic.
+
+Reproduce: `./bench.py --use-sdc --tag <name>` with OpenSTA on `PATH`, then
+`./bench.py --compare results/baseline-sta.csv results/<name>.csv`.
 
 ## Adding a design
 
