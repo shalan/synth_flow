@@ -152,6 +152,9 @@ def write_config(d: dict, files: list[str], args, run_sta: bool, work: Path) -> 
         cfg['sdc'] = str(BENCH_DIR / d['sdc'])
     if args.sta_bin:
         cfg['opensta'] = args.sta_bin
+    for kv in args.set or []:
+        k, _, v = kv.partition('=')
+        cfg[k] = yaml.safe_load(v)
     p = work / 'synth.yaml'
     work.mkdir(parents=True, exist_ok=True)
     p.write_text(yaml.safe_dump(cfg, sort_keys=False))
@@ -348,6 +351,7 @@ def main() -> int:
     p.add_argument('--sta-bin', help='OpenSTA binary (default: `sta` on PATH)')
     p.add_argument('--no-sta', action='store_true')
     p.add_argument('--keep-work', action='store_true', help='do not wipe bench/work/<design>')
+    p.add_argument('--set', action='append', metavar='KEY=VALUE', help='extra synth_flow config (repeatable), e.g. --set path_groups=true')
     p.add_argument('--tag', help='results file stem (default: timestamp)')
     p.add_argument('--compare', nargs=2, metavar=('A.csv', 'B.csv'), help='diff two result files and exit')
     args = p.parse_args()

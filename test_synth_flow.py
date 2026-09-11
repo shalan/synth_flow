@@ -12,6 +12,7 @@ from synth_flow import (
     select_winner, _pareto_front, _stability_idx,
     discover_recipes, RecipeResult,
     DEFAULT_RECIPES_DIR, _strip_signed_decls, apply_sdc_overrides,
+    build_path_groups, resolve_abc_target, _group_section,
 )
 
 failures = []
@@ -127,6 +128,52 @@ else:
                       clock_port_2='pclk', period_ps_2=20000, clock_uncertainty_setup_ps=500)
         check('no messages when YAML already agrees', apply_sdc_overrides(cfg2, c) == [])
         check('None constraints is a no-op', apply_sdc_overrides(cfg2, None) == [])
+
+# =========================================================================
+print('\n[0d] path-group budgets and ABC target')
+# =========================================================================
+from liberty_timing import read_liberty_timing
+LIB_SS = Path(__file__).parent / 'sky130' / 'hd_120_ss.lib'
+lt = read_liberty_timing(LIB_SS)
+check('liberty flop timing parsed', lt.t_cq_ps and lt.t_su_ps and len(lt.flop_cells) == 19, str((lt.t_cq_ps, lt.t_su_ps, len(lt.flop_cells))))
+check('sky130 SS t_cq ~ 0.5-1.2 ns, t_su ~ 0.2-0.6 ns', 500 <= lt.t_cq_ps <= 1200 and 200 <= lt.t_su_ps <= 600, str((lt.t_cq_ps, lt.t_su_ps)))
+cfg = Config(period_ps=10000, clock_port='clk', clock_uncertainty_setup_ps=250, io_delay_frac=0.2,
+             lib_typ=str(LIB_SS), lib_slow=str(LIB_SS), abc_target='reg2reg')
+d, note = resolve_abc_target(cfg)
+check('reg2reg target = T - t_cq - t_su - unc', d == int(10000 - lt.t_cq_ps - lt.t_su_ps - 250), f'{d} ({note})')
+cfg.abc_target = 'period'; check("'period' target", resolve_abc_target(cfg)[0] == 10000)
+cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
+cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
+check('floor applies when budget is negative', resolve_abc_target(cfg)[0] == 250)
+if _shutil.which('tclsh'):
+    with tempfile.TemporaryDirectory() as td:
+        sdc = Path(td) / 'g.sdc'
+        sdc.write_text("create_clock -name clk -period 10 [get_ports clk]\n"
+                       "set_false_path -from [get_ports rst_n]\n"
+                       "set_input_delay -clock clk -max 4.0 [get_ports {haddr hwrite}]\n"
+                       "set_output_delay -clock clk -max 3.0 [get_ports hrdata]\n"
+                       "set_load 0.05 [get_ports hrdata]\n")
+        ports = {'clk': 'input', 'rst_n': 'input', 'haddr': 'input', 'hwrite': 'input', 'misc': 'input',
+                 'hrdata': 'output', 'irq': 'output'}
+        c = parse_sdc(sdc, ports=ports)
+        cfg = Config(period_ps=10000, clock_port='clk', clock_uncertainty_setup_ps=250, io_delay_frac=0.2,
+                     lib_typ=str(LIB_SS), lib_slow=str(LIB_SS), driving_cell='sky130_fd_sc_hd__inv_2', load_ff=17.65)
+        spec = build_path_groups(cfg, 'top', c, ports, lt, Path(td) / 'groups')
+        names = {g['name']: g for g in spec['groups']}
+        check('groups: in2out, two input groups, two output groups, relaxed',
+              set(names) == {'in2out', 'in_4000ps', 'in_2000ps', 'out_3000ps', 'out_2000ps', 'relaxed'}, str(sorted(names)))
+        check('input group ports from SDC vs default', set(names['in_4000ps']['ports']) == {'haddr', 'hwrite'} and names['in_2000ps']['ports'] == ['misc'])
+        check('in2reg budget = T - in - t_su - unc', names['in_4000ps']['budget_ps'] == int(10000 - 4000 - lt.t_su_ps - 250), str(names['in_4000ps']))
+        check('reg2out budget = T - t_cq - out - unc', names['out_3000ps']['budget_ps'] == int(10000 - lt.t_cq_ps - 3000 - 250))
+        check('in2out budget = T - max in - max out', names['in2out']['budget_ps'] == 10000 - 4000 - 3000)
+        check('clock and false-path ports excluded from I/O groups', 'clk' not in names['in_2000ps']['ports'] and names['relaxed']['ports'] == ['rst_n'])
+        check('relaxed budget = relaxed_factor * T', names['relaxed']['budget_ps'] == 30000)
+        check('reg2reg budget', spec['reg2reg_ps'] == int(10000 - lt.t_cq_ps - lt.t_su_ps - 250))
+        check('groups sorted tightest first', [g['budget_ps'] for g in spec['groups']] == sorted(g['budget_ps'] for g in spec['groups']))
+        check('per-group load from SDC', '0.05' not in (Path(names['out_3000ps']['constr']).read_text()) and 'set_load 50.0' in Path(names['out_3000ps']['constr']).read_text(), Path(names['out_3000ps']['constr']).read_text())
+        sec = _group_section(spec, 'L.lib', 'def.constr', 'r.abc', 'g.txt')
+        check('section: one abc per group + reg2reg', sec.count('abc -liberty') == len(spec['groups']) + 1)
+        check('section: flop stop rules present', ':-sky130_fd_sc_hd__dfxtp_1' in sec)
 
 print('\n[1] ModuleScanner — top-level detection')
 # =========================================================================
