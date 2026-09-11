@@ -62,7 +62,7 @@ resize_winner: true               # today: OpenSTA-guided sizing of each winner 
 dont_use:                         # cells hidden from abc and dfflibmap
   - sky130_fd_sc_hd__probe*
   - sky130_fd_sc_hd__lpflow*
-yosys_opts: [booth, opt_dff_sat, adder=han-carlson]   # front-end sweep dimension (Phase 5)
+yosys_opts: [booth, adder=kogge-stone]   # today: synth -booth / -extra-map +/choices/<arch>.v (--yosys-opts)
 search:
   enable: true
   max_sta_calls: 6
