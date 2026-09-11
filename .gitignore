@@ -28,3 +28,4 @@ tmp/
 # Benchmark scratch
 bench/external/
 bench/work/
+!bench/results/

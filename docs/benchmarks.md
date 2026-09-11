@@ -91,6 +91,34 @@ for area, WNS and ABC delay plus mean deltas. Conventions:
 - For recipe pruning, look at which recipes are ever `is_winner` or on the
   Pareto front across designs, not at averages.
 
+## Baseline (2026-09-12)
+
+`results/baseline-full.csv`: 16 designs × 21 recipes, Yosys 0.68 / ABC 1.01,
+slow-corner synthesis, no OpenSTA on the machine (area and ABC proxy only).
+Full matrix runtime: 75 s on an Apple Silicon laptop.
+
+Observations that drive Phase 0:
+
+- **Recipe choice matters for area.** Best-to-worst spread per design ranges
+  from 9 % (spi_master) to 62 % (fir8); datapath and crypto designs spread
+  most (alu32 46 %, aes_round 43 %).
+- **Best-of-sweep beats the ORFS reference recipe on every design**, by
+  0.4 % (fifo_sync) to 11.2 % (aes_round), mean −4.6 % area. That is the
+  value the sweep already delivers; the roadmap targets what a fixed recipe
+  set cannot reach.
+- **No recipe dominates.** Ten different recipes are min-area on at least one
+  design; nine different recipes are min-ABC-delay. `area_max` and
+  `delay_choice_deep_v4` are min-area most often (4 designs each).
+- **`balanced_struct` is byte-identical to `orfs_speed` on all 16 designs**:
+  its only additions (`&scl`, `&lcorr`) are sequential and see a
+  combinational network. The other recipes containing dead sequential
+  commands (`scorr`, `dretime`) still differ through their remaining
+  commands, so they are not duplicates; pruning must be data-driven.
+- Recipes never min-area or min-delay on any design: `balanced_resyn`,
+  `balanced_struct`, `delay_choice_deep_bb`, `delay_choice_deep_combined`,
+  `delay_retime`, `lazy_man`, `orfs_speed`. Candidates for pruning once STA
+  numbers confirm.
+
 ## Adding a design
 
 1. Put the RTL in `bench/designs/<name>/<name>.v` (or add a `fetch` line for
@@ -109,6 +137,6 @@ minutes and differences are above noise.
 - Results without OpenSTA rank by area and ABC's proxy delay only. The
   winner column then follows `select_winner`'s no-STA fallback (min area).
 - `bench/work/` is wiped per design on every run unless `--keep-work`.
-- Recipes that contain sequential ABC commands behave identically to their
-  combinational counterparts in the standard flow; expect duplicate rows
-  until Phase 0 pruning lands.
+- Sequential ABC commands (`scorr`, `dretime`, `&scl`, `&lcorr`) are no-ops
+  in the standard flow. Only `balanced_struct` collapses onto another recipe
+  (`orfs_speed`); the rest differ through their remaining steps.

@@ -24,8 +24,9 @@ reproduction commands are in [architecture.md](architecture.md).
 - Selection-based path groups (in→reg, reg→out, reg→reg) partition the
   combinational logic completely; each can take its own `-D` and `-constr`.
 - In the standard flow ABC sees a combinational network, so `scorr`,
-  `dretime`, `&scl`, `&lcorr` are no-ops. Several of the 21 recipes are
-  duplicates in practice.
+  `dretime`, `&scl`, `&lcorr` are no-ops. The baseline bench confirms
+  `balanced_struct` is identical to `orfs_speed` on all 16 designs; other
+  recipes with dead commands still differ through their remaining steps.
 - The quick STA used for ranking and the multi-corner STA use different
   driving cell / load settings and neither sets a wire-load model, so ranking
   is optimistic and inconsistent.
@@ -39,6 +40,8 @@ Deliverables
 - ☑ `bench/bench.py`: recipes × designs → `results/<tag>.csv`, env JSON,
   `latest.md`; `--compare A B` for before/after evaluation.
 - ☑ Baseline rows: `orfs_speed` and `yosys_default` recipes.
+- ☑ Baseline committed: `bench/results/baseline-full.csv` (16 × 21, see
+  [benchmarks.md](benchmarks.md#baseline-2026-09-12)).
 - ☐ Recipe pruning: drop recipes that never reach a Pareto front; document
   the no-op sequential commands.
 - ☐ STA consistency: same driving cell and load in quick and corner STA;

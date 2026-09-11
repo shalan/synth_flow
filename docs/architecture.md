@@ -47,7 +47,9 @@ Points that matter for quality:
   network. This is the ORFS/OpenLane convention and keeps a 1:1 register
   correspondence for equivalence checking. It also means the sequential
   commands used by several recipes (`scorr`, `dretime`, `&scl`, `&lcorr`) do
-  nothing; ABC prints "The network is combinational".
+  nothing; ABC prints "The network is combinational". The baseline bench
+  shows `balanced_struct` producing netlists identical to `orfs_speed` on
+  every design for this reason.
 - **`-D` receives the full clock period.** The true combinational budget is
   the period minus clock-to-Q, setup, uncertainty and I/O delays. The
   synthesis library is the slow corner by default (`lib_synth → lib_slow →
