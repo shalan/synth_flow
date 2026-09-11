@@ -1033,6 +1033,22 @@ def _parse_groups_txt(path: Path) -> list[dict]:
     return out
 
 
+def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path) -> Path:
+    """Write a copy of the recipe with `{D}` replaced by `-D <d_ps>`.
+
+    Yosys only substitutes {D} in inline (`-script +...`) scripts; a script
+    file is passed to ABC with `source <file>` untouched, so `&nf {D}`,
+    `upsize {D}` and `dnsize {D}` reached ABC literally and the delay target
+    was never applied. The substituted copy lives next to the netlist so a
+    run directory is self-describing."""
+    src = Path(recipe_path)
+    text = src.read_text()
+    text = text.replace('{D}', f'-D {int(d_ps)}')
+    out = out_dir / f'{src.stem}.D{int(d_ps)}.abc'
+    out.write_text(text)
+    return out
+
+
 def run_recipe(args: dict) -> RecipeResult:
     """Worker function — runs Yosys for one (module, recipe) pair.
     Must be top-level for multiprocessing pickling."""
@@ -1070,6 +1086,8 @@ def run_recipe(args: dict) -> RecipeResult:
 
     groups_spec = args.get('groups')
     groups_txt = workdir / f'{recipe}.groups.txt'
+    d_ps = int(cfg.get('abc_d_ps', cfg['period_ps']))
+    recipe_path = str(_materialize_recipe(recipe_path, d_ps, workdir))
     if dep_netlists:
         template = YOSYS_DRIVER_HIER
     elif cfg.get('abc_sequential', False):

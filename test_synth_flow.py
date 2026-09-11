@@ -12,7 +12,7 @@ from synth_flow import (
     select_winner, _pareto_front, _stability_idx,
     discover_recipes, RecipeResult,
     DEFAULT_RECIPES_DIR, _strip_signed_decls, apply_sdc_overrides,
-    build_path_groups, resolve_abc_target, _group_section,
+    build_path_groups, resolve_abc_target, _group_section, _materialize_recipe,
 )
 
 failures = []
@@ -174,6 +174,19 @@ if _shutil.which('tclsh'):
         sec = _group_section(spec, 'L.lib', 'def.constr', 'r.abc', 'g.txt')
         check('section: one abc per group + reg2reg', sec.count('abc -liberty') == len(spec['groups']) + 1)
         check('section: flop stop rules present', ':-sky130_fd_sc_hd__dfxtp_1' in sec)
+
+# =========================================================================
+print('\n[0e] recipe materialization — {D} must reach ABC as -D <ps>')
+# =========================================================================
+with tempfile.TemporaryDirectory() as td:
+    for rp in sorted(DEFAULT_RECIPES_DIR.glob('*.abc')):
+        out = _materialize_recipe(rp, 4321, Path(td))
+        txt = out.read_text()
+        if '{D}' in txt or ('-D 4321' not in txt and '{D}' in rp.read_text()):
+            check(f'{rp.name} materialized', False, txt[:80]); break
+    else:
+        check('all recipes materialize with -D substituted', True)
+    check('recipes without {D} are copied unchanged', _materialize_recipe(DEFAULT_RECIPES_DIR / 'yosys_default.abc', 7, Path(td)).read_text().count('-D 7') == (DEFAULT_RECIPES_DIR / 'yosys_default.abc').read_text().count('{D}'))
 
 print('\n[1] ModuleScanner — top-level detection')
 # =========================================================================
