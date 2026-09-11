@@ -31,7 +31,7 @@ reproduction commands are in [architecture.md](architecture.md).
   driving cell / load settings and neither sets a wire-load model, so ranking
   is optimistic and inconsistent.
 
-## Phase 0 — Measure first  ◐
+## Phase 0 — Measure first  ☑
 
 Deliverables
 - ☑ `bench/` with 12 in-house designs (datapath, DSP, crypto, logic, control,
@@ -42,32 +42,32 @@ Deliverables
 - ☑ Baseline rows: `orfs_speed` and `yosys_default` recipes.
 - ☑ Baseline committed: `bench/results/baseline-full.csv` (16 × 21, see
   [benchmarks.md](benchmarks.md#baseline-2026-09-12)).
-- ☐ Recipe pruning: drop recipes that never reach a Pareto front; document
-  the no-op sequential commands.
-- ☐ STA consistency: same driving cell and load in quick and corner STA;
-  `set_wire_load_model` / `set_wire_load_mode top` from liberty; setup
-  uncertainty on the single-clock path.
-- ☐ GitHub Actions: unit tests + 2-design smoke bench (OSS CAD Suite).
+- ☑ Recipe pruning: 5 recipes retired to `recipes/retired/` from the STA
+  baseline; tie-break order now follows mean WNS rank.
+- ☑ STA consistency: shared constraint preamble (`_sta_constraints`),
+  wire-load model from liberty, uncertainty on all clocks, OpenSTA 3.x
+  report parsing, `signed` stripped from netlists.
+- ☑ GitHub Actions: unit tests + smoke bench (OSS CAD Suite).
 
 Acceptance: one command reproduces the full matrix; CSV committed; recipe set
 reduced to distinct behaviors; quick-STA WNS within a few percent of
 corner-STA slow-corner WNS.
 
-## Phase 1 — SDC front end  ☐
+## Phase 1 — SDC front end  ◐
 
 Deliverables
-- `sdc/parse.py`: run the user SDC through `tclsh` with stub procs; emit a
-  constraints JSON (clocks, generated clocks, uncertainty, per-port I/O
+- ☑ `sdc_parse.py`: run the user SDC through `tclsh` with stub procs; build a
+  constraints model (clocks, generated clocks, uncertainty, per-port I/O
   delays, false paths, multicycle, max_delay, clock groups, driving cell,
   load, max_fanout, dont_use, dont_touch). Unknown commands → warning,
   STA-only.
-- Precedence: SDC overrides `period_ps`, `clock_port`, `clock_port_2`,
-  `driving_cell`, `load_ff`; every override is logged.
-- `results/<module>/synth.sdc`: the derived constraints synthesis acted on.
-- Async-reset false paths derived from the netlist (trace flop async pins to
+- ☑ Precedence: SDC overrides `period_ps`, `clock_port`, `clock_port_2`,
+  `driving_cell`, `load_ff`, uncertainty; every override is logged.
+- ☑ `results/<module>/synth.sdc`: the derived constraints synthesis acted on.
+- ☐ Async-reset false paths derived from the netlist (trace flop async pins to
   ports) instead of the hardcoded name list.
-- Tests: sample SDCs with variables, `expr`, wildcards, `get_ports`,
-  `all_inputs`.
+- ☑ Tests: sample SDCs with variables, `expr`, wildcards, `get_ports`,
+  `all_inputs` (25 checks).
 
 Acceptance: OpenSTA still sources the SDC verbatim; JSON matches for all
 sample SDCs; hardcoded reset list removed. Command coverage is specified in

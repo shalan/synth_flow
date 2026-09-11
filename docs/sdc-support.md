@@ -10,14 +10,25 @@ One SDC file is the single source of timing constraints. It has two readers:
 2. **Synthesis** reads a subset through a small Tcl stub interpreter and turns
    it into path groups, delay budgets and per-group ABC constraint files.
 
-## Today (before Phase 1)
+## Today
 
-- `sdc: path/to/file.sdc` in the YAML is sourced into both OpenSTA scripts
-  **after** the tool's own `create_clock` and before its default I/O delays.
-- Synthesis ignores the SDC. ABC gets `-D period_ps` and the global
-  `driving_cell` / `load_ff` from the YAML.
-- Async-reset false paths are applied from a fixed name list
-  (`PRESETn`, `PRESETN`, `aresetn`, `HRESETn`, `hresetn`, `rst_n`, `resetn`).
+- `sdc:` in the YAML or `--sdc FILE` on the command line. OpenSTA sources the
+  file verbatim, **after** the tool's defaults, so per-port delays, driving
+  cells, loads and exceptions in the SDC override them.
+- Synthesis reads the same file through `sdc_parse.py` (a `tclsh` stub
+  interpreter) and applies these overrides, each one logged as
+  `[sdc] override: ...` and recorded in `results/<module>/synth.sdc`:
+  - fastest primary clock → `clock_port` / `period_ps` (ABC `-D`)
+  - second primary clock → `clock_port_2` / `period_ps_2`
+  - `set_clock_uncertainty` on that clock → `clock_uncertainty_*_ps`
+  - `set_driving_cell` → `driving_cell`; `set_load` (max) → `load_ff`
+- Unknown commands are logged as warnings and left to OpenSTA. Recognised
+  STA-only commands are counted in the log.
+- `python3 sdc_parse.py top.sdc --netlist rtl.v --top NAME` prints what
+  synthesis understood, what is STA-only and what is unknown.
+- Async-reset false paths still come from a fixed name list; the SDC's
+  `set_false_path -from` ports are reported in `synth.sdc` and become
+  relaxed path groups in Phase 2.
 
 ## Target (Phase 1 and later)
 

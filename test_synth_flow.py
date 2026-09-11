@@ -11,7 +11,7 @@ from synth_flow import (
     Config, ModuleScanner, Candidate, Selection,
     select_winner, _pareto_front, _stability_idx,
     discover_recipes, RecipeResult,
-    DEFAULT_RECIPES_DIR, _strip_signed_decls,
+    DEFAULT_RECIPES_DIR, _strip_signed_decls, apply_sdc_overrides,
 )
 
 failures = []
@@ -100,6 +100,33 @@ frobnicate_paths -foo 3 [get_ports x]
         check('dont_use list', c.dont_use == ['sky130_fd_sc_hd__probe_p_8', 'sky130_fd_sc_hd__lpflow*'], str(c.dont_use))
         check('unknown command recorded, not fatal', c.unknown and c.unknown[0].startswith('-foo 3') or any('frobnicate' in u or '-foo' in u for u in c.unknown), str(c.unknown))
         check('no warnings on this SDC', not c.warnings, str(c.warnings))
+
+# =========================================================================
+print('\n[0c] apply_sdc_overrides — SDC wins over YAML')
+# =========================================================================
+if _shutil.which('tclsh') is None:
+    print('  (skipped: tclsh not found)')
+else:
+    with tempfile.TemporaryDirectory() as td:
+        sdc = Path(td) / 'o.sdc'
+        sdc.write_text("create_clock -name hclk -period 10 [get_ports hclk]\n"
+                       "create_clock -name pclk -period 20 [get_ports pclk]\n"
+                       "set_clock_uncertainty -setup 0.5 [get_clocks hclk]\n"
+                       "set_driving_cell -lib_cell sky130_fd_sc_hd__buf_2 [all_inputs]\n"
+                       "set_load 0.05 [all_outputs]\n")
+        c = parse_sdc(sdc, ports={'hclk': 'input', 'pclk': 'input', 'a': 'input', 'y': 'output'})
+        cfg = Config(clock_port='clk', period_ps=8000, driving_cell='sky130_fd_sc_hd__inv_2', load_ff=17.65)
+        msgs = apply_sdc_overrides(cfg, c)
+        check('clock port/period from fastest SDC clock', cfg.clock_port == 'hclk' and cfg.period_ps == 10000, str(vars(cfg)))
+        check('second clock -> clock_port_2', cfg.clock_port_2 == 'pclk' and cfg.period_ps_2 == 20000)
+        check('uncertainty from SDC', cfg.clock_uncertainty_setup_ps == 500)
+        check('driving cell from SDC', cfg.driving_cell == 'sky130_fd_sc_hd__buf_2')
+        check('load pF -> fF', abs(cfg.load_ff - 50.0) < 1e-6, str(cfg.load_ff))
+        check('every override reported', len(msgs) == 5, str(msgs))
+        cfg2 = Config(clock_port='hclk', period_ps=10000, driving_cell='sky130_fd_sc_hd__buf_2', load_ff=50.0,
+                      clock_port_2='pclk', period_ps_2=20000, clock_uncertainty_setup_ps=500)
+        check('no messages when YAML already agrees', apply_sdc_overrides(cfg2, c) == [])
+        check('None constraints is a no-op', apply_sdc_overrides(cfg2, None) == [])
 
 print('\n[1] ModuleScanner — top-level detection')
 # =========================================================================
@@ -274,13 +301,13 @@ print('\n[5] Stability tiebreak')
 # =========================================================================
 
 # Two candidates with identical metrics, different recipe names from the priority list
-tied = [c('area_max', 1.0, 100), c('delay_retime', 1.0, 100)]
+tied = [c('area_max', 1.0, 100), c('delay_choice_deep_v3', 1.0, 100)]
 sel = select_winner(tied, 'delay')
-check('tie -> delay_retime wins (lower priority idx)',
-      sel.winner == 'delay_retime', f'got={sel.winner}')
+check('tie -> delay_choice_deep_v3 wins (lower priority idx)',
+      sel.winner == 'delay_choice_deep_v3', f'got={sel.winner}')
 
-check('delay_retime priority < area_max priority',
-      _stability_idx('delay_retime') < _stability_idx('area_max'))
+check('delay_choice_deep_v3 priority < area_max priority',
+      _stability_idx('delay_choice_deep_v3') < _stability_idx('area_max'))
 check('unknown recipe gets 999',
       _stability_idx('foobar') == 999)
 

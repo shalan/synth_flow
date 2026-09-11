@@ -94,6 +94,7 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--top NAME` | Top module name |
 | `--period-ps N` | Clock period in picoseconds |
 | `--clock-port NAME` | Clock port name (default: `clk`) |
+| `--sdc FILE` | SDC file: sourced by OpenSTA and read for synthesis clocks and boundary conditions (overrides `--period-ps`/`--clock-port`) |
 | `--objective OBJ` | `delay`, `area`, `fastest`, `pareto`, `balanced` |
 | `--modules M1 M2` | Modules to synthesize (default: auto-detect) |
 | `--recipes R1 R2` | Recipes to sweep (default: all) |

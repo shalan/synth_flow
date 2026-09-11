@@ -558,9 +558,11 @@ def parse_sdc(sdc_path: str | Path, ports: Optional[dict[str, str] | list[str]] 
 # Port discovery from a Verilog netlist / RTL (top module only)
 # --------------------------------------------------------------------------
 
+_KW = r'(?!(?:input|output|inout|wire|reg|logic|signed|parameter)\b)'
 _PORT_DECL_RE = re.compile(
     r'\b(input|output|inout)\b\s*(?:wire|reg|logic)?\s*(?:signed)?\s*'
-    r'(?:\[\s*([^:\]]+)\s*:\s*([^\]]+)\s*\])?\s*([A-Za-z_][\w$]*(?:\s*,\s*[A-Za-z_][\w$]*)*)',
+    r'(?:\[\s*([^:\]]+)\s*:\s*([^\]]+)\s*\])?\s*'
+    r'(' + _KW + r'[A-Za-z_][\w$]*(?:\s*,\s*' + _KW + r'[A-Za-z_][\w$]*)*)',
     re.S)
 
 

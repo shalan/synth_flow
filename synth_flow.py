@@ -43,6 +43,12 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import sdc_parse
+except ImportError:  # pragma: no cover
+    sdc_parse = None
+
 # YAML is required for config files; YAML-less invocations work too (CLI-only).
 try:
     import yaml
@@ -1529,6 +1535,137 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
 # CLI / main
 # ============================================================================
 
+# ============================================================================
+# SDC → synthesis constraints
+# ============================================================================
+
+def load_sdc_constraints(cfg: Config, log=None):
+    """Parse cfg.sdc (if any) with the top-level ports of the RTL. Returns a
+    sdc_parse.Constraints or None. Never fatal: OpenSTA still sources the SDC."""
+    if not cfg.sdc:
+        return None
+    if sdc_parse is None:
+        if log: log.warning("sdc_parse module not available; SDC used by OpenSTA only")
+        return None
+    ports: dict = {}
+    for f in cfg.rtl_files:
+        try:
+            ports = sdc_parse.ports_from_verilog(f, cfg.top)
+        except OSError:
+            ports = {}
+        if ports:
+            break
+    try:
+        return sdc_parse.parse_sdc(cfg.sdc, ports=ports or None)
+    except Exception as e:  # tclsh missing, Tcl error, ...
+        if log: log.warning(f"could not read SDC for synthesis ({e}); OpenSTA will still source it")
+        return None
+
+
+def apply_sdc_overrides(cfg: Config, c, log=None) -> list[str]:
+    """SDC wins over YAML for clocks and boundary conditions (docs/sdc-support.md).
+    Returns the list of override messages (also logged)."""
+    msgs: list[str] = []
+    if c is None:
+        return msgs
+    primary = [ck for ck in c.clocks.values() if not ck.generated and ck.ports and ck.period_ns]
+    primary.sort(key=lambda ck: ck.period_ns)
+    if primary:
+        ck = primary[0]
+        new_port, new_T = ck.ports[0], int(round(ck.period_ns * 1000))
+        if new_port != cfg.clock_port or new_T != cfg.period_ps:
+            msgs.append(f"clock_port/period_ps {cfg.clock_port}/{cfg.period_ps} -> "
+                        f"{new_port}/{new_T} (SDC create_clock {ck.name})")
+            cfg.clock_port, cfg.period_ps = new_port, new_T
+        if len(primary) >= 2:
+            ck2 = primary[1]
+            p2, T2 = ck2.ports[0], int(round(ck2.period_ns * 1000))
+            if p2 != cfg.clock_port_2 or T2 != cfg.period_ps_2:
+                msgs.append(f"clock_port_2/period_ps_2 -> {p2}/{T2} (SDC create_clock {ck2.name})")
+                cfg.clock_port_2, cfg.period_ps_2 = p2, T2
+        if len(primary) > 2:
+            msgs.append(f"SDC defines {len(primary)} clocks; synthesis targets the two fastest, "
+                        f"STA sees all")
+        if ck.uncertainty_setup_ns is not None:
+            v = int(round(ck.uncertainty_setup_ns * 1000))
+            if v != cfg.clock_uncertainty_setup_ps:
+                msgs.append(f"clock_uncertainty_setup_ps {cfg.clock_uncertainty_setup_ps} -> {v} (SDC)")
+                cfg.clock_uncertainty_setup_ps = v
+        if ck.uncertainty_hold_ns is not None:
+            v = int(round(ck.uncertainty_hold_ns * 1000))
+            if v != cfg.clock_uncertainty_hold_ps:
+                msgs.append(f"clock_uncertainty_hold_ps {cfg.clock_uncertainty_hold_ps} -> {v} (SDC)")
+                cfg.clock_uncertainty_hold_ps = v
+    # Boundary conditions: take a driving cell / load that applies to every
+    # constrained port (ABC has one global value for each).
+    if c.driving_cells:
+        cells = {d['cell'] for d in c.driving_cells}
+        cell = c.driving_cells[-1]['cell']
+        if len(cells) > 1:
+            msgs.append(f"SDC has {len(cells)} driving cells; ABC uses one ({cell}), STA sees all")
+        if cell != cfg.driving_cell:
+            msgs.append(f"driving_cell {cfg.driving_cell} -> {cell} (SDC set_driving_cell)")
+            cfg.driving_cell = cell
+    max_loads = [d for d in c.loads if not d.get('min')]
+    if max_loads:
+        pf = max_loads[-1]['pf']
+        ff = round(pf * 1000.0, 3)
+        if abs(ff - cfg.load_ff) > 1e-6:
+            msgs.append(f"load_ff {cfg.load_ff} -> {ff} (SDC set_load {pf} pF)")
+            cfg.load_ff = ff
+    if log:
+        for m in msgs:
+            log.info(f"[sdc] override: {m}")
+        for u in c.unknown:
+            log.warning(f"[sdc] unknown command (OpenSTA only): {u}")
+        if c.sta_only:
+            log.info(f"[sdc] {len(c.sta_only)} command(s) left to OpenSTA only")
+        for w in c.warnings:
+            log.warning(f"[sdc] {w}")
+    return msgs
+
+
+def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str]) -> None:
+    """results/<module>/synth.sdc — what synthesis actually acted on."""
+    L = ['# Derived by synth_flow: constraints used for SYNTHESIS (ABC targets).',
+         '# OpenSTA sources the original SDC verbatim; this file is for inspection.',
+         f'# source SDC: {cfg.sdc or "(none: YAML defaults)"}', '']
+    for m in overrides:
+        L.append(f'# override: {m}')
+    if overrides:
+        L.append('')
+    T = cfg.period_ps / 1000.0
+    L.append(f'create_clock -name {cfg.clock_port} -period {T} [get_ports {cfg.clock_port}]')
+    if cfg.clock_port_2 and cfg.period_ps_2:
+        L.append(f'create_clock -name {cfg.clock_port_2} -period {cfg.period_ps_2 / 1000.0} '
+                 f'[get_ports {cfg.clock_port_2}]')
+        L.append(f'set_clock_groups -asynchronous -group {cfg.clock_port} -group {cfg.clock_port_2}')
+    L.append(f'set_clock_uncertainty -setup {cfg.clock_uncertainty_setup_ps / 1000.0} [all_clocks]')
+    L.append(f'set_clock_uncertainty -hold {cfg.clock_uncertainty_hold_ps / 1000.0} [all_clocks]')
+    L.append(f'set_driving_cell -lib_cell {cfg.driving_cell} [all_inputs -no_clocks]')
+    L.append(f'set_load {cfg.load_ff / 1000.0} [all_outputs]')
+    L.append(f'# ABC delay target: -D {cfg.period_ps} ps (full period; per-path-group budgets arrive in Phase 2)')
+    if c is not None:
+        fps = sorted(c.false_path_ports())
+        if fps:
+            L.append('# false-path ports from SDC (excluded from I/O delay defaults, relaxed in synthesis):')
+            for fp in fps:
+                L.append(f'set_false_path -from [get_ports {fp}]')
+        n_in = len({p for d in c.input_delays for p in d.ports})
+        n_out = len({p for d in c.output_delays for p in d.ports})
+        L.append(f'# SDC I/O delays: {n_in} input port(s), {n_out} output port(s) '
+                 f'(used by OpenSTA now; used for path-group budgets in Phase 2)')
+        for e in c.exceptions:
+            if e.kind != 'false_path' or e.to or e.through:
+                L.append(f'# exception (OpenSTA now, cone budget in Phase 2): {e.kind} from={e.from_} '
+                         f'to={e.to} through={e.through} value={e.value}')
+        if c.sta_only:
+            L.append(f'# {len(c.sta_only)} STA-only command(s) not used by synthesis')
+        if c.unknown:
+            L.append(f'# {len(c.unknown)} unknown command(s), passed to OpenSTA only')
+    path.write_text('\n'.join(L) + '\n')
+
+
 def parse_cli() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1547,6 +1684,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--top', help='top module name')
     p.add_argument('--period-ps', type=int, help='target clock period in ps')
     p.add_argument('--clock-port', help='clock port name (default: clk)')
+    p.add_argument('--sdc', help='SDC file: sourced by OpenSTA and read for synthesis clocks/budgets')
     p.add_argument('--objective', choices=['delay', 'area', 'fastest', 'pareto', 'balanced'])
     p.add_argument('--modules', nargs='+', help='modules to synthesize')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep')
@@ -1576,7 +1714,7 @@ def parse_cli() -> argparse.Namespace:
 def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
     map_ = {
         'rtl': 'rtl_files', 'lib': 'lib_typ', 'lib_fast': 'lib_fast',
-        'lib_slow': 'lib_slow', 'top': 'top', 'period_ps': 'period_ps',
+        'lib_slow': 'lib_slow', 'top': 'top', 'period_ps': 'period_ps', 'sdc': 'sdc',
         'clock_port': 'clock_port', 'objective': 'objective',
         'modules': 'modules', 'recipes': 'recipes',
         'driving_cell': 'driving_cell', 'load_ff': 'load_ff',
@@ -1643,6 +1781,10 @@ def main() -> int:
         for e in errs:
             log.error(f"config error: {e}")
         return EXIT_CONFIG_ERR
+
+    # ----- SDC: constraints for synthesis (OpenSTA sources the file itself) -----
+    sdc_constraints = load_sdc_constraints(cfg, log)
+    sdc_overrides = apply_sdc_overrides(cfg, sdc_constraints, log)
 
     if cfg.abc_sequential:
         log.warning("=" * 70)
@@ -1805,6 +1947,7 @@ def main() -> int:
             if win.netlist:
                 shutil.copy(win.netlist, mod_results / 'winner.v')
                 winner_netlists[module] = str(mod_results / 'winner.v')
+            write_derived_sdc(cfg, sdc_constraints, mod_results / 'synth.sdc', sdc_overrides)
             (mod_results / 'selection.json').write_text(
                 json.dumps({
                     'winner': sel.winner,

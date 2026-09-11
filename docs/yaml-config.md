@@ -116,7 +116,7 @@ is sourced **last** and overrides any of these defaults per port.
 | `clock_uncertainty_hold_ps` | int | `100` | `set_clock_uncertainty -hold` on all clocks. |
 | `io_delay_frac` | float | `0.2` | Default `set_input_delay` / `set_output_delay` as a fraction of the period, on ports the SDC does not constrain. |
 | `wire_load_model` | string | `auto` | `auto` uses the liberty `default_wire_load` (Sky130 HD: `Small`) with `set_wire_load_mode top`; `none` disables wire load; any other value is passed to `set_wire_load_model -name`. |
-| `sdc` | path | — | User SDC sourced into every STA script after the defaults. See [sdc-support.md](sdc-support.md). |
+| `sdc` | path | — | User SDC (also `--sdc`). Sourced into every STA script after the defaults, and read for synthesis: its clocks, uncertainty, driving cell and load override the YAML fields above. See [sdc-support.md](sdc-support.md). |
 
 ### Tool paths
 
