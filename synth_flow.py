@@ -194,6 +194,13 @@ class Config:
     #   'reg2reg' T - t_cq - t_su - setup uncertainty from the synthesis liberty
     #   '<ps>'    explicit integer
     abc_target: str = 'none'
+    # OpenSTA-guided drive-strength sizing of each module's winner (resize.py).
+    # Sizing only, function preserved; measured on the bench: TNS down on every
+    # failing design for <1 % area on most (docs/architecture.md §2.7).
+    resize_winner: bool = False
+    resize_iters: int = 25
+    resize_wns_tol_ps: int = 150       # WNS regression tolerated for a TNS gain ('tns' policy)
+    resize_final: str = 'tns'          # tns | wns (never regress WNS)
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -1944,6 +1951,39 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
     path.write_text('\n'.join(L) + '\n')
 
 
+def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, log) -> None:
+    """Run resize.py on results/<module>/winner.v; keep the pre-sizing netlist
+    as winner.presize.v and write resize.json. Never fatal."""
+    try:
+        import resize as resize_mod
+    except ImportError:
+        log.warning('[resize] resize.py not found; skipping')
+        return
+    winner = mod_results / 'winner.v'
+    presize = mod_results / 'winner.presize.v'
+    shutil.copy(winner, presize)
+    sta_lib = cfg.lib_slow or cfg.lib_typ
+    try:
+        res = resize_mod.resize(
+            presize, module, _synth_lib(asdict(cfg)), sta_lib, cfg.period_ps, cfg.clock_port, work_dir,
+            sdc=cfg.sdc, iters=cfg.resize_iters, yosys=cfg.yosys, opensta=cfg.opensta,
+            driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
+            unc_setup_ps=cfg.clock_uncertainty_setup_ps, unc_hold_ps=cfg.clock_uncertainty_hold_ps,
+            wire_load_model=cfg.wire_load_model, io_delay_frac=cfg.io_delay_frac,
+            clock_port_2=cfg.clock_port_2, period_ps_2=cfg.period_ps_2,
+            wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
+            log=lambda *x: log.debug('[resize] ' + ' '.join(str(v) for v in x)))
+    except Exception as e:
+        log.warning(f'[resize] {module}: failed ({e}); winner left unsized')
+        return
+    shutil.copy(res['output'], winner)
+    (mod_results / 'resize.json').write_text(json.dumps(res, indent=2))
+    s0, s1 = res['start'], res['end']
+    log.info(f"[resize] {module}: WNS {s0['wns_ns']:+.3f} -> {s1['wns_ns']:+.3f}  "
+             f"TNS {s0['tns_ns']:+.2f} -> {s1['tns_ns']:+.2f}  area {s0['area']:.0f} -> {s1['area']:.0f}  "
+             f"({len(res['moves'])} upsizes)")
+
+
 def parse_cli() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1965,6 +2005,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--sdc', help='SDC file: sourced by OpenSTA and read for synthesis clocks/budgets')
     p.add_argument('--path-groups', action='store_true', help='EXPERIMENTAL: per-path-group ABC delay targets (see docs/architecture.md §2.5)')
     p.add_argument('--abc-target', help="ABC -D: 'none' (default, min-delay mapping), 'period', 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
+    p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
     p.add_argument('--objective', choices=['delay', 'area', 'fastest', 'pareto', 'balanced'])
     p.add_argument('--modules', nargs='+', help='modules to synthesize')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep')
@@ -2013,6 +2054,8 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.path_groups = True
     if getattr(args, 'abc_target', None):
         cfg.abc_target = args.abc_target
+    if getattr(args, 'resize', False):
+        cfg.resize_winner = True
     if args.abc_sequential:
         cfg.abc_sequential = True
     if args.hierarchical:
@@ -2266,6 +2309,8 @@ def main() -> int:
             if win.netlist:
                 shutil.copy(win.netlist, mod_results / 'winner.v')
                 winner_netlists[module] = str(mod_results / 'winner.v')
+                if cfg.resize_winner and cfg.run_sta:
+                    _resize_winner(cfg, module, mod_results, work / module / 'resize', log)
             write_derived_sdc(cfg, sdc_constraints, mod_results / 'synth.sdc', sdc_overrides,
                               groups=module_groups.get(module))
             win_groups = work / module / f'{sel.winner}.groups.json'

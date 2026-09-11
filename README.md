@@ -15,6 +15,11 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
   against a 16-design STA benchmark (retired ones in `recipes/retired/`)
 - **5 optimization objectives** — `delay`, `area`, `fastest`, `pareto`,
   `balanced`
+- **SDC in, SDC out** — one SDC drives OpenSTA verbatim and synthesis
+  (clocks, boundary conditions); `results/<module>/synth.sdc` shows what
+  synthesis used ([docs/sdc-support.md](docs/sdc-support.md))
+- **STA-guided sizing** — `--resize` fixes drive strengths on failing paths
+  with OpenSTA as the judge; TNS down on every failing bench design
 - **Multi-corner STA** — SS (setup), TT (setup+hold), FF (hold) via OpenSTA
 - **Hierarchical (bottom-up) synthesis** — leaf modules first, winning
   netlists reused by parents
@@ -95,6 +100,8 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--period-ps N` | Clock period in picoseconds |
 | `--clock-port NAME` | Clock port name (default: `clk`) |
 | `--sdc FILE` | SDC file: sourced by OpenSTA and read for synthesis clocks and boundary conditions (overrides `--period-ps`/`--clock-port`) |
+| `--abc-target T` | ABC `-D`: `none` (default), `period`, `reg2reg`, or ps. Measured: `none` is best (docs/architecture.md §2.6) |
+| `--resize` | OpenSTA-guided drive-strength sizing of each winner (`winner.presize.v` keeps the input) |
 | `--objective OBJ` | `delay`, `area`, `fastest`, `pareto`, `balanced` |
 | `--modules M1 M2` | Modules to synthesize (default: auto-detect) |
 | `--recipes R1 R2` | Recipes to sweep (default: all) |

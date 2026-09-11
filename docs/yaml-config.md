@@ -113,6 +113,15 @@ These are required only when `run_gls: true` (the default). Set
 | `path_groups` | bool | `false` | EXPERIMENTAL: one `abc` call per path group with its own budget. Measured worse than flat mapping (docs/architecture.md §2.5); off by default. |
 | `relaxed_factor` | float | `3.0` | `-D` multiplier for false-path cones when `path_groups` is on. |
 
+### Post-pass: winner sizing
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `resize_winner` | bool | `false` | Run `resize.py` on each module's winner before multi-corner STA (needs OpenSTA). Also `--resize`. Input kept as `winner.presize.v`; log in `resize.json`. |
+| `resize_iters` | int | `25` | Sizing iterations (STA calls) in the TNS phase. |
+| `resize_wns_tol_ps` | int | `150` | WNS regression tolerated for a TNS gain under the `tns` policy. |
+| `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. |
+
 ### STA modelling
 
 Applied identically to the quick STA used for winner ranking and to the

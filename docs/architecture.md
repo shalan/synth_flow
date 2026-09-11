@@ -229,6 +229,54 @@ Consequences:
   choice and mapper-side knobs (`&nf -R`, area recipes) validated by STA.
 - Any cone or group re-map inside the flow must also run without `-D`.
 
+### 2.7 Re-mapping cones does not pay; STA-guided sizing does
+
+`refine.py` implements the Phase 4 loop exactly: failing endpoints from
+OpenSTA, full flop-bounded fan-in cones, boundary drivers kept in place,
+un-map with functional liberty models, `abc` with a delay recipe and no
+`-D`, accept on TNS, equivalence with `async2sync` + `equiv_simple` +
+`equiv_induct`. On apb_timer every partial-cone remap (514 of 591 cone
+cells, four recipes) lands between −0.44 and −1.27 ns against the original
+−0.065 ns. Only a **whole-design** remap improves it (−0.038 ns, TNS −3.27 →
+−1.30, area −1.5 %, 1594/1594 equivalence cells proven), and that is just
+another mapping pass over the same logic, which the recipe sweep already
+provides. ABC's mapper needs the whole combinational network to make good
+structural and sizing decisions; any cut inside it costs more than the
+local re-optimization gains.
+
+`resize.py` attacks the same failing paths without touching logic: one
+drive-strength step per failing path per iteration (largest stage delay
+first), batch accepted on TNS with a bounded WNS regression, bisected on
+rejection, then a zero-tolerance WNS repair phase. Bench winners, OpenSTA at
+SS with SDCs (`bench/results/postpass-resize.csv`):
+
+| design | WNS before | WNS after | TNS before | TNS after | Δarea |
+|---|---|---|---|---|---|
+| alu32 | -0.922 | -1.032 | -2.07 | -1.65 | +0.33 % |
+| mul16_pipe | -0.411 | -0.272 | -0.67 | -0.28 | +0.38 % |
+| mul32_mac | -2.584 | -2.371 | -2.58 | -2.37 | +0.21 % |
+| fir8 | +0.323 | +0.323 | +0.00 | +0.00 | +0.00 % |
+| aes_round | +1.422 | +1.422 | +0.00 | +0.00 | +0.00 % |
+| sha256_core | -0.074 | +0.010 | -0.07 | +0.00 | +0.03 % |
+| crc32_8 | -0.030 | -0.009 | -0.06 | -0.01 | +0.70 % |
+| rr_arbiter16 | -0.430 | -0.384 | -4.20 | -3.88 | +0.69 % |
+| uart | +0.054 | +0.054 | +0.00 | +0.00 | +0.00 % |
+| spi_master | +0.203 | +0.203 | +0.00 | +0.00 | +0.00 % |
+| apb_timer | -0.065 | -0.085 | -3.27 | -0.09 | +1.64 % |
+| fifo_sync | -0.602 | -0.694 | -229.47 | -151.69 | +5.34 % |
+| zx16_core_ahb | -0.173 | -0.141 | -2.06 | -0.54 | +0.74 % |
+| zxip | -1.238 | -0.346 | -14.82 | -2.29 | +0.32 % |
+| ms_psram_ahb | +0.117 | +0.117 | +0.00 | +0.00 | +0.00 % |
+| uart_apb_sys | +3.971 | +3.971 | +0.00 | +0.00 | +0.00 % |
+
+TNS improves on every failing design; sha256_core closes; zxip recovers
+0.9 ns of WNS for 0.3 % area. Three designs trade a few tens of ps of WNS
+for a large TNS gain under the default `tns` policy (`resize_final: wns`
+forbids that and rolls back to the input). Sizing is function-preserving
+by construction, so no equivalence check is needed. It is available in the
+flow as `resize_winner: true` / `--resize`, applied to each module's winner
+before the multi-corner STA; `winner.presize.v` keeps the input.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

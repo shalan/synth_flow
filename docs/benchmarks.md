@@ -177,6 +177,33 @@ WNS (mean −0.59 / −0.22 / −1.08 ns) for at most 3.9 % area; see
 [architecture.md §2.6](architecture.md#26-d-never-reached-abc-and-that-was-the-best-setting).
 `abc_target` therefore defaults to `none`.
 
+## Post-passes on winners — `postpass.py`
+
+`./postpass.py --passes resize [--designs ...]` runs `resize.py` (and/or
+`refine.py --whole-only`) on every `bench/work/<design>/results/<top>/winner.v`
+with the clock, period, driving cell and load taken from the derived
+`synth.sdc`, and writes `results/postpass-<tag>.csv`. Current result
+(`postpass-resize.csv`):
+
+| design | WNS before | WNS after | TNS before | TNS after | Δarea |
+|---|---|---|---|---|---|
+| alu32 | -0.922 | -1.032 | -2.07 | -1.65 | +0.33 % |
+| mul16_pipe | -0.411 | -0.272 | -0.67 | -0.28 | +0.38 % |
+| mul32_mac | -2.584 | -2.371 | -2.58 | -2.37 | +0.21 % |
+| fir8 | +0.323 | +0.323 | +0.00 | +0.00 | +0.00 % |
+| aes_round | +1.422 | +1.422 | +0.00 | +0.00 | +0.00 % |
+| sha256_core | -0.074 | +0.010 | -0.07 | +0.00 | +0.03 % |
+| crc32_8 | -0.030 | -0.009 | -0.06 | -0.01 | +0.70 % |
+| rr_arbiter16 | -0.430 | -0.384 | -4.20 | -3.88 | +0.69 % |
+| uart | +0.054 | +0.054 | +0.00 | +0.00 | +0.00 % |
+| spi_master | +0.203 | +0.203 | +0.00 | +0.00 | +0.00 % |
+| apb_timer | -0.065 | -0.085 | -3.27 | -0.09 | +1.64 % |
+| fifo_sync | -0.602 | -0.694 | -229.47 | -151.69 | +5.34 % |
+| zx16_core_ahb | -0.173 | -0.141 | -2.06 | -0.54 | +0.74 % |
+| zxip | -1.238 | -0.346 | -14.82 | -2.29 | +0.32 % |
+| ms_psram_ahb | +0.117 | +0.117 | +0.00 | +0.00 | +0.00 % |
+| uart_apb_sys | +3.971 | +3.971 | +0.00 | +0.00 | +0.00 % |
+
 ## Adding a design
 
 1. Put the RTL in `bench/designs/<name>/<name>.v` (or add a `fetch` line for

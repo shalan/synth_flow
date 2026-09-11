@@ -143,6 +143,14 @@ d, note = resolve_abc_target(cfg)
 check('reg2reg target = T - t_cq - t_su - unc', d == int(10000 - lt.t_cq_ps - lt.t_su_ps - 250), f'{d} ({note})')
 cfg.abc_target = 'period'; check("'period' target", resolve_abc_target(cfg)[0] == 10000)
 cfg.abc_target = 'none'; check("'none' target (default) -> 0", resolve_abc_target(cfg)[0] == 0 and Config().abc_target == 'none')
+check('resize is opt-in', Config().resize_winner is False and Config().resize_final == 'tns')
+from resize import drive_families, next_size, retype, instance_types
+fam = drive_families(str(LIB_SS))
+check('drive families parsed', fam.get('sky130_fd_sc_hd__nand2') == [1, 2, 4, 8], str(fam.get('sky130_fd_sc_hd__nand2')))
+check('next_size steps up and stops at max', next_size('sky130_fd_sc_hd__nand2_2', fam) == 'sky130_fd_sc_hd__nand2_4' and next_size('sky130_fd_sc_hd__nand2_8', fam) is None)
+_nl = "module m(a,y);\n  input a; output y;\n  sky130_fd_sc_hd__inv_1 _7_ (.A(a), .Y(y));\n  sky130_fd_sc_hd__buf_2 _8_ (.A(y), .X(z));\nendmodule\n"
+check('instance_types', instance_types(_nl) == {'_7_': 'sky130_fd_sc_hd__inv_1', '_8_': 'sky130_fd_sc_hd__buf_2'}, str(instance_types(_nl)))
+check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
 check('floor applies when budget is negative', resolve_abc_target(cfg)[0] == 250)

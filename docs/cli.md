@@ -15,7 +15,8 @@ synth_flow run      synth.yaml [--sdc top.sdc] [--stage map|search|refine|all]
                                [--recipes R ...] [--modules M ...] [--hierarchical]
                                [--parallel N] [--work-dir D] [--results-dir D] [--json]
 synth_flow sdc      check top.sdc --top NAME [--rtl ...]   # what synthesis uses / STA-only / ignored
-synth_flow refine   netlist.v --sdc top.sdc --lib LIB [--lib-slow ..] [--iters N] [--margin-ps N]
+synth_flow resize   netlist.v --sdc top.sdc --lib LIB --period-ps N --clock-port C   # today: python3 resize.py
+synth_flow refine   netlist.v --sdc top.sdc --lib LIB [--lib-slow ..] [--iters N] [--margin-ps N]  # today: python3 refine.py
 synth_flow sta      netlist.v --sdc top.sdc --lib-slow .. --lib-typ .. --lib-fast .. [--sdf out.sdf]
 synth_flow lec      golden.v revised.v --lib LIB
 synth_flow bench    [--designs ...] [--recipes ...] [--quick] [--tag T] [--compare A.csv B.csv]
@@ -33,7 +34,8 @@ report is still written to the results directory.
 |---|---|---|
 | `map` | Recipe sweep, quick STA, winner selection, corner STA, with the configured `abc_target`. | today |
 | `search` | Per-group `-D` bisection with OpenSTA feedback. | 3 |
-| `refine` | Critical-cone resynthesis, area recovery, equivalence checks. | 4 |
+| `resize` | OpenSTA-guided drive-strength sizing of the winner (today: `--resize`). | today |
+| `refine` | Whole-design remap passes with equivalence (`refine.py --whole-only`); cone remaps measured negative. | 4 |
 | `all` | All of the above. Default once `search` exists. | 3 |
 
 Until Phase 3, `run` behaves as `--stage map`.
@@ -55,7 +57,8 @@ New keys:
 
 ```yaml
 sdc: constraints/top.sdc          # today: STA + synthesis clocks/boundary conditions (see sdc-support.md)
-abc_target: reg2reg               # today: period | reg2reg | <ps>; Phase 3 makes it a per-design search
+abc_target: none                  # today: none (default, best) | period | reg2reg | <ps>
+resize_winner: true               # today: OpenSTA-guided sizing of each winner (--resize)
 dont_use:                         # cells hidden from abc and dfflibmap
   - sky130_fd_sc_hd__probe*
   - sky130_fd_sc_hd__lpflow*

@@ -97,27 +97,24 @@ liberty flop timing are reused by Phase 3.
   recipes) validated by STA, replacing the `-D` search idea. `abc_search.py`
   stays as the grid/bisection harness for any per-design knob.
 
-## Phase 4 — STA-driven refine loop  ☐
+## Phase 4 — STA-driven refine loop  ☑ (evaluated: cone remap negative; sizing positive)
 
-Deliverables
-- OpenSTA: dump endpoints with slack below a margin
-  (`find_timing_paths -slack_max`) with levels / slew / fanout of the worst
-  path per endpoint.
-- Yosys refine script: reload `winner.v` + functional liberty, select failing
-  endpoints, full fan-in cones bounded by flops, `flatten @cone`, `abc` with
-  **no `-D`** (§2.6), a delay recipe and a **cone constraint file naming the
-  driving flop cell and the D-pin load** (§2.5), clean up leftover generic
-  gates, delete the imported cell modules, write the netlist.
-- Accept/reject on TNS; iteration cap; classify depth-bound versus
-  drive-bound endpoints (drive-bound go to sizing, Phase 6).
-- Area recovery: cones with large positive slack re-mapped with an area
-  recipe, accepted only if slack stays ≥ margin.
-- Equivalence check after every accepted iteration; hard failure on unproven.
-- Config knobs: `refine.iters`, `refine.margin_ps`, `refine.recipe`,
-  `refine.area_recipe`.
-
-Acceptance: TNS monotone non-increasing across accepted iterations; LEC
-clean; bench shows WNS improvement on designs that fail timing after Phase 3.
+- ☑ `refine.py`: endpoints from OpenSTA, flop-bounded cones with boundary
+  drivers kept, un-map/re-map with no `-D`, TNS acceptance, equivalence
+  (`async2sync`, `equiv_simple`, `equiv_induct`), recipe escalation and a
+  whole-design fallback (`--whole-only`). Result: partial-cone remaps are
+  always worse; whole-design remap is a modest extra mapping pass
+  ([architecture.md §2.7](architecture.md#27-re-mapping-cones-does-not-pay-sta-guided-sizing-does)).
+  Kept as a standalone tool.
+- ☑ `resize.py` (pulled forward from Phase 6): OpenSTA-guided drive-strength
+  sizing; TNS down on every failing bench design, sha256_core closes,
+  zxip +0.9 ns WNS, ≤ 0.7 % area on most designs. In the flow as
+  `resize_winner: true` / `--resize`; `bench/postpass.py` evaluates passes
+  on bench winners.
+- ☐ Downsizing for area recovery on slack-rich paths (same machinery,
+  reverse direction, accepted only while WNS stays ≥ margin).
+- ☐ Buffering of high-fanout nets (the apb_timer/uart WNS spread across
+  recipes comes from these) as a sizing-pass move.
 
 ## Phase 5 — Front-end and library sweeps  ☐
 
@@ -135,8 +132,7 @@ Acceptance: bench CSV rows for each option; defaults chosen by data.
 ## Phase 6 — Sizing, hierarchy, packaging  ☐
 
 Deliverables
-- STA-driven sizing pass: parse worst paths, upsize cells and flops on them
-  in the netlist, re-run STA until no gain.
+- ☑ STA-driven sizing pass (`resize.py`, see Phase 4).
 - Hierarchical time budgeting: derive leaf-module I/O delays from a flat
   depth / STA pass instead of the default 20 %.
 - Split `synth_flow.py` into a package (config, sdc, drivers, sta, select,

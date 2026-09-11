@@ -230,7 +230,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            out_dir: Path, *, sdc=None, iters=10, margin_ps=0, yosys='yosys', opensta='sta',
            driving_cell='sky130_fd_sc_hd__inv_2', load_ff=17.65, unc_setup_ps=250, unc_hold_ps=100,
            wire_load_model='auto', io_delay_frac=0.2, clock_port_2=None, period_ps_2=None,
-           per_path=1, max_paths=200, wns_tol=0.15, log=print) -> dict:
+           per_path=1, max_paths=200, wns_tol=0.15, wns_repair_iters=8, final='tns', log=print) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     constraints = sf._sta_constraints(
         clock_port=clock_port, period_ns=period_ps / 1000.0, clock_port_2=clock_port_2,
@@ -255,6 +255,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     steps: list[Step] = []
     tried: set[str] = set()
     total_moves: dict[str, str] = {}
+    start_wns = sta.wns
+    states: list[tuple[Path, float, float, dict]] = [(cur, sta.wns, sta.tns, {})]   # accepted (netlist, wns, tns, moves so far)
     def evaluate(moves: dict[str, str], tag: str):
         new_text = retype(text, moves)
         new = out_dir / f'{tag}.v'
@@ -299,6 +301,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                 cur, text, sta = new, new_text, sta_new
                 types.update(sub)
                 total_moves.update(sub)
+                states.append((cur, sta.wns, sta.tns, dict(total_moves)))
                 accepted = True
                 break
             if len(batch) == 1:
@@ -312,6 +315,47 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                 break
         else:
             stall = 0
+    # Phase 2: WNS repair. The TNS phase tolerates a moving worst path; now
+    # attack only the worst path(s) with zero WNS tolerance so the final
+    # netlist is never worse than the input on WNS.
+    wns_tol_start = wns_tol
+    wns_tol = 0.0
+    tried2: set[str] = set()
+    for rep in range(wns_repair_iters):
+        if not sta.paths or (start_wns is not None and sta.wns >= start_wns - 1e-6 and sta.wns >= 0):
+            break
+        worst = sorted(sta.paths, key=lambda pth: pth.slack)[:3]
+        moves = pick_moves(worst, types, fam, tried | tried2, per_path=2)
+        if not moves:
+            break
+        it += 1
+        new, new_text, sta_new = evaluate(moves, f'it{it}')
+        ok = sta_new.ok and sta_new.wns > sta.wns + 1e-6 and sta_new.tns >= sta.tns - 1e-6
+        steps.append(Step(it=it, moves=moves, wns_before=sta.wns, tns_before=sta.tns,
+                          wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
+        log(f'it{it} (wns repair): {len(moves)} upsizes -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
+            f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f} {"ACCEPT" if ok else "reject"}')
+        tried2 |= set(moves)
+        if ok:
+            cur, text, sta = new, new_text, sta_new
+            types.update(moves)
+            total_moves.update(moves)
+            states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+    # Final state: best TNS among accepted states that did not regress WNS;
+    # if every improvement moved the worst path, best TNS overall (reported).
+    if final == 'wns':
+        pool = [st for st in states if st[1] >= start_wns - 1e-6] or states
+    else:  # 'tns': any accepted state (each already within wns_tol of its predecessor)
+        pool = [st for st in states if st[1] >= start_wns - wns_tol_start - 1e-6] or states
+    best = max(pool, key=lambda st: (st[2], st[1]))
+    wns_regressed = best[1] < start_wns - 1e-6
+    if best[0] != cur:
+        cur = best[0]
+        total_moves = best[3]
+        sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'final', k=max_paths, slack_max=margin)
+        log(f'final state rolled back to {cur.name}: WNS={sta.wns:+.3f} TNS={sta.tns:+.2f}')
+    if wns_regressed:
+        log(f'note: WNS regressed {start_wns:+.3f} -> {sta.wns:+.3f} for a TNS gain; --final wns forbids this')
     final = out_dir / 'resized.v'
     shutil.copy(cur, final)
     area = area_of(yosys, liberty, final, top)
@@ -320,7 +364,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     res = {'input': str(netlist), 'output': str(final), 'top': top,
            'start': {'wns_ns': steps[0].wns_before if steps else sta.wns, 'tns_ns': steps[0].tns_before if steps else sta.tns, 'area': area0},
            'end': {'wns_ns': sta.wns, 'tns_ns': sta.tns, 'area': area, 'failing': len(sta.paths)},
-           'moves': total_moves, 'steps': [asdict(s) for s in steps]}
+           'moves': total_moves, 'steps': [asdict(s) for s in steps], 'wns_regressed': wns_regressed}
     (out_dir / 'resize.json').write_text(json.dumps(res, indent=2))
     return res
 
@@ -335,6 +379,8 @@ def main() -> int:
     ap.add_argument('--margin-ps', type=int, default=0); ap.add_argument('--per-path', type=int, default=1)
     ap.add_argument('--max-paths', type=int, default=200)
     ap.add_argument('--wns-tol', type=float, default=0.15, help='ns of WNS regression tolerated when TNS improves')
+    ap.add_argument('--final', choices=['tns', 'wns'], default='tns',
+                    help="final state: best TNS within --wns-tol of the start WNS (tns), or never regress WNS (wns)")
     ap.add_argument('--driving-cell', default='sky130_fd_sc_hd__inv_2'); ap.add_argument('--load-ff', type=float, default=17.65)
     ap.add_argument('--wire-load-model', default='auto')
     ap.add_argument('--yosys', default='yosys'); ap.add_argument('--opensta', default='sta')
@@ -345,7 +391,7 @@ def main() -> int:
                  sdc=a.sdc, iters=a.iters, margin_ps=a.margin_ps, yosys=a.yosys, opensta=a.opensta,
                  driving_cell=a.driving_cell, load_ff=a.load_ff, wire_load_model=a.wire_load_model,
                  clock_port_2=a.clock_port_2, period_ps_2=a.period_ps_2, per_path=a.per_path,
-                 max_paths=a.max_paths, wns_tol=a.wns_tol, log=log)
+                 max_paths=a.max_paths, wns_tol=a.wns_tol, final=a.final, log=log)
     if a.json:
         print(json.dumps(res, indent=2))
     return 0
