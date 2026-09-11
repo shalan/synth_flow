@@ -24,6 +24,28 @@ Requirements: Yosys on `PATH` (or `YOSYS=`), PyYAML. OpenSTA (`sta` on
 `PATH`, `OPENSTA=`, or `--sta-bin`) is optional; without it the WNS/TNS
 columns are empty and ABC's `stime` delay is recorded as a proxy.
 
+<details>
+<summary>Building OpenSTA on macOS (Homebrew)</summary>
+
+```bash
+brew install bison cmake eigen flex swig tcl-tk@8 mht208/formal/cudd
+git clone https://github.com/parallaxsw/OpenSTA.git && cd OpenSTA
+export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
+export CMAKE_INCLUDE_PATH="$(brew --prefix flex)/include"
+export CMAKE_LIBRARY_PATH="$(brew --prefix flex)/lib;$(brew --prefix bison)/lib"
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_TCL_READLINE=OFF \
+  -DCUDD_DIR="$(brew --prefix cudd)" \
+  -DTCL_LIBRARY="$(brew --prefix tcl-tk@8)/lib/libtcl8.6.dylib" \
+  -DTCL_INCLUDE_PATH="$(brew --prefix tcl-tk@8)/include/tcl-tk" \
+  -DCMAKE_INSTALL_PREFIX="$HOME/.local/opt/opensta"
+make -j"$(sysctl -n hw.ncpu)" && make install
+ln -sf "$HOME/.local/opt/opensta/bin/sta" "$HOME/.local/bin/sta"
+```
+
+Verified with OpenSTA 3.1.0 (2026-09-11) on Apple Silicon, ~5 min build.
+</details>
+
 ## Designs
 
 | Name | Category | Clock (ns) | What it stresses |

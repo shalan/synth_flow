@@ -104,6 +104,20 @@ These are required only when `run_gls: true` (the default). Set
 | `driving_cell` | string | `sky130_fd_sc_hd__inv_2` | Cell used in `set_driving_cell` for ABC's input boundary model. Must exist in `lib_typ`. |
 | `load_ff` | float | `17.65` | Output load in **femtofarads** for ABC's `set_load`. The OpenLane Sky130 HD default. |
 
+### STA modelling
+
+Applied identically to the quick STA used for winner ranking and to the
+multi-corner STA on the winner, so both see the same model. The user `sdc`
+is sourced **last** and overrides any of these defaults per port.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `clock_uncertainty_setup_ps` | int | `250` | `set_clock_uncertainty -setup` on all clocks. |
+| `clock_uncertainty_hold_ps` | int | `100` | `set_clock_uncertainty -hold` on all clocks. |
+| `io_delay_frac` | float | `0.2` | Default `set_input_delay` / `set_output_delay` as a fraction of the period, on ports the SDC does not constrain. |
+| `wire_load_model` | string | `auto` | `auto` uses the liberty `default_wire_load` (Sky130 HD: `Small`) with `set_wire_load_mode top`; `none` disables wire load; any other value is passed to `set_wire_load_model -name`. |
+| `sdc` | path | — | User SDC sourced into every STA script after the defaults. See [sdc-support.md](sdc-support.md). |
+
 ### Tool paths
 
 | Field | Type | Default | Description |
@@ -278,7 +292,7 @@ parallel: 4
 ### Final characterization
 
 ```yaml
-# All 14 recipes, full STA, full GLS
+# All recipes, full STA, full GLS
 objective: pareto    # see the trade-off space
 parallel: 0          # use all cores
 ```
