@@ -189,8 +189,8 @@ print('\n[2] Recipe discovery')
 
 recipes = discover_recipes(DEFAULT_RECIPES_DIR, [])
 names = [r[0] for r in recipes]
-check('finds all 21 recipes', len(recipes) == 21, f'got {len(recipes)}: {names}')
-check('delay_retime is first by stability', names[0] == 'delay_retime', f'got={names[0]}')
+check('finds all 16 recipes', len(recipes) == 16, f'got {len(recipes)}: {names}')
+check('delay_choice_deep_v3 is first by stability', names[0] == 'delay_choice_deep_v3', f'got={names[0]}')
 check('delay_triple before balanced_resyn',
       names.index('delay_triple') < names.index('balanced_resyn'),
       f'order={names}')

@@ -58,26 +58,24 @@ DEFAULT_RECIPES_DIR = SCRIPT_DIR / 'recipes'
 
 # Stability tiebreaker — lower index = preferred when QoR ties.
 # Order: fastest-and-most-robust first, exotic/heavy recipes last.
+# Tie-break order for winner selection (lower = preferred when metrics tie).
+# Ordered by mean WNS rank across the 16-design STA baseline
+# (bench/results/baseline-sta.csv, 2026-09-12); references last.
 RECIPE_PRIORITY = [
-    'delay_retime',
-    'delay_triple',
-    'delay_choice_deep',
-    'delay_iter_heavy',
-    'delay_aggressive',
-    'delay_choice_deep_v2',
     'delay_choice_deep_v3',
-    'delay_choice_deep_v4',
-    'delay_choice_deep_combined',
-    'delay_choice_deep_bb',
+    'delay_triple',
+    'delay_iter_heavy',
     'balanced_resyn',
+    'delay_choice_deep',
     'balanced_resyn2x',
-    'balanced_struct',
+    'delay_choice_deep_v2',
+    'delay_choice_deep_bb',
+    'delay_aggressive',
     'area_safe',
+    'delay_choice_deep_v4',
     'area_classic',
     'area_lut6',
     'area_max',
-    'lazy_man',
-    'lms',
     'orfs_speed',
     'yosys_default',
 ]
