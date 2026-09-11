@@ -150,10 +150,11 @@ try:
     _synth_flags(['adder=ripple']); check('unknown adder rejected', False)
 except ValueError:
     check('unknown adder rejected', True)
-from resize import drive_families, next_size, retype, instance_types
+from resize import drive_families, next_size, prev_size, retype, instance_types
 fam = drive_families(str(LIB_SS))
 check('drive families parsed', fam.get('sky130_fd_sc_hd__nand2') == [1, 2, 4, 8], str(fam.get('sky130_fd_sc_hd__nand2')))
 check('next_size steps up and stops at max', next_size('sky130_fd_sc_hd__nand2_2', fam) == 'sky130_fd_sc_hd__nand2_4' and next_size('sky130_fd_sc_hd__nand2_8', fam) is None)
+check('prev_size steps down and stops at min', prev_size('sky130_fd_sc_hd__nand2_4', fam) == 'sky130_fd_sc_hd__nand2_2' and prev_size('sky130_fd_sc_hd__nand2_1', fam) is None)
 _nl = "module m(a,y);\n  input a; output y;\n  sky130_fd_sc_hd__inv_1 _7_ (.A(a), .Y(y));\n  sky130_fd_sc_hd__buf_2 _8_ (.A(y), .X(z));\nendmodule\n"
 check('instance_types', instance_types(_nl) == {'_7_': 'sky130_fd_sc_hd__inv_1', '_8_': 'sky130_fd_sc_hd__buf_2'}, str(instance_types(_nl)))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
