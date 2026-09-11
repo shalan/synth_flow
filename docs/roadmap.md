@@ -73,38 +73,33 @@ Acceptance: OpenSTA still sources the SDC verbatim; JSON matches for all
 sample SDCs; hardcoded reset list removed. Command coverage is specified in
 [sdc-support.md](sdc-support.md).
 
-## Phase 2 — Path-group partitioned mapping  ☐
+## Phase 2 — Path-group partitioned mapping  ☑ (evaluated: negative)
+
+Implemented as specified (`path_groups: true`, `liberty_timing.py`,
+`build_path_groups`, per-group `-constr`, `groups.json`, budgets in
+`synth.sdc`; 20 unit tests). Measured on the bench with OpenSTA:
+**area +10 to +28 %, WNS worse by 0.2 to 2.5 ns** on apb_timer and uart.
+Cause: every internal group boundary is modelled as `inv_1` driving 33 fF,
+so later groups oversize and earlier groups drive loads they were not sized
+for ([architecture.md §2.5](architecture.md#25-partitioned-mapping-hurts-the-boundary-model-is-the-problem)).
+Kept as an opt-in experiment; default off. The SDC-derived budgets and the
+liberty flop timing are reused by Phase 3.
+
+## Phase 3 — Global ABC target and per-design `-D` search  ◐
 
 Deliverables
-- Liberty parser for flop clock-to-Q and setup (per corner) to compute
-  budgets:
-  - reg→reg = T − t_cq − t_su − uncertainty
-  - in→reg = T − in_delay − t_su
-  - reg→out = T − t_cq − out_delay
-  - in→out = T − in_delay − out_delay
-  - multicycle = N·T; false path / async cross-domain = relaxed
-- New Yosys driver template: select groups with `%co*` / `%ci*` stopping at
-  flop types (list from liberty), assign overlaps to the tightest group, run
-  `abc -D <budget> -constr <group.constr> @group` per group.
-- Per-group `-constr` files from SDC driving cell / load.
-- Group statistics in `summary.json` (cells per group, budget, achieved
-  slack).
+- ☑ `abc_target: period | reg2reg | <ps>` — `reg2reg` hands ABC
+  `T − t_cq − t_su − uncertainty` from the synthesis liberty (1.45 ns less
+  than the period on Sky130 HD at SS). Reported in `synth.sdc`.
+- ☐ Bench `abc_target=reg2reg` against `baseline-sta`; pick the default from
+  the data.
+- ☐ Per-design `-D` bisection with OpenSTA WNS/TNS feedback: smallest area
+  that meets slack, capped iterations; reuse the pre-ABC RTLIL
+  (`write_rtlil` after `dfflibmap`) so re-mapping skips `synth`.
+- ☐ Per-design target recorded in `summary.json` and `synth.sdc`.
 
-Acceptance: union of groups equals all `$_*_` gates (leftover 0) on every
-bench design; equivalence versus flat mapping; bench shows ≥ flat QoR where
-I/O delays are non-trivial.
-
-## Phase 3 — Per-group `-D` search  ☐
-
-Deliverables
-- OpenSTA Tcl: `group_path` per synthesis group; per-group worst slack parse.
-- Bisection on `-D` per group: smallest area that meets slack; capped
-  iterations.
-- Reuse the pre-ABC RTLIL (`write_rtlil` after `dfflibmap`) so re-mapping
-  skips `synth`.
-
-Acceptance: search converges in ≤ 6 STA calls per group on bench; area
-reduction versus fixed `-D` reported in the CSV.
+Acceptance: search converges in ≤ 6 STA calls per design on the bench; the
+result dominates the fixed-`-D` sweep on area at equal or better WNS.
 
 ## Phase 4 — STA-driven refine loop  ☐
 
@@ -114,8 +109,9 @@ Deliverables
   path per endpoint.
 - Yosys refine script: reload `winner.v` + functional liberty, select failing
   endpoints, full fan-in cones bounded by flops, `flatten @cone`, `abc` with
-  a tight `-D` and delay recipe, clean up leftover generic gates, delete the
-  imported cell modules, write the netlist.
+  a tight `-D`, a delay recipe and a **cone constraint file naming the
+  driving flop cell and the D-pin load** (§2.5), clean up leftover generic
+  gates, delete the imported cell modules, write the netlist.
 - Accept/reject on TNS; iteration cap; classify depth-bound versus
   drive-bound endpoints (drive-bound go to sizing, Phase 6).
 - Area recovery: cones with large positive slack re-mapped with an area
@@ -158,6 +154,6 @@ percent of flat on WNS.
 ## Ordering rationale
 
 Measure before optimizing (0). Budgets need parsed constraints (1 before 2).
-Search and refine need consistent STA and groups (0, 2 before 3, 4).
+Search and refine need consistent STA (0 before 3, 4); Phase 2's budgets feed Phase 3's starting point.
 Front-end and library sweeps are independent and can be interleaved once the
 bench exists.

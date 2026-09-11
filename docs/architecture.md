@@ -150,20 +150,66 @@ proved 111/111 `$equiv` cells against the original netlist. Instance names
 in `write_verilog -noattr` output are exactly what OpenSTA reports, so no
 name mapping is required.
 
-## 3. Target architecture
+### 2.5 Partitioned mapping hurts: the boundary model is the problem
+
+Phase 2 was implemented as designed (`path_groups: true`): in→out, in→reg,
+reg→out and relaxed groups, tightest budget first, then reg→reg. Measured
+with OpenSTA on the bench (SS corner, SDCs applied):
+
+| Design / recipe | Area flat | Area grouped | WNS flat | WNS grouped |
+|---|---|---|---|---|
+| apb_timer / orfs_speed | 10 862 | 13 479 (+24 %) | −0.08 ns | −2.57 ns |
+| apb_timer / delay_choice_deep_v3 | 10 882 | 13 916 (+28 %) | −0.07 ns | −2.37 ns |
+| uart / orfs_speed | 3 675 | 4 113 (+12 %) | +0.04 ns | −0.14 ns |
+| uart / delay_choice_deep_v3 | 3 605 | 3 958 (+10 %) | +0.13 ns | −0.23 ns |
+
+Cell mix on apb_timer / orfs_speed explains it:
+
+| | flat | grouped |
+|---|---|---|
+| cells | 1343 | 1395 |
+| `buf` | 12 | 170 |
+| drive strength ×2 / ×4 / ×6 | 99 / 12 / 0 | 200 / 110 / 91 |
+
+Each `abc` call models its boundary with the constraint file: every
+primary input is driven by `set_driving_cell` (`inv_1`) and every primary
+output drives `set_load` (33 fF). At an internal group boundary both are
+wrong. The later group sees a weak driver and a tight budget, so it upsizes
+its first stages and buffers; the earlier group was sized for 33 fF and now
+drives those enlarged inputs. OpenSTA sees the real loads and the path gets
+slower, not faster. The in→out group also captured 532 of 1428 gates on
+apb_timer (the read mux plus address decode), so most of the design was
+mapped under the tightest budget.
+
+Rules that follow, applied to Phases 3–4:
+
+- **Do not cut combinational logic between ABC calls** unless the cut lies
+  on flop pins, whose drive and load are known from the liberty.
+- **A re-mapped cone must be bounded by flops**, and its constraint file
+  must name the driving flop cell and the flop D-pin capacitance, not
+  `inv_1` / 33 fF.
+- **The global `-D` is the safe lever.** `abc_target: reg2reg` gives ABC
+  `T − t_cq − t_su − uncertainty` (on Sky130 HD at SS that is 1.45 ns less
+  than the period) without any partition. Per-design search over `-D` with
+  OpenSTA feedback replaces per-group budgets.
+
+`path_groups` stays in the code as an opt-in experiment so the result can
+be reproduced (`bench.py --set path_groups=true`).
+
+## 3. Target architecture (revised after §2.5)
 
 ```
-SDC + YAML ──► sdc/parse (tclsh stubs) ──► constraints JSON
+SDC + YAML ──► sdc_parse (tclsh stubs) ──► constraints (clocks, I/O delays, exceptions)
                                               │
                     liberty (t_cq, t_su) ─────┤
                                               ▼
-              path groups + budgets ──► partitioned mapping (per-group abc -D)
+                 global ABC target  ──► single abc call per recipe (-D = search variable)
                                               ▼
-                       OpenSTA (full SDC) ──► per-group slack ──► -D bisection
+                       OpenSTA (full SDC) ──► WNS / TNS per netlist ──► -D bisection per design
                                               ▼
-                     failing endpoints ──► cone un-map / re-map ──► accept on TNS
-                                              │            ▲
-                                              └── equiv ───┘
+                     failing endpoints ──► full flop-bounded cone un-map / re-map
+                                              │   (constr = driving flop, D-pin load)
+                                              └── accept on TNS ── equiv ──┘
                                               ▼
                      area recovery on slack-rich cones ──► sizing ──► reports
 ```
@@ -172,10 +218,9 @@ Design rules:
 
 - **OpenSTA is the judge.** ABC's internal model has no wire load and one
   global driver, so every ABC move is a search step validated by STA.
-- **Full cones bounded by flops.** A partial cone re-creates the arrival
-  problem (cut nets look like zero-arrival inputs). Full cones are
-  self-consistent; a huge cone degenerates into a global re-run, which is
-  still correct.
+- **Never cut inside combinational logic** (§2.5). Cones handed to ABC are
+  bounded by flops or ports, and their constraint file describes the real
+  boundary: the driving flop cell and the D-pin capacitance.
 - **Take all failing endpoints per iteration** and converge on TNS, not
   WNS, to avoid whack-a-mole.
 - **Depth-bound versus drive-bound.** Few levels with bad slews means

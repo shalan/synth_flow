@@ -31,7 +31,7 @@ report is still written to the results directory.
 
 | Stage | What runs | Phase |
 |---|---|---|
-| `map` | Recipe sweep, quick STA, winner selection, corner STA. Path-group partitioning once Phase 2 lands. | today / 2 |
+| `map` | Recipe sweep, quick STA, winner selection, corner STA, with the configured `abc_target`. | today |
 | `search` | Per-group `-D` bisection with OpenSTA feedback. | 3 |
 | `refine` | Critical-cone resynthesis, area recovery, equivalence checks. | 4 |
 | `all` | All of the above. Default once `search` exists. | 3 |
@@ -54,7 +54,8 @@ timing. Existing keys are documented in [yaml-config.md](yaml-config.md).
 New keys:
 
 ```yaml
-sdc: constraints/top.sdc          # exists today (STA only); becomes the constraint source of truth
+sdc: constraints/top.sdc          # today: STA + synthesis clocks/boundary conditions (see sdc-support.md)
+abc_target: reg2reg               # today: period | reg2reg | <ps>; Phase 3 makes it a per-design search
 dont_use:                         # cells hidden from abc and dfflibmap
   - sky130_fd_sc_hd__probe*
   - sky130_fd_sc_hd__lpflow*

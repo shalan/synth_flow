@@ -104,6 +104,15 @@ These are required only when `run_gls: true` (the default). Set
 | `driving_cell` | string | `sky130_fd_sc_hd__inv_2` | Cell used in `set_driving_cell` for ABC's input boundary model. Must exist in `lib_typ`. |
 | `load_ff` | float | `17.65` | Output load in **femtofarads** for ABC's `set_load`. The OpenLane Sky130 HD default. |
 
+### ABC delay target
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `abc_target` | string | `period` | ABC `-D`. `period` = full clock period (ORFS convention); `reg2reg` = `period − t_cq − t_su − clock_uncertainty_setup_ps` using the synthesis liberty's smallest flop; or an integer in ps. Also `--abc-target`. |
+| `min_budget_frac` | float | `0.25` | Floor for any derived target, as a fraction of the period. |
+| `path_groups` | bool | `false` | EXPERIMENTAL: one `abc` call per path group with its own budget. Measured worse than flat mapping (docs/architecture.md §2.5); off by default. |
+| `relaxed_factor` | float | `3.0` | `-D` multiplier for false-path cones when `path_groups` is on. |
+
 ### STA modelling
 
 Applied identically to the quick STA used for winner ranking and to the
