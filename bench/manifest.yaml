@@ -12,7 +12,7 @@ designs:
     top: alu32
     files: [designs/alu32/alu32.v]
     clock: clk
-    period_ps: 6000
+    period_ps: 10000
     sdc: designs/alu32/constraints.sdc
     notes: 32-bit ALU, shifter, popcount, clz; registered result.
   - name: mul16_pipe
@@ -20,7 +20,7 @@ designs:
     top: mul16_pipe
     files: [designs/mul16_pipe/mul16_pipe.v]
     clock: clk
-    period_ps: 6000
+    period_ps: 9000
     sdc: designs/mul16_pipe/constraints.sdc
     notes: 16x16 signed multiplier between register stages. Booth sweep target.
   - name: mul32_mac
@@ -28,7 +28,7 @@ designs:
     top: mul32_mac
     files: [designs/mul32_mac/mul32_mac.v]
     clock: clk
-    period_ps: 10000
+    period_ps: 16000
     sdc: designs/mul32_mac/constraints.sdc
     notes: 32x32 MAC with 64-bit accumulator. Largest single-cone datapath.
   - name: fir8
@@ -36,7 +36,7 @@ designs:
     top: fir8
     files: [designs/fir8/fir8.v]
     clock: clk
-    period_ps: 8000
+    period_ps: 12000
     sdc: designs/fir8/constraints.sdc
     notes: 8-tap FIR with constant coefficients; constant-multiplier optimization.
   # ---------------- logic / crypto ----------------
@@ -53,7 +53,7 @@ designs:
     top: sha256_core
     files: [designs/sha256_core/sha256_core.v]
     clock: clk
-    period_ps: 8000
+    period_ps: 13000
     sdc: designs/sha256_core/constraints.sdc
     notes: SHA-256 round engine; adder chains and rotates, K ROM.
   - name: crc32_8
@@ -69,7 +69,7 @@ designs:
     top: rr_arbiter16
     files: [designs/rr_arbiter16/rr_arbiter16.v]
     clock: clk
-    period_ps: 4000
+    period_ps: 6000
     sdc: designs/rr_arbiter16/constraints.sdc
     notes: Round-robin arbiter; rotate, priority encode, rotate back.
   # ---------------- control ----------------

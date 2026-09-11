@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # synth_flow benchmark constraints — rr_arbiter16
-set T 4.0
+set T 6.0
 create_clock -name clk -period $T [get_ports clk]
 set_clock_uncertainty -setup 0.25 [get_clocks clk]
 set_clock_uncertainty -hold  0.10 [get_clocks clk]

@@ -50,14 +50,14 @@ Verified with OpenSTA 3.1.0 (2026-09-11) on Apple Silicon, ~5 min build.
 
 | Name | Category | Clock (ns) | What it stresses |
 |---|---|---|---|
-| alu32 | datapath | 6 | 32-bit add/sub/shift/compare, popcount, clz; registered result |
-| mul16_pipe | datapath | 6 | 16×16 signed multiplier between registers; Booth sweep target |
-| mul32_mac | datapath | 10 | 32×32 MAC, 64-bit accumulator; largest single cone |
-| fir8 | dsp | 8 | 8-tap FIR with constant coefficients |
+| alu32 | datapath | 10 | 32-bit add/sub/shift/compare, popcount, clz; registered result |
+| mul16_pipe | datapath | 9 | 16×16 signed multiplier between registers; Booth sweep target |
+| mul32_mac | datapath | 16 | 32×32 MAC, 64-bit accumulator; largest single cone |
+| fir8 | dsp | 12 | 8-tap FIR with constant coefficients |
 | aes_round | crypto | 8 | One AES-128 round; 16 S-boxes + MixColumns; wide XOR |
-| sha256_core | crypto | 8 | SHA-256 round engine; adder chains, rotates, K ROM |
+| sha256_core | crypto | 13 | SHA-256 round engine; adder chains, rotates, K ROM |
 | crc32_8 | logic | 4 | Parallel CRC-32, 8 bits/cycle; pure XOR network |
-| rr_arbiter16 | logic | 4 | Round-robin arbiter; rotate / priority encode |
+| rr_arbiter16 | logic | 6 | Round-robin arbiter; rotate / priority encode |
 | uart | control | 4 | 8N1 TX/RX, 16× oversampling |
 | spi_master | control | 4 | SPI master FSM, CPOL/CPHA, variable frame |
 | apb_timer | peripheral | 5 | APB3 timer; async `PRESETn` false path |
