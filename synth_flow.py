@@ -2164,7 +2164,6 @@ def main() -> int:
     # ----- assemble jobs (module x recipe) -----
     # In hierarchical mode we process modules one at a time in dependency
     # order so that winner netlists are available for parent modules.
-    cfg_dict = asdict(cfg)
     by_module: dict[str, list[RecipeResult]] = {m: [] for m in cfg.modules}
     winner_netlists: dict[str, str] = {}  # module → winner.v path
     any_synth_failed = False
