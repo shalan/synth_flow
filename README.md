@@ -11,7 +11,7 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
 
 - **Recipe sweep** — runs multiple ABC optimization recipes in parallel,
   picks the best result per module using the slow-corner (SS) for WNS ranking
-- **15 built-in recipes** — delay, balanced, area, and specialty strategies
+- **21 built-in recipes** — delay, balanced, area, and specialty strategies
   (all verified on ABC 1.01+)
 - **5 optimization objectives** — `delay`, `area`, `fastest`, `pareto`,
   `balanced`
@@ -160,7 +160,7 @@ CLI form is flat-list only; use the YAML dict for per-corner control.
 
 ## Recipes
 
-15 ABC scripts in `recipes/*.abc`, all compatible with ABC 1.01+. Each recipe
+21 ABC scripts in `recipes/*.abc`, all compatible with ABC 1.01+. Each recipe
 uses only commands confirmed available: `strash`, `ifraig`, `scorr`, `dc2`,
 `dretime`, `balance`, `rewrite`, `refactor`, `dch`, `map`, `mfs`, and the GIA
 subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
@@ -231,16 +231,41 @@ synth_flow/
   synth_flow.py       # Main orchestrator
   area_report.py      # Cell count + area report utility
   test_synth_flow.py  # Unit tests (no EDA tools needed)
-  recipes/            # 14 ABC recipe scripts
+  recipes/            # 21 ABC recipe scripts
   sky130/             # Curated Sky130 HD PDK subset
     hd_120_tt.lib     # Stripped TT liberty (synthesis)
     abc_constr.txt    # ABC constraints
     sky130_hd-clean.v # Behavioral Verilog (GLS)
-  docs/
-    yaml-config.md    # Full config reference
+  bench/              # Benchmark suite (designs, manifest, runner)
+  docs/               # Architecture, SDC support, CLI spec, benchmarks, roadmap
   examples/
     synth.yaml        # Example configuration
 ```
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/yaml-config.md](docs/yaml-config.md) | Full YAML config reference |
+| [docs/architecture.md](docs/architecture.md) | How the flow works, verified findings about Yosys/ABC and constraints, target timing-driven architecture |
+| [docs/sdc-support.md](docs/sdc-support.md) | Which SDC commands synthesis uses, which are STA-only, precedence over YAML |
+| [docs/cli.md](docs/cli.md) | Target CLI, configuration keys, outputs, exit codes, Python API |
+| [docs/benchmarks.md](docs/benchmarks.md) | Benchmark suite: designs, metrics, running and comparing |
+| [docs/roadmap.md](docs/roadmap.md) | Phased plan with deliverables and acceptance criteria |
+
+## Benchmarks
+
+`bench/` holds 16 designs (12 in-house, 4 external shalan/* IPs at pinned
+commits) and a runner that sweeps recipes and writes CSV/Markdown reports.
+
+```bash
+cd bench
+./fetch_external.sh                 # once
+./bench.py --quick --tag before     # 4 representative recipes
+./bench.py --compare results/before.csv results/after.csv
+```
+
+See [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Requirements
 
