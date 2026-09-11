@@ -168,6 +168,11 @@ class Config:
     # --- ABC constraints (Sky130 HD defaults) ---
     driving_cell: str = 'sky130_fd_sc_hd__inv_2'
     load_ff: float = 17.65
+    # STA modelling (applied identically to quick STA and multi-corner STA)
+    clock_uncertainty_setup_ps: int = 250
+    clock_uncertainty_hold_ps: int = 100
+    io_delay_frac: float = 0.2          # default input/output delay as fraction of period
+    wire_load_model: str = 'auto'       # auto = liberty default_wire_load | none | <name>
 
     # --- tool paths ---
     yosys: str = 'yosys'
@@ -887,65 +892,114 @@ def run_recipe(args: dict) -> RecipeResult:
 # designs that lack a given port are unaffected. PRESETn is the nc_lib
 # convention and was previously missing (WNS dominated by reset recovery).
 _ASYNC_RESET_FALSE_PATHS = """\
-catch {{ set_false_path -from [get_ports PRESETn] }}
-catch {{ set_false_path -from [get_ports PRESETN] }}
-catch {{ set_false_path -from [get_ports aresetn] }}
-catch {{ set_false_path -from [get_ports HRESETn] }}
-catch {{ set_false_path -from [get_ports hresetn] }}
-catch {{ set_false_path -from [get_ports rst_n] }}
-catch {{ set_false_path -from [get_ports resetn] }}
-"""
+# Async-reset ports: recovery/removal paths are not part of the synthesis
+# objective. Looked up by name to avoid "port not found" warnings.
+set _async_resets {PRESETn PRESETN aresetn HRESETn hresetn rst_n resetn}
+foreach _p [all_inputs] {
+    if {[lsearch -exact $_async_resets [get_full_name $_p]] >= 0} { set_false_path -from $_p }
+}"""
+
+def _default_wire_load(liberty: str) -> Optional[str]:
+    """Return the liberty `default_wire_load` name, or None."""
+    try:
+        text = Path(liberty).read_text(errors='ignore')[:400000]
+    except OSError:
+        return None
+    m = re.search(r'default_wire_load\s*:\s*"?([A-Za-z0-9_]+)"?', text)
+    return m.group(1) if m else None
+
+
+def _wire_load_section(mode: str, liberty: str) -> str:
+    """`set_wire_load_mode top` + model. mode: auto | none | <model name>."""
+    if not mode or mode == 'none':
+        return ''
+    name = _default_wire_load(liberty) if mode == 'auto' else mode
+    if not name:
+        return ''
+    return f'set_wire_load_mode top\nset_wire_load_model -name {name}\n'
+
+
+def _sta_constraints(*, clock_port: str, period_ns: float,
+                     clock_port_2: Optional[str] = None,
+                     period_2_ns: Optional[float] = None,
+                     unc_setup_ns: float = 0.25, unc_hold_ns: float = 0.10,
+                     user_sdc: Optional[str] = None,
+                     driving_cell: Optional[str] = None,
+                     load_pf: Optional[float] = None,
+                     wire_load_section: str = '',
+                     io_delay_frac: float = 0.2) -> str:
+    """Constraint preamble shared by quick STA and multi-corner STA so that
+    winner ranking and the final report see the same model. Order: clocks,
+    uncertainty, default driving cell / load / wire load / I/O delays,
+    async-reset false paths, then the user SDC last so it overrides."""
+    L = [f'create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]']
+    if clock_port_2 and period_2_ns:
+        L.append(f'create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]')
+        L.append(f'set_clock_groups -asynchronous -group [get_clocks {clock_port}] '
+                 f'-group [get_clocks {clock_port_2}]')
+    L.append(f'set_clock_uncertainty -setup {unc_setup_ns} [all_clocks]')
+    L.append(f'set_clock_uncertainty -hold {unc_hold_ns} [all_clocks]')
+    if driving_cell:
+        L.append(f'set_driving_cell -lib_cell {driving_cell} [all_inputs -no_clocks]')
+    if load_pf is not None:
+        L.append(f'set_load {load_pf} [all_outputs]')
+    if wire_load_section:
+        L.append(wire_load_section.rstrip())
+    io = round(period_ns * io_delay_frac, 4)
+    L.append(f'set_input_delay  -clock {clock_port} {io} [all_inputs -no_clocks]')
+    L.append(f'set_output_delay -clock {clock_port} {io} [all_outputs]')
+    L.append(_ASYNC_RESET_FALSE_PATHS.rstrip())
+    if user_sdc:
+        # Last, so per-port delays, driving cells, loads and exceptions in the
+        # user SDC override the defaults above (later set_* replaces earlier).
+        L.append('# User-supplied SDC (overrides defaults above)')
+        L.append(f'source {user_sdc}')
+    return '\n'.join(L) + '\n'
+
 
 QSTA_TCL = """\
 read_liberty {liberty}
 {macro_lib_section}
 read_verilog {netlist}
 link_design {module}
-# Clock object name matches the port (common SDC style). User SDC may redefine
-# the same name; default I/O delays use get_clocks with that name.
-create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]
-{clock_2_section}
-""" + _ASYNC_RESET_FALSE_PATHS + """\
-{user_sdc_section}
-# OpenSTA: all_inputs -no_clocks excludes registered clocks (no remove_from_collection)
-set_input_delay  -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_inputs -no_clocks]
-set_output_delay -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_outputs]
+{constraints}
 # Prefer report_worst_slack: report_wns can print 0.00 even when paths have slack.
-report_worst_slack -max
-report_tns
+report_worst_slack -max -digits 4
+report_tns -max -digits 4
 exit
-"""
-
-QSTA_CLK2 = """\
-create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]
-set_clock_groups -asynchronous -group {clock_port} -group {clock_port_2}
 """
 
 def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
                period_ps: int, clock_port: str, log_path: Path,
                clock_port_2: str = None, period_ps_2: int = None,
                macro_libs: list = None,
-               sdc: Optional[str] = None) -> tuple[Optional[float], Optional[float]]:
-    """Run a quick STA at typical corner. Returns (wns_ns, tns_ns) or (None, None)."""
+               sdc: Optional[str] = None,
+               driving_cell: Optional[str] = None,
+               load_ff: Optional[float] = None,
+               unc_setup_ps: int = 250, unc_hold_ps: int = 100,
+               wire_load_model: str = 'auto',
+               io_delay_frac: float = 0.2) -> tuple[Optional[float], Optional[float]]:
+    """Run a quick STA (ranking corner). Returns (wns_ns, tns_ns) or (None, None).
+    Uses the same constraint preamble as the multi-corner STA."""
     period_ns = period_ps / 1000.0
-    if clock_port_2 and period_ps_2:
-        clk2 = QSTA_CLK2.format(
-            period_2_ns=period_ps_2 / 1000.0,
-            clock_port=clock_port,
-            clock_port_2=clock_port_2,
-        )
-    else:
-        clk2 = ''
     macro_lib_section = ''
     if macro_libs:
         macro_lib_section = '\n'.join(f'read_liberty {f}' for f in macro_libs)
+    constraints = _sta_constraints(
+        clock_port=clock_port, period_ns=period_ns,
+        clock_port_2=clock_port_2,
+        period_2_ns=(period_ps_2 / 1000.0) if (clock_port_2 and period_ps_2) else None,
+        unc_setup_ns=unc_setup_ps / 1000.0, unc_hold_ns=unc_hold_ps / 1000.0,
+        user_sdc=sdc, driving_cell=driving_cell,
+        load_pf=(load_ff / 1000.0) if load_ff is not None else None,
+        wire_load_section=_wire_load_section(wire_load_model, liberty),
+        io_delay_frac=io_delay_frac,
+    )
     with tempfile.NamedTemporaryFile('w', suffix='.tcl', delete=False) as f:
         f.write(QSTA_TCL.format(
             liberty=liberty, netlist=netlist, module=module,
-            period_ns=period_ns, clock_port=clock_port,
-            clock_2_section=clk2,
             macro_lib_section=macro_lib_section,
-            user_sdc_section=(f'source {sdc}' if sdc else ''),
+            constraints=constraints,
         ))
         tcl = f.name
     try:
@@ -958,7 +1012,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
         wns = tns = None
         for line in out.splitlines():
             # report_worst_slack -max → "worst slack <n>"
-            m = re.search(r'^worst slack\s+([-0-9.eE+]+)', line, re.I)
+            m = re.search(r'^worst slack(?:\s+(?:max|min))?\s+([-0-9.eE+]+)', line, re.I)
             if m and wns is None:
                 wns = float(m.group(1))
                 continue
@@ -967,7 +1021,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
             if m and wns is None:
                 wns = float(m.group(1))
                 continue
-            m = re.search(r'(?:^tns|total negative slack)\s+([-0-9.eE+]+)', line, re.I)
+            m = re.search(r'(?:^tns(?:\s+(?:max|min))?|total negative slack)\s+([-0-9.eE+]+)', line, re.I)
             if m and tns is None:
                 tns = float(m.group(1))
         return wns, tns
@@ -1112,57 +1166,37 @@ read_liberty -corner slow {lib_slow}
 {macro_libs_slow}
 read_verilog {netlist}
 link_design {module}
-create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]
-{clock_2_section}
-""" + _ASYNC_RESET_FALSE_PATHS + """\
-# User-supplied exceptions (false_path, multicycle, set_clock_groups, ...)
-# Applied before default I/O delay so SDC can fully own constraints if desired.
-{user_sdc_section}
-# OpenSTA has no remove_from_collection; use all_inputs -no_clocks.
-set_driving_cell -lib_cell {driving_cell} [all_inputs -no_clocks]
-set_load {load_pf} [all_outputs]
-set_input_delay  -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_inputs -no_clocks]
-set_output_delay -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_outputs]
-
+{constraints}
 # --- setup at slow ---
 puts ">>> SETUP_SLOW_BEGIN"
-report_checks -path_delay max -corner slow -group_count 5 -format full_clock
+report_checks -path_delay max -corner slow -group_path_count 5 -format full_clock
 report_worst_slack -max
 report_tns
 puts ">>> SETUP_SLOW_END"
 
 # --- setup at typical ---
 puts ">>> SETUP_TYP_BEGIN"
-report_checks -path_delay max -corner typical -group_count 5 -format full_clock
+report_checks -path_delay max -corner typical -group_path_count 5 -format full_clock
 report_worst_slack -max
 report_tns
 puts ">>> SETUP_TYP_END"
 
 # --- hold at fast ---
 puts ">>> HOLD_FAST_BEGIN"
-report_checks -path_delay min -corner fast -group_count 5 -format full_clock
+report_checks -path_delay min -corner fast -group_path_count 5 -format full_clock
 report_worst_slack -min
 report_tns
 puts ">>> HOLD_FAST_END"
 
 # --- hold at typical ---
 puts ">>> HOLD_TYP_BEGIN"
-report_checks -path_delay min -corner typical -group_count 5 -format full_clock
+report_checks -path_delay min -corner typical -group_path_count 5 -format full_clock
 report_worst_slack -min
 report_tns
 puts ">>> HOLD_TYP_END"
 
 write_sdf -corner slow {sdf_out}
 exit
-"""
-
-CORNER_STA_CLK2 = """\
-create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]
-set_clock_uncertainty -setup 0.25 [get_clocks {clock_port}]
-set_clock_uncertainty -setup 0.25 [get_clocks {clock_port_2}]
-set_clock_uncertainty -hold 0.10 [get_clocks {clock_port}]
-set_clock_uncertainty -hold 0.10 [get_clocks {clock_port_2}]
-set_clock_groups -asynchronous -group [get_clocks {clock_port}] -group [get_clocks {clock_port_2}]
 """
 
 @dataclass
@@ -1191,14 +1225,17 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
     tcl  = out_dir / 'sta.tcl'
 
     period_ns = cfg.period_ps / 1000.0
-    if cfg.clock_port_2 and cfg.period_ps_2:
-        clk2 = CORNER_STA_CLK2.format(
-            period_2_ns=cfg.period_ps_2 / 1000.0,
-            clock_port=cfg.clock_port,
-            clock_port_2=cfg.clock_port_2,
-        )
-    else:
-        clk2 = ''
+    constraints = _sta_constraints(
+        clock_port=cfg.clock_port, period_ns=period_ns,
+        clock_port_2=cfg.clock_port_2,
+        period_2_ns=(cfg.period_ps_2 / 1000.0) if (cfg.clock_port_2 and cfg.period_ps_2) else None,
+        unc_setup_ns=cfg.clock_uncertainty_setup_ps / 1000.0,
+        unc_hold_ns=cfg.clock_uncertainty_hold_ps / 1000.0,
+        user_sdc=cfg.sdc, driving_cell=cfg.driving_cell,
+        load_pf=cfg.load_ff / 1000.0,  # OpenSTA wants pF
+        wire_load_section=_wire_load_section(cfg.wire_load_model, cfg.lib_slow or cfg.lib_typ),
+        io_delay_frac=cfg.io_delay_frac,
+    )
     # Per-corner macro liberty lines. OpenSTA corner is named "typical" in
     # the Tcl while our internal key is "typ"; map at emission.
     def _ml_lines(internal_key: str, sta_corner: str) -> str:
@@ -1212,12 +1249,8 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         macro_libs_fast=_ml_lines('fast', 'fast'),
         macro_libs_typ =_ml_lines('typ',  'typical'),
         macro_libs_slow=_ml_lines('slow', 'slow'),
-        user_sdc_section=_user_sdc_section(cfg),
         netlist=netlist, module=module,
-        period_ns=period_ns, clock_port=cfg.clock_port,
-        clock_2_section=clk2,
-        driving_cell=cfg.driving_cell,
-        load_pf=cfg.load_ff / 1000.0,  # OpenSTA wants pF
+        constraints=constraints,
         sdf_out=sdf,
     ))
 
@@ -1240,11 +1273,11 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         hold_typ_sec = section('>>> HOLD_TYP_BEGIN', '>>> HOLD_TYP_END')
 
         def grab_wns(text):
-            m = re.search(r'^worst slack\s+([-0-9.eE+]+)', text, re.M)
+            m = re.search(r'^worst slack(?:\s+(?:max|min))?\s+([-0-9.eE+]+)', text, re.M | re.I)
             return float(m.group(1)) if m else None
 
         def grab_tns(text):
-            m = re.search(r'^total negative slack\s+([-0-9.eE+]+)', text, re.M)
+            m = re.search(r'^(?:tns(?:\s+(?:max|min))?|total negative slack)\s+([-0-9.eE+]+)', text, re.M | re.I)
             return float(m.group(1)) if m else None
 
         def grab_wns_from_paths(text):
@@ -1726,6 +1759,11 @@ def main() -> int:
                 period_ps_2=cfg.period_ps_2,
                 macro_libs=cfg.macro_libs.get(qsta_corner, []) if cfg.macro_libs else [],
                 sdc=cfg.sdc,
+                driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
+                unc_setup_ps=cfg.clock_uncertainty_setup_ps,
+                unc_hold_ps=cfg.clock_uncertainty_hold_ps,
+                wire_load_model=cfg.wire_load_model,
+                io_delay_frac=cfg.io_delay_frac,
             )
             cands.append(Candidate(
                 recipe=r.recipe, netlist=r.netlist,
