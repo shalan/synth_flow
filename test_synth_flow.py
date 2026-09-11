@@ -11,7 +11,7 @@ from synth_flow import (
     Config, ModuleScanner, Candidate, Selection,
     select_winner, _pareto_front, _stability_idx,
     discover_recipes, RecipeResult,
-    DEFAULT_RECIPES_DIR,
+    DEFAULT_RECIPES_DIR, _strip_signed_decls,
 )
 
 failures = []
@@ -24,6 +24,23 @@ def check(name, cond, detail=''):
         failures.append(name)
 
 # =========================================================================
+# =========================================================================
+print('\n[0] _strip_signed_decls — OpenSTA-compatible netlist declarations')
+# =========================================================================
+
+with tempfile.TemporaryDirectory() as td:
+    nl = Path(td) / 'n.v'
+    nl.write_text("module m(a, y);\n  input signed [11:0] a;\n  wire signed [11:0] a;\n"
+                  "  output signed [31:0] y;\n  wire signed [31:0] y;\n  wire w_signed;\n"
+                  "  sky130_fd_sc_hd__inv_1 u0 (.A(a[0]), .Y(y[0]));\nendmodule\n")
+    n = _strip_signed_decls(nl)
+    out = nl.read_text()
+    check('rewrote 4 declarations', n == 4, f'n={n}')
+    check('no signed declarations remain', ' signed ' not in out)
+    check('identifier containing "signed" untouched', 'w_signed' in out)
+    check('ports keep ranges', 'input [11:0] a;' in out and 'output [31:0] y;' in out)
+    check('idempotent', _strip_signed_decls(nl) == 0)
+
 print('\n[1] ModuleScanner — top-level detection')
 # =========================================================================
 

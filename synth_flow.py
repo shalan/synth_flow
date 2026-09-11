@@ -680,6 +680,26 @@ def _write_constraint_file(work_dir: Path, driving_cell: str, load_ff: float) ->
     p.write_text(f"set_driving_cell {driving_cell}\nset_load {load_ff}\n")
     return p
 
+_SIGNED_DECL_RE = re.compile(r'^(\s*(?:input|output|inout|wire|reg)\s+)signed\s+', re.M)
+
+
+def _strip_signed_decls(netlist: Path) -> int:
+    """Remove `signed` from port/wire declarations in a gate-level netlist.
+
+    Yosys keeps the RTL signedness on ports (`input signed [11:0] x;`).
+    OpenSTA's Verilog reader rejects that syntax ("syntax error"), and
+    signedness carries no meaning in a mapped netlist. Returns the number of
+    declarations rewritten."""
+    try:
+        text = netlist.read_text()
+    except OSError:
+        return 0
+    new_text, n = _SIGNED_DECL_RE.subn(r'\1', text)
+    if n:
+        netlist.write_text(new_text)
+    return n
+
+
 def _read_stats(stats_json: Path, module: str) -> tuple[int, float]:
     """Read cell count + area from yosys stats JSON. Robust to module
     name variations (\\name vs name)."""
@@ -864,6 +884,7 @@ def run_recipe(args: dict) -> RecipeResult:
                 runtime_s=runtime, log=str(log),
                 error="netlist not produced",
             )
+        _strip_signed_decls(netlist)
         cells, area = _read_stats(stats, module)
         return RecipeResult(
             module=module, recipe=recipe, success=True,
