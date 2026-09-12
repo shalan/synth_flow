@@ -136,6 +136,17 @@ These are required only when `run_gls: true` (the default). Set
 | `resize_wns_tol_ps` | int | `150` | WNS regression tolerated for a TNS gain under the `tns` policy. |
 | `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. Timing-clean states are always eligible. |
 
+### Post-pass: repairs
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `repair_design` | bool | `false` | Buffer trees on high-fanout nets of failing setup paths (`resize.py`): sinks split into groups of ≤ `max_fanout`, one net per failing path per round, batch accepted on TNS like the upsizes, bisected on rejection. Also `--repair-design`. ABC's own `buffer` runs before any measurement and without the real boundary loads; this is the repair step after OpenSTA has measured. |
+| `max_fanout` | int | `8` | Sink group size for `repair_design`. SDC `set_max_fanout` overrides. |
+| `repair_hold` | bool | `false` | Min-delay STA at the fast corner (`lib_fast`) lists failing hold endpoints; each gets one delay element (a `dlygate` if the liberty has one, else `buf_1`) in front of its data pin per round. A round is kept only if hold TNS improves and slow-corner setup WNS stays at its floor. Also `--repair-hold`. Function-preserving by construction. |
+
+Any of `resize_winner`, `repair_design`, `repair_hold` enables the post-pass on
+each module's winner; the input netlist is kept as `winner.presize.v`.
+
 ### STA modelling
 
 Applied identically to the quick STA used for winner ranking and to the

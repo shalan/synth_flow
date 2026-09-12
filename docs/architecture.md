@@ -335,6 +335,31 @@ respond to the wire-load-aware sizing; the `&nf` netlists do not. `-c` is
 baked into `delay_map` and `delay_map_resyn`; `abc_wire_load: true`
 (`--abc-wire-load`) adds it to every recipe for experiments.
 
+### 2.10 Repairs after measurement: buffering and hold
+
+ABC buffers (`buffer` in every recipe) against its own model, before any
+OpenSTA measurement and without the real loads at the network boundary
+(§2.5). `resize.py` therefore gained two repair moves that operate on the
+mapped netlist with OpenSTA as the judge, both function-preserving by
+construction (verified by 3000-cycle random simulation on every test):
+
+- **`repair_design`**: for each failing setup path, the highest-delay stage
+  whose fanout is ≥ `max_fanout` gets its net split into buffer trees of
+  ≤ `max_fanout` sinks (`buf_2`); one net per path per round, the batch
+  accepted on TNS and bisected on rejection. On the apb_timer reference
+  netlist (`orfs_speed`): 15 nets, 30 buffers, WNS −0.079 → −0.009 ns and
+  TNS −3.85 → −0.13 in one round; with upsizing it closes at +0.013 ns for
+  +1.7 % area. On uart the same move made the path 0.8 ns slower and was
+  rejected, which is the point of judging every move.
+- **`repair_hold`**: min-delay STA at the fast corner; each failing endpoint
+  (a register data pin or an output port) gets one delay element per round,
+  a `dlygate` when the liberty has one, else `buf_1`. A round is kept only if
+  hold TNS improves and slow-corner setup WNS does not drop below its floor.
+  uart: hold −0.083 → +0.024 ns in two rounds, setup unchanged, +0.2 % area.
+
+Both are opt-in (`repair_design`, `repair_hold`); bench results per design
+are in [benchmarks.md](benchmarks.md).
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

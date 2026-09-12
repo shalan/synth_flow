@@ -162,6 +162,25 @@ check('next_size steps up and stops at max', next_size('sky130_fd_sc_hd__nand2_2
 check('prev_size steps down and stops at min', prev_size('sky130_fd_sc_hd__nand2_4', fam) == 'sky130_fd_sc_hd__nand2_2' and prev_size('sky130_fd_sc_hd__nand2_1', fam) is None)
 _nl = "module m(a,y);\n  input a; output y;\n  sky130_fd_sc_hd__inv_1 _7_ (.A(a), .Y(y));\n  sky130_fd_sc_hd__buf_2 _8_ (.A(y), .X(z));\nendmodule\n"
 check('instance_types', instance_types(_nl) == {'_7_': 'sky130_fd_sc_hd__inv_1', '_8_': 'sky130_fd_sc_hd__buf_2'}, str(instance_types(_nl)))
+from resize import Netlist, liberty_output_pins
+_nl2 = ("module m(a, b, y);\n  input a; input b; output y;\n  wire n1;\n"
+        "  sky130_fd_sc_hd__and2_1 _1_ (\n    .A(a),\n    .B(b),\n    .X(n1)\n  );\n"
+        + ''.join(f"  sky130_fd_sc_hd__inv_1 _s{k}_ (\n    .A(n1),\n    .Y(\\o[{k}] )\n  );\n" for k in range(10))
+        + "  sky130_fd_sc_hd__buf_1 _o_ (\n    .A(n1),\n    .X(y)\n  );\nendmodule\n")
+_op = liberty_output_pins(str(LIB_SS))
+check('liberty output pins parsed', _op.get('sky130_fd_sc_hd__and2_1') == {'X'} and _op.get('sky130_fd_sc_hd__dfxtp_1') == {'Q'}, str(_op.get('sky130_fd_sc_hd__and2_1')))
+_n = Netlist(_nl2, _op)
+check('netlist model: fanout of n1 is 11 sinks', len(_n.sinks('n1')) == 11 and _n.driver('n1') == ('_1_', 'X'))
+_nb = _n.buffer_tree('n1', 'sky130_fd_sc_hd__buf_2', 4)
+_r = _n.render()
+_n2 = Netlist(_r, _op)
+check('buffer tree: 3 buffers for 11 sinks in groups of 4, driver now fans out to 3', _nb == 3 and len(_n2.sinks('n1')) == 3, f'nb={_nb} fanout={len(_n2.sinks("n1"))}')
+check('escaped identifiers keep their trailing space', '.Y(\\o[3] )' in _r, _r[_r.find('o[3]')-6:_r.find('o[3]')+8])
+check('new wires declared before the first instance', _r.index('wire _rdn_1_;') < _r.index('sky130_fd_sc_hd__and2_1 _1_'))
+_n3 = Netlist(_nl2, _op); _n3.delay_pin('_s0_', 'A', 'sky130_fd_sc_hd__buf_1', 2)
+_r3 = Netlist(_n3.render(), _op)
+check('delay chain: 2 cells in front of one pin, others untouched', len(_r3.sinks('n1')) == 11 and ('_s0_', 'A') not in _r3.sinks('n1') and _r3.inst['_s0_']['pins']['A'].startswith('_rdn_') and sum(1 for i in _r3.inst.values() if i['type'] == 'sky130_fd_sc_hd__buf_1') == 3)
+check('repair flags are opt-in', Config().repair_design is False and Config().repair_hold is False and Config().max_fanout == 8)
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
