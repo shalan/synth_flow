@@ -104,6 +104,7 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--sdc FILE` | SDC file: sourced by OpenSTA and read for synthesis clocks and boundary conditions (overrides `--period-ps`/`--clock-port`) |
 | `--abc-target T` | ABC `-D`: `none` (default), `period`, `reg2reg`, or ps. Measured: `none` is best (docs/architecture.md §2.6) |
 | `--resize` | OpenSTA-guided drive-strength sizing of each winner (`winner.presize.v` keeps the input) |
+| `--yosys-opts T...` | Front-end options: `booth`, `adder=kogge-stone\|han-carlson\|sklansky`, `noshare`, `hieropt`. Sweep several with `yosys_opts_sweep` in YAML |
 | `--objective OBJ` | `delay`, `area`, `fastest`, `pareto`, `balanced` |
 | `--modules M1 M2` | Modules to synthesize (default: auto-detect) |
 | `--recipes R1 R2` | Recipes to sweep (default: all) |

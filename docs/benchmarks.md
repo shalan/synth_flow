@@ -16,7 +16,10 @@ cd bench
 ./bench.py --compare results/before.csv results/after.csv
 ```
 
-Full matrix (all recipes) is `./bench.py --tag <name>`. Subsets:
+Full matrix (all recipes) is `./bench.py --tag <name>`. `--lib-dir DIR` runs
+against the full `sky130_fd_sc_hd` liberty (tt/ss/ff files in DIR, e.g. a
+ciel/volare `libs.ref/sky130_fd_sc_hd/lib`) instead of the bundled 120-cell
+subset. Subsets:
 `--designs alu32 uart`, `--category datapath crypto`, `--recipes orfs_speed
 area_classic`. Add `--use-sdc` to pass each design's SDC to OpenSTA.
 
