@@ -307,8 +307,8 @@ check('delay_triple before balanced_resyn',
 check('balanced_resyn before area_classic',
       names.index('balanced_resyn') < names.index('area_classic'),
       f'order={names}')
-check('area_safe before area_max',
-      names.index('area_safe') < names.index('area_max'),
+check('area_classic before area_max',
+      names.index('area_classic') < names.index('area_max'),
       f'order={names}')
 
 try:
