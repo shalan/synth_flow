@@ -5,35 +5,42 @@
 recipe, a flow change or a library choice should be backed by a `bench.py`
 run, and every before/after comparison by `bench.py --compare`.
 
-## Headline result — `pipeline.csv`
+## Headline result — `pipeline2.csv` (pareto) and `pipeline2-area.csv` (area)
 
-The whole flow as it stands (six front-end variants × 16 recipes, winner by
+The whole flow as it stands (six front-end variants × 18 recipes, winner by
 slow-corner OpenSTA, then OpenSTA-guided sizing) against the ORFS/OpenLane
-reference (plain Yosys front end, `orfs_speed` recipe, no sizing), both at
-the SS corner with each design's SDC, area in µm²:
+reference (plain Yosys front end, `orfs_speed`, no sizing), both at the SS
+corner with each design's SDC, area in µm². The `area` objective picks the
+smallest candidate that meets timing (fallback: best WNS); `pareto` picks
+the fastest point of the front.
 
-| design | ORFS reference WNS / area | pipeline final WNS / area | ΔWNS | Δarea |
+| design | ORFS reference WNS / area | `area` objective WNS / Δarea | `pareto` objective WNS / Δarea | `area` winner |
 |---|---|---|---|---|
-| alu32 | -1.947 / 10884 | -0.160 / 11760 | +1.787 | +8.0 % |
-| mul16_pipe | -0.435 / 12391 | +0.220 / 9483 | +0.655 | -23.5 % |
-| mul32_mac | -2.725 / 39508 | -1.490 / 41814 | +1.235 | +5.8 % |
-| fir8 | +0.323 / 13294 | +0.620 / 15014 | +0.297 | +12.9 % |
-| aes_round | +1.265 / 55919 | +1.400 / 53538 | +0.135 | -4.3 % |
-| sha256_core | -0.214 / 67690 | +0.730 / 68230 | +0.944 | +0.8 % |
-| crc32_8 | -0.131 / 2251 | -0.020 / 2168 | +0.111 | -3.7 % |
-| rr_arbiter16 | -0.723 / 3052 | -0.380 / 3087 | +0.343 | +1.1 % |
-| uart | -0.101 / 3784 | +0.310 / 3940 | +0.411 | +4.1 % |
-| spi_master | -0.378 / 4716 | +0.190 / 4853 | +0.568 | +2.9 % |
-| apb_timer | -0.079 / 11295 | +0.020 / 11866 | +0.099 | +5.1 % |
-| fifo_sync | -1.302 / 26410 | -0.710 / 29439 | +0.592 | +11.5 % |
-| zx16_core_ahb | -0.724 / 20202 | -0.060 / 21660 | +0.664 | +7.2 % |
-| zxip | -2.322 / 160807 | -0.470 / 161572 | +1.852 | +0.5 % |
-| ms_psram_ahb | -1.134 / 26906 | +0.100 / 25149 | +1.234 | -6.5 % |
-| uart_apb_sys | +3.968 / 16714 | +3.940 / 16917 | -0.028 | +1.2 % |
-| **mean / count** | **3 / 16 meet timing** | **9 / 16 meet timing** | **+0.681 ns** | **+1.5 %** |
+| alu32 | -1.947 / 10884 | +0.290 / +6.2 % | +1.040 / +17.2 % | `delay_map_resyn@adder=han-carlson` |
+| mul16_pipe | -0.435 / 12391 | +0.020 / -26.0 % | +1.250 / +3.7 % | `delay_triple@booth` |
+| mul32_mac | -2.725 / 39508 | -0.610 / +49.1 % | -0.610 / +49.1 % | `delay_map_resyn@adder=kogge-stone` |
+| fir8 | +0.323 / 13294 | +0.160 / -2.1 % | +2.080 / +32.9 % | `balanced_resyn2x@adder=sklansky` |
+| aes_round | +1.265 / 55919 | +0.960 / -11.2 % | +1.780 / +20.7 % | `area_classic` |
+| sha256_core | -0.214 / 67690 | +0.060 / -2.2 % | +2.050 / +14.0 % | `delay_iter_heavy@adder=han-carlson` |
+| crc32_8 | -0.131 / 2251 | +0.130 / +12.4 % | +0.210 / +22.4 % | `delay_map` |
+| rr_arbiter16 | -0.723 / 3052 | +0.010 / +15.5 % | +0.060 / +22.9 % | `delay_map@adder=kogge-stone` |
+| uart | -0.101 / 3784 | +0.070 / -2.7 % | +0.310 / +4.1 % | `delay_triple@adder=han-carlson` |
+| spi_master | -0.378 / 4716 | +0.010 / -3.4 % | +0.320 / +10.3 % | `yosys_default@adder=han-carlson` |
+| apb_timer | -0.079 / 11295 | -0.070 / +1.6 % | +0.090 / +3.3 % | `delay_choice_deep_v4@adder=han-carlson` |
+| fifo_sync | -1.302 / 26410 | +0.020 / +2.2 % | +0.020 / +2.2 % | `delay_map_resyn` |
+| zx16_core_ahb | -0.724 / 20202 | +0.010 / +1.4 % | +0.750 / +4.2 % | `delay_map_resyn` |
+| zxip | -2.322 / 160807 | -0.470 / +0.5 % | -0.470 / +0.5 % | `delay_choice_deep_v3@adder=sklansky` |
+| ms_psram_ahb | -1.134 / 26906 | +0.100 / -6.5 % | +0.100 / -6.5 % | `balanced_resyn2x` |
+| uart_apb_sys | +3.968 / 16714 | +0.090 / -6.6 % | +4.120 / +2.5 % | `delay_aggressive` |
+| **meet timing / mean** | **3 / 16** | **13 / 16, +0.465 ns, +1.7 %** | **14 / 16, +1.235 ns, +12.7 %** | |
 
-Reproduce: `./bench.py --use-sdc --set 'yosys_opts_sweep=[[],[adder=kogge-stone],[adder=han-carlson],[adder=sklansky],[booth],[booth,adder=kogge-stone]]' --set resize_winner=true --tag pipeline`.
-Runtime: 16 to 51 s per design (16k-cell zxip: ~3 min) on an 18-core laptop.
+The two designs that do not close under either objective are mul32_mac
+(−0.61 ns at 16 ns) and zxip (−0.47 ns at 10 ns, the repo's own SDC).
+Runtime per design 15 s to 130 s (16k-cell zxip: ~3 min) on an 18-core
+laptop. `pipeline.csv` is the earlier 16-recipe run (9/16, +0.68 ns, +1.5 %),
+before `delay_map` / `delay_map_resyn` were added.
+
+Reproduce: `./bench.py --use-sdc --objective area --set 'yosys_opts_sweep=[[],[adder=kogge-stone],[adder=han-carlson],[adder=sklansky],[booth],[booth,adder=kogge-stone]]' --set resize_winner=true --tag <name>`.
 
 ## Quick start
 
@@ -275,8 +282,10 @@ Eight candidate recipes run with the plain front end and scored against the
 delay with duplication (alu32: 2453 cells vs 2055), which is exactly the
 trade the area-flow mapper refuses; verified fully mapped and equivalent by
 4000-cycle random simulation on four designs. `delay_map_resyn` (resyn2 then
-`dch -f; map`) was added untested as its natural companion; the pipeline
-bench decides whether it stays.
+`dch -f; map`) was added as its natural companion and became the most
+frequent winner of the pipeline bench (8/16 under `pareto`, 4/16 under
+`area`). Second-round retirements from the same data: `area_safe`,
+`delay_choice_deep_v2` (never winners, fewest Pareto points).
 
 ## Library experiment — `fulllib.csv`
 
