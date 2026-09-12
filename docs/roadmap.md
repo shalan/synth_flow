@@ -8,6 +8,13 @@ it emits.
 
 Status legend: ☐ not started · ◐ in progress · ☑ done
 
+**Where it stands (2026-09-12):** against the ORFS reference recipe the flow
+closes 9/16 bench designs instead of 3/16, mean WNS +0.68 ns, area +1.5 %
+([benchmarks.md](benchmarks.md#headline-result--pipelinecsv)). Levers that
+worked: recipe sweep, front-end variants, STA-guided sizing, no ABC `-D`.
+Levers that did not: path-group partitioning, cone remapping, any ABC `-D`,
+the full 428-cell liberty.
+
 ## Findings that shape the plan
 
 Verified 2026-09-12 with Yosys 0.68 and its bundled ABC 1.01. Details and

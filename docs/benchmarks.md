@@ -5,6 +5,36 @@
 recipe, a flow change or a library choice should be backed by a `bench.py`
 run, and every before/after comparison by `bench.py --compare`.
 
+## Headline result — `pipeline.csv`
+
+The whole flow as it stands (six front-end variants × 16 recipes, winner by
+slow-corner OpenSTA, then OpenSTA-guided sizing) against the ORFS/OpenLane
+reference (plain Yosys front end, `orfs_speed` recipe, no sizing), both at
+the SS corner with each design's SDC, area in µm²:
+
+| design | ORFS reference WNS / area | pipeline final WNS / area | ΔWNS | Δarea |
+|---|---|---|---|---|
+| alu32 | -1.947 / 10884 | -0.160 / 11760 | +1.787 | +8.0 % |
+| mul16_pipe | -0.435 / 12391 | +0.220 / 9483 | +0.655 | -23.5 % |
+| mul32_mac | -2.725 / 39508 | -1.490 / 41814 | +1.235 | +5.8 % |
+| fir8 | +0.323 / 13294 | +0.620 / 15014 | +0.297 | +12.9 % |
+| aes_round | +1.265 / 55919 | +1.400 / 53538 | +0.135 | -4.3 % |
+| sha256_core | -0.214 / 67690 | +0.730 / 68230 | +0.944 | +0.8 % |
+| crc32_8 | -0.131 / 2251 | -0.020 / 2168 | +0.111 | -3.7 % |
+| rr_arbiter16 | -0.723 / 3052 | -0.380 / 3087 | +0.343 | +1.1 % |
+| uart | -0.101 / 3784 | +0.310 / 3940 | +0.411 | +4.1 % |
+| spi_master | -0.378 / 4716 | +0.190 / 4853 | +0.568 | +2.9 % |
+| apb_timer | -0.079 / 11295 | +0.020 / 11866 | +0.099 | +5.1 % |
+| fifo_sync | -1.302 / 26410 | -0.710 / 29439 | +0.592 | +11.5 % |
+| zx16_core_ahb | -0.724 / 20202 | -0.060 / 21660 | +0.664 | +7.2 % |
+| zxip | -2.322 / 160807 | -0.470 / 161572 | +1.852 | +0.5 % |
+| ms_psram_ahb | -1.134 / 26906 | +0.100 / 25149 | +1.234 | -6.5 % |
+| uart_apb_sys | +3.968 / 16714 | +3.940 / 16917 | -0.028 | +1.2 % |
+| **mean / count** | **3 / 16 meet timing** | **9 / 16 meet timing** | **+0.681 ns** | **+1.5 %** |
+
+Reproduce: `./bench.py --use-sdc --set 'yosys_opts_sweep=[[],[adder=kogge-stone],[adder=han-carlson],[adder=sklansky],[booth],[booth,adder=kogge-stone]]' --set resize_winner=true --tag pipeline`.
+Runtime: 16 to 51 s per design (16k-cell zxip: ~3 min) on an 18-core laptop.
+
 ## Quick start
 
 ```bash

@@ -255,6 +255,21 @@ synth_flow/
     synth.yaml        # Example configuration
 ```
 
+## Results
+
+On the 16-design benchmark (Sky130 HD, SS corner, per-design SDC), the full
+flow (front-end sweep × recipe sweep × OpenSTA-guided sizing) against the
+ORFS/OpenLane reference (plain Yosys, `orfs_speed`, no sizing):
+
+| | ORFS reference | synth_flow |
+|---|---|---|
+| designs meeting timing | 3 / 16 | 9 / 16 |
+| mean ΔWNS | — | +0.68 ns |
+| mean Δarea | — | +1.5 % |
+
+Per-design numbers and every intermediate experiment (including the negative
+ones) are in [docs/benchmarks.md](docs/benchmarks.md).
+
 ## Documentation
 
 | Document | Contents |
