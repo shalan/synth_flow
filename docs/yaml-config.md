@@ -120,6 +120,12 @@ These are required only when `run_gls: true` (the default). Set
 | `yosys_opts` | list | `[]` | Front-end options passed to `synth` (also `--yosys-opts`). Tokens: `booth` (Booth-encoded multipliers, `synth -booth`), `adder=kogge-stone` / `adder=han-carlson` / `adder=sklansky` (`synth -extra-map +/choices/<arch>.v`), `noshare`, `hieropt`, `nofsm`, `noalumacc`. |
 | `yosys_opts_sweep` | list of lists | `[]` | Sweep several front ends: each entry is a `yosys_opts` list (`[]` = plain). Candidates are named `<recipe>@<variant>` and compete in the same winner selection. Recommended: `[[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky], [booth], [booth, adder=kogge-stone]]` (6× runtime; closes 9/16 bench designs vs 6/16). |
 
+### Library cell exclusion
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `dont_use` | list | `[]` | Liberty cell names or glob patterns passed as `-dont_use` to `abc` and `dfflibmap` (also `--dont-use`; SDC `set_dont_use` entries are merged in). Required with a full PDK liberty, e.g. `['sky130_fd_sc_hd__lpflow_*', 'sky130_fd_sc_hd__probe*', 'sky130_fd_sc_hd__dly*', 'sky130_fd_sc_hd__clkdly*', 'sky130_fd_sc_hd__sdlclkp*']`. The bundled `hd_120` subset already excludes them. |
+
 ### Post-pass: winner sizing
 
 | Field | Type | Default | Notes |

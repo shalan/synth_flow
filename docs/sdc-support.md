@@ -22,6 +22,7 @@ One SDC file is the single source of timing constraints. It has two readers:
   - second primary clock → `clock_port_2` / `period_ps_2`
   - `set_clock_uncertainty` on that clock → `clock_uncertainty_*_ps`
   - `set_driving_cell` → `driving_cell`; `set_load` (max) → `load_ff`
+  - `set_dont_use` → merged into `dont_use` (passed to `abc` / `dfflibmap`)
 - Unknown commands are logged as warnings and left to OpenSTA. Recognised
   STA-only commands are counted in the log.
 - `python3 sdc_parse.py top.sdc --netlist rtl.v --top NAME` prints what
