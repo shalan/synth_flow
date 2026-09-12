@@ -196,6 +196,10 @@ class Config:
     #   'reg2reg' T - t_cq - t_su - setup uncertainty from the synthesis liberty
     #   '<ps>'    explicit integer
     abc_target: str = 'none'
+    # Make ABC's buffer/upsize/dnsize/stime use the liberty wire-load model
+    # (`-c`) in every recipe. Measured: clear gain only for the `map`-based
+    # recipes (baked into delay_map*.abc); noise for `&nf` recipes. Off by default.
+    abc_wire_load: bool = False
     # OpenSTA-guided drive-strength sizing of each module's winner (resize.py).
     # Sizing only, function preserved; measured on the bench: TNS down on every
     # failing design for <1 % area on most (docs/architecture.md §2.7).
@@ -1110,7 +1114,7 @@ def _parse_groups_txt(path: Path) -> list[dict]:
     return out
 
 
-def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path) -> Path:
+def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path, wire_load: bool = False) -> Path:
     """Write a copy of the recipe with `{D}` replaced by `-D <d_ps>`.
 
     Yosys only substitutes {D} in inline (`-script +...`) scripts; a script
@@ -1122,7 +1126,11 @@ def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path) -> Pa
     text = src.read_text()
     d_ps = int(d_ps or 0)
     text = text.replace('{D}', f'-D {d_ps}' if d_ps > 0 else '')
+    if wire_load:
+        text = re.sub(r'\b(buffer|upsize|dnsize|stime)\b(?! -c)', r'\1 -c', text)
     out = out_dir / (f'{src.stem}.D{d_ps}.abc' if d_ps > 0 else f'{src.stem}.noD.abc')
+    if wire_load:
+        out = out.with_suffix('.wl.abc')
     out.write_text(text)
     return out
 
@@ -1169,7 +1177,7 @@ def run_recipe(args: dict) -> RecipeResult:
     groups_spec = args.get('groups')
     groups_txt = workdir / f'{recipe}.groups.txt'
     d_ps = int(cfg.get('abc_d_ps', cfg['period_ps']))
-    recipe_path = str(_materialize_recipe(recipe_path, d_ps, workdir))
+    recipe_path = str(_materialize_recipe(recipe_path, d_ps, workdir, bool(cfg.get('abc_wire_load'))))
     if dep_netlists:
         template = YOSYS_DRIVER_HIER
     elif cfg.get('abc_sequential', False):
@@ -2106,6 +2114,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
     p.add_argument('--yosys-opts', nargs='+', help='front-end options: booth, adder=kogge-stone|han-carlson|sklansky, noshare, hieropt')
     p.add_argument('--dont-use', nargs='+', help='liberty cell patterns excluded from abc and dfflibmap')
+    p.add_argument('--abc-wire-load', action='store_true', help="ABC sizing with the liberty wire-load model (-c on buffer/upsize/dnsize/stime) in every recipe")
     p.add_argument('--objective', choices=['delay', 'area', 'fastest', 'pareto', 'balanced'])
     p.add_argument('--modules', nargs='+', help='modules to synthesize')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep')
@@ -2160,6 +2169,8 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.yosys_opts = list(args.yosys_opts)
     if getattr(args, 'dont_use', None):
         cfg.dont_use = list(args.dont_use)
+    if getattr(args, 'abc_wire_load', False):
+        cfg.abc_wire_load = True
     if args.abc_sequential:
         cfg.abc_sequential = True
     if args.hierarchical:

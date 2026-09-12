@@ -210,6 +210,10 @@ with tempfile.TemporaryDirectory() as td:
     check('recipes without {D} are copied unchanged', _materialize_recipe(DEFAULT_RECIPES_DIR / 'yosys_default.abc', 7, Path(td)).read_text().count('-D 7') == (DEFAULT_RECIPES_DIR / 'yosys_default.abc').read_text().count('{D}'))
     nod = _materialize_recipe(DEFAULT_RECIPES_DIR / 'orfs_speed.abc', 0, Path(td)).read_text()
     check('d_ps=0 strips {D} entirely', '{D}' not in nod and '-D' not in nod and '&nf' in nod, nod)
+    wl = _materialize_recipe(DEFAULT_RECIPES_DIR / 'orfs_speed.abc', 0, Path(td), wire_load=True).read_text()
+    check('wire_load adds -c to sizing commands once', wl.count('buffer -c') == 1 and 'upsize -c' in wl and 'stime -c' in wl and '-c -c' not in wl, wl)
+    dm = (DEFAULT_RECIPES_DIR / 'delay_map.abc').read_text()
+    check('delay_map recipes carry -c already', 'upsize -c' in dm and 'buffer -c' in dm)
 
 print('\n[1] ModuleScanner — top-level detection')
 # =========================================================================
