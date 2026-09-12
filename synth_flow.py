@@ -211,6 +211,11 @@ class Config:
     # Recommended: [[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky],
     #               [booth], [booth, adder=kogge-stone]]
     yosys_opts_sweep: list = field(default_factory=list)
+    # Liberty cells excluded from mapping (glob patterns), passed as
+    # `-dont_use` to both `abc` and `dfflibmap`. Needed with a full PDK
+    # liberty (probe, lpflow, delay cells...). The bundled hd_120 subset
+    # already excludes them.
+    dont_use: list[str] = field(default_factory=list)
     resize_winner: bool = False
     resize_iters: int = 25
     resize_wns_tol_ps: int = 150       # WNS regression tolerated for a TNS gain ('tns' policy)
@@ -497,8 +502,8 @@ hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
-dfflibmap -liberty {liberty}
-abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
+dfflibmap -liberty {liberty} {dont_use}
+abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
 setundef -zero
 splitnets
 opt_clean -purge
@@ -519,7 +524,7 @@ hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
-dfflibmap -liberty {liberty}
+dfflibmap -liberty {liberty} {dont_use}
 {group_section}
 setundef -zero
 splitnets
@@ -545,8 +550,8 @@ hierarchy -top {module}
 synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
 # ABC with -dff: generic flops are part of the optimization
-abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
-dfflibmap -liberty {liberty}
+abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
+dfflibmap -liberty {liberty} {dont_use}
 setundef -zero
 splitnets
 opt_clean -purge
@@ -573,8 +578,8 @@ hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
-dfflibmap -liberty {liberty}
-abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
+dfflibmap -liberty {liberty} {dont_use}
+abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
 setundef -zero
 splitnets
 opt_clean -purge
@@ -620,12 +625,12 @@ select -set domain_2 @ffs_2 %x:+@ffs %d %xe*:+@ffs_2 @ffs_2
 select -set domain_2 @domain_2 @domain_1 %d
 
 # ABC on domain 1 (fast clock)
-abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} @domain_1
+abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use} @domain_1
 
 # ABC on domain 2 (slow clock)
-abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps_2} @domain_2
+abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps_2} {dont_use} @domain_2
 
-dfflibmap -liberty {liberty}
+dfflibmap -liberty {liberty} {dont_use}
 setundef -zero
 splitnets
 opt_clean -purge
@@ -649,6 +654,11 @@ def _candidate_name(recipe: str, variant) -> str:
 
 def _base_recipe(name: str) -> str:
     return name.split('@', 1)[0]
+
+
+def _dont_use_flags(patterns) -> str:
+    return ' '.join(f"-dont_use '{p}'" if any(ch in str(p) for ch in '*?[') else f'-dont_use {p}'
+                    for p in (patterns or []) if str(p).strip())
 
 
 def _synth_flags(yosys_opts) -> str:
@@ -1054,7 +1064,7 @@ def _sel(ports: list[str], prefix: str) -> str:
 
 
 def _group_section(spec: dict, liberty: str, constr_default: str, recipe: str,
-                   groups_txt: str) -> str:
+                   groups_txt: str, dont_use: str = '') -> str:
     """Yosys script lines: one abc per group (tightest first), then reg->reg."""
     R = spec['ff_rules']
     L = [f'# path groups: {len(spec["groups"])} + reg2reg (budgets in ps)',
@@ -1071,10 +1081,10 @@ def _group_section(spec: dict, liberty: str, constr_default: str, recipe: str,
         L.append(f'select -set g_{n} {expr}')
         L.append(f'tee -q -a {groups_txt} log GROUP {n} {g["kind"]} {g["budget_ps"]}')
         L.append(f'tee -q -a {groups_txt} select -count @g_{n}')
-        L.append(f'abc -liberty {liberty} -constr {g["constr"]} -script {recipe} -D {g["budget_ps"]} @g_{n}')
+        L.append(f'abc -liberty {liberty} -constr {g["constr"]} -script {recipe} -D {g["budget_ps"]} {dont_use} @g_{n}')
     L.append(f'tee -q -a {groups_txt} log GROUP reg2reg reg2reg {spec["reg2reg_ps"]}')
     L.append(f'tee -q -a {groups_txt} select -count t:$_*')
-    L.append(f'abc -liberty {liberty} -constr {constr_default} -script {recipe} -D {spec["reg2reg_ps"]} t:$_*')
+    L.append(f'abc -liberty {liberty} -constr {constr_default} -script {recipe} -D {spec["reg2reg_ps"]} {dont_use} t:$_*')
     return '\n'.join(L)
 
 
@@ -1191,9 +1201,11 @@ def run_recipe(args: dict) -> RecipeResult:
         stats_json=stats,
         syn_netlist=syn_nl,
         out_netlist=netlist,
-        group_section=(_group_section(groups_spec, _synth_lib(cfg), constr, recipe_path, str(groups_txt))
+        group_section=(_group_section(groups_spec, _synth_lib(cfg), constr, recipe_path, str(groups_txt),
+                                      _dont_use_flags(cfg.get('dont_use')))
                        if groups_spec else ''),
         synth_flags=_synth_flags(cfg.get('yosys_opts')),
+        dont_use=_dont_use_flags(cfg.get('dont_use')),
     ))
 
     start = time.time()
@@ -1751,6 +1763,7 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
             'yosys_opts_sweep': cfg.yosys_opts_sweep,
             'abc_target': cfg.abc_target,
             'resize_winner': cfg.resize_winner,
+            'dont_use': cfg.dont_use,
         },
         'modules': {
             m: {
@@ -1945,6 +1958,11 @@ def apply_sdc_overrides(cfg: Config, c, log=None) -> list[str]:
         if cell != cfg.driving_cell:
             msgs.append(f"driving_cell {cfg.driving_cell} -> {cell} (SDC set_driving_cell)")
             cfg.driving_cell = cell
+    if c.dont_use:
+        added = [x for x in c.dont_use if x not in cfg.dont_use]
+        if added:
+            msgs.append(f"dont_use += {added} (SDC set_dont_use)")
+            cfg.dont_use = list(cfg.dont_use) + added
     max_loads = [d for d in c.loads if not d.get('min')]
     if max_loads:
         pf = max_loads[-1]['pf']
@@ -2068,6 +2086,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--abc-target', help="ABC -D: 'none' (default, min-delay mapping), 'period', 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
     p.add_argument('--yosys-opts', nargs='+', help='front-end options: booth, adder=kogge-stone|han-carlson|sklansky, noshare, hieropt')
+    p.add_argument('--dont-use', nargs='+', help='liberty cell patterns excluded from abc and dfflibmap')
     p.add_argument('--objective', choices=['delay', 'area', 'fastest', 'pareto', 'balanced'])
     p.add_argument('--modules', nargs='+', help='modules to synthesize')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep')
@@ -2120,6 +2139,8 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.resize_winner = True
     if getattr(args, 'yosys_opts', None):
         cfg.yosys_opts = list(args.yosys_opts)
+    if getattr(args, 'dont_use', None):
+        cfg.dont_use = list(args.dont_use)
     if args.abc_sequential:
         cfg.abc_sequential = True
     if args.hierarchical:

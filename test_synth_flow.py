@@ -13,7 +13,7 @@ from synth_flow import (
     discover_recipes, RecipeResult,
     DEFAULT_RECIPES_DIR, _strip_signed_decls, apply_sdc_overrides,
     build_path_groups, resolve_abc_target, _group_section, _materialize_recipe, _synth_flags,
-    _candidate_name, _base_recipe,
+    _candidate_name, _base_recipe, _dont_use_flags,
 )
 
 failures = []
@@ -150,6 +150,7 @@ check('synth flags: empty', _synth_flags([]) == '' and _synth_flags(None) == '')
 check('candidate naming', _candidate_name('orfs_speed', []) == 'orfs_speed' and _candidate_name('orfs_speed', ['booth', 'adder=kogge-stone']) == 'orfs_speed@booth+adder=kogge-stone')
 check('base recipe and stability through variants', _base_recipe('delay_triple@booth') == 'delay_triple' and _stability_idx('delay_triple@booth') == _stability_idx('delay_triple'))
 check('sweep is opt-in', Config().yosys_opts_sweep == [])
+check('dont_use flags quote globs', _dont_use_flags(['sky130_fd_sc_hd__lpflow_*', 'sky130_fd_sc_hd__probe_p_8']) == "-dont_use 'sky130_fd_sc_hd__lpflow_*' -dont_use sky130_fd_sc_hd__probe_p_8" and _dont_use_flags([]) == '')
 try:
     _synth_flags(['adder=ripple']); check('unknown adder rejected', False)
 except ValueError:
