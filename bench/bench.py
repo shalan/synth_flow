@@ -363,7 +363,7 @@ def main() -> int:
     p.add_argument('--category', nargs='+', help='subset by category')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep (default: all)')
     p.add_argument('--quick', action='store_true', help=f'use {QUICK_RECIPES}')
-    p.add_argument('--objective', default='balanced', help='recipe set: delay | area | balanced (selection is always min-area-meeting)')
+    p.add_argument('--objective', default='delay', help='recipe set: delay | area | balanced (selection is always min-area-meeting)')
     p.add_argument('--use-sdc', action='store_true', help='pass each design SDC to synth_flow (STA)')
     p.add_argument('--parallel', type=int, default=0, help='synth_flow workers per design (0=auto)')
     p.add_argument('--timeout', type=int, default=7200, help='seconds per design')

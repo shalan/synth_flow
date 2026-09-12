@@ -179,7 +179,7 @@ class Config:
     # candidate that meets timing (WNS >= select_margin_ps) with the least
     # area, falling back to best WNS when nothing meets. 'fastest' and
     # 'pareto' are accepted as aliases (delay / balanced) for old configs.
-    objective: str = 'balanced'
+    objective: str = 'delay'
     full_sweep: bool = False           # run every recipe regardless of objective
     select_margin_ps: int = 0          # slack a candidate needs to count as meeting timing
     modules: list[str] = field(default_factory=list)  # empty = auto-detect

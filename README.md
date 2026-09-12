@@ -214,9 +214,9 @@ nothing meets. The subsets are the top-5 of each leaderboard on the
 
 | Objective | Recipes run | When to use |
 |-----------|-------------|-------------|
-| `delay` | `delay_map_resyn`, `delay_map`, `orfs_area`, `delay_choice_deep_v3`, `delay_syn2` | closing a hard clock period |
+| `delay` (default) | `delay_map_resyn`, `delay_map`, `orfs_area`, `delay_choice_deep_v3`, `delay_syn2` | closing a clock period; closes as many bench designs as the full sweep in 1/8 of the time |
 | `area` | `delay_aggressive`, `area_lut6`, `area_max`, `yosys_default`, `area_classic` | relaxed period, smallest netlist |
-| `balanced` (default) | `balanced_resyn`, `balanced_resyn2x`, `delay_triple`, `delay_iter_heavy`, `delay_map_resyn` | general use |
+| `balanced` | `balanced_resyn`, `balanced_resyn2x`, `delay_triple`, `delay_iter_heavy`, `delay_map_resyn` | general use |
 | `--full-sweep` | all 18 | final characterization |
 
 `--recipes R1 R2` overrides the subset. `fastest` and `pareto` are accepted
@@ -270,14 +270,15 @@ On the 16-design benchmark (Sky130 HD, SS corner, per-design SDC), the full
 flow (front-end sweep × recipe sweep × OpenSTA-guided sizing) against the
 ORFS/OpenLane reference (plain Yosys, `orfs_speed`, no sizing):
 
-| | ORFS reference | synth_flow, `objective: area` | synth_flow, `objective: pareto` |
+| | ORFS reference | `objective: delay` (default, 5 recipes) | `--full-sweep` (18 recipes) |
 |---|---|---|---|
-| designs meeting timing | 3 / 16 | 13 / 16 | 14 / 16 |
-| mean ΔWNS | — | +0.47 ns | +1.24 ns |
-| mean Δarea | — | +1.7 % | +12.7 % |
+| designs meeting timing | 3 / 16 | 14 / 16 | 14 / 16 |
+| mean ΔWNS | — | +0.82 ns | +0.50 ns |
+| mean Δarea | — | +6.0 % | +2.8 % |
+| synthesis time per design | — | 38 s | 295 s |
 
-`area` picks the smallest candidate that meets timing; `pareto` picks the
-fastest. Both run 6 front-end variants × 18 recipes with OpenSTA-guided sizing.
+Winner rule in both: the candidate that meets timing with the least area. Both
+sweep 6 front-end variants per recipe and finish with OpenSTA-guided sizing.
 
 Per-design numbers and every intermediate experiment (including the negative
 ones) are in [docs/benchmarks.md](docs/benchmarks.md).

@@ -365,7 +365,7 @@ check('delay_choice_deep_v3 priority < area_max priority', _stability_idx('delay
 from synth_flow import RECIPE_SETS
 check('recipe sets are subsets of the available recipes', all(r in names for s_ in RECIPE_SETS.values() for r in s_), str(RECIPE_SETS))
 check('recipe sets have 5 entries each', all(len(v) == 5 for v in RECIPE_SETS.values()))
-check("default objective is balanced, full_sweep off", Config().objective == 'balanced' and Config().full_sweep is False)
+check("default objective is delay, full_sweep off", Config().objective == 'delay' and Config().full_sweep is False)
 
 # Invalid objective
 cfg.objective = 'banana'

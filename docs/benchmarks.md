@@ -5,42 +5,44 @@
 recipe, a flow change or a library choice should be backed by a `bench.py`
 run, and every before/after comparison by `bench.py --compare`.
 
-## Headline result — `pipeline2.csv` (pareto) and `pipeline2-area.csv` (area)
+## Headline result — `obj-*.csv`
 
-The whole flow as it stands (six front-end variants × 18 recipes, winner by
-slow-corner OpenSTA, then OpenSTA-guided sizing) against the ORFS/OpenLane
-reference (plain Yosys front end, `orfs_speed`, no sizing), both at the SS
-corner with each design's SDC, area in µm². The `area` objective picks the
-smallest candidate that meets timing (fallback: best WNS); `pareto` picks
-the fastest point of the front.
+The flow as it stands, per objective, against the ORFS/OpenLane reference
+(plain Yosys front end, `orfs_speed`, no sizing), SS corner, per-design SDC.
+Every run: 6 front-end variants per recipe, winner = the candidate that meets
+timing with the least area (fallback best WNS), then OpenSTA-guided sizing.
+Objectives differ only in the recipe subset (5 each) or all 18 (`--full-sweep`).
 
-| design | ORFS reference WNS / area | `area` objective WNS / Δarea | `pareto` objective WNS / Δarea | `area` winner |
-|---|---|---|---|---|
-| alu32 | -1.947 / 10884 | +0.290 / +6.2 % | +1.040 / +17.2 % | `delay_map_resyn@adder=han-carlson` |
-| mul16_pipe | -0.435 / 12391 | +0.020 / -26.0 % | +1.250 / +3.7 % | `delay_triple@booth` |
-| mul32_mac | -2.725 / 39508 | -0.610 / +49.1 % | -0.610 / +49.1 % | `delay_map_resyn@adder=kogge-stone` |
-| fir8 | +0.323 / 13294 | +0.160 / -2.1 % | +2.080 / +32.9 % | `balanced_resyn2x@adder=sklansky` |
-| aes_round | +1.265 / 55919 | +0.960 / -11.2 % | +1.780 / +20.7 % | `area_classic` |
-| sha256_core | -0.214 / 67690 | +0.060 / -2.2 % | +2.050 / +14.0 % | `delay_iter_heavy@adder=han-carlson` |
-| crc32_8 | -0.131 / 2251 | +0.130 / +12.4 % | +0.210 / +22.4 % | `delay_map` |
-| rr_arbiter16 | -0.723 / 3052 | +0.010 / +15.5 % | +0.060 / +22.9 % | `delay_map@adder=kogge-stone` |
-| uart | -0.101 / 3784 | +0.070 / -2.7 % | +0.310 / +4.1 % | `delay_triple@adder=han-carlson` |
-| spi_master | -0.378 / 4716 | +0.010 / -3.4 % | +0.320 / +10.3 % | `yosys_default@adder=han-carlson` |
-| apb_timer | -0.079 / 11295 | -0.070 / +1.6 % | +0.090 / +3.3 % | `delay_choice_deep_v4@adder=han-carlson` |
-| fifo_sync | -1.302 / 26410 | +0.020 / +2.2 % | +0.020 / +2.2 % | `delay_map_resyn` |
-| zx16_core_ahb | -0.724 / 20202 | +0.010 / +1.4 % | +0.750 / +4.2 % | `delay_map_resyn` |
-| zxip | -2.322 / 160807 | -0.470 / +0.5 % | -0.470 / +0.5 % | `delay_choice_deep_v3@adder=sklansky` |
-| ms_psram_ahb | -1.134 / 26906 | +0.100 / -6.5 % | +0.100 / -6.5 % | `balanced_resyn2x` |
-| uart_apb_sys | +3.968 / 16714 | +0.090 / -6.6 % | +4.120 / +2.5 % | `delay_aggressive` |
-| **meet timing / mean** | **3 / 16** | **13 / 16, +0.465 ns, +1.7 %** | **14 / 16, +1.235 ns, +12.7 %** | |
+| design | ORFS ref WNS | `delay` WNS / Δarea | `balanced` WNS / Δarea | `area` WNS / Δarea | `--full-sweep` WNS / Δarea |
+|---|---|---|---|---|---|
+| alu32 | -1.947 | +0.470 / +6.5 % | +0.470 / +6.5 % | -1.190 / +3.9 % | +0.470 / +6.5 % |
+| mul16_pipe | -0.435 | +0.920 / -3.2 % | +0.020 / -26.0 % | -1.820 / +3.4 % | +0.020 / -26.0 % |
+| mul32_mac | -2.725 | -0.560 / +54.2 % | -0.560 / +54.2 % | -5.730 / +3.2 % | -0.560 / +54.2 % |
+| fir8 | +0.323 | +0.210 / +0.3 % | +0.160 / -2.1 % | -0.330 / +6.6 % | +0.160 / -2.1 % |
+| aes_round | +1.265 | +1.360 / +2.5 % | +1.310 / -6.0 % | +0.960 / -11.2 % | +0.960 / -11.2 % |
+| sha256_core | -0.214 | -0.000 / +3.6 % | +0.060 / -2.2 % | -2.240 / -3.2 % | +0.060 / -2.2 % |
+| crc32_8 | -0.131 | +0.180 / +12.8 % | +0.270 / +23.5 % | -0.240 / +0.5 % | +0.180 / +12.8 % |
+| rr_arbiter16 | -0.723 | +0.010 / +26.7 % | -0.010 / +25.1 % | -0.480 / -0.8 % | +0.010 / +26.7 % |
+| uart | -0.101 | +0.010 / -1.7 % | +0.070 / -2.7 % | -0.950 / -8.5 % | +0.070 / -2.7 % |
+| spi_master | -0.378 | +0.120 / -0.7 % | +0.290 / +11.1 % | +0.010 / -3.4 % | +0.010 / -3.4 % |
+| apb_timer | -0.079 | +0.110 / +0.5 % | +0.040 / +1.2 % | -2.270 / -3.1 % | +0.110 / +0.5 % |
+| fifo_sync | -1.302 | +0.030 / +3.2 % | +0.030 / +3.2 % | -0.710 / +11.5 % | +0.030 / +3.2 % |
+| zx16_core_ahb | -0.724 | +0.110 / +1.8 % | +0.110 / +1.8 % | -0.770 / -1.8 % | +0.110 / +1.8 % |
+| zxip | -2.322 | -0.470 / +0.5 % | -0.670 / -0.1 % | -0.840 / -0.9 % | -0.470 / +0.5 % |
+| ms_psram_ahb | -1.134 | +0.470 / -8.1 % | +0.100 / -6.5 % | +0.500 / -6.8 % | +0.100 / -6.5 % |
+| uart_apb_sys | +3.968 | +3.450 / -2.8 % | +3.530 / -4.5 % | +0.090 / -6.6 % | +0.090 / -6.6 % |
+| **meeting / mean ΔWNS / mean Δarea / time** | 3 / 16 | **14 / 16, +0.82 ns, +6.0 %, 38 s** | **13 / 16, +0.74 ns, +4.8 %, 115 s** | **4 / 16, -0.58 ns, -1.1 %, 68 s** | **14 / 16, +0.50 ns, +2.8 %, 295 s** |
 
-The two designs that do not close under either objective are mul32_mac
-(−0.61 ns at 16 ns) and zxip (−0.47 ns at 10 ns, the repo's own SDC).
-Runtime per design 15 s to 130 s (16k-cell zxip: ~3 min) on an 18-core
-laptop. `pipeline.csv` is the earlier 16-recipe run (9/16, +0.68 ns, +1.5 %),
-before `delay_map` / `delay_map_resyn` were added.
+Reading: the `delay` subset closes as many designs as the full sweep in an
+eighth of the time and is the default; the full sweep buys area back where
+several candidates close; the `area` subset is for relaxed periods (only 4
+designs close at these periods, area −1.1 %). The two designs no objective
+closes are mul32_mac (−0.56 ns at 16 ns; the fallback picks the fastest
+netlist, hence +54 % area) and zxip (−0.47 ns at 10 ns, the repo's own SDC).
+`pipeline2*.csv` are the earlier runs with the previous per-objective
+selection rules.
 
-Reproduce: `./bench.py --use-sdc --objective area --set 'yosys_opts_sweep=[[],[adder=kogge-stone],[adder=han-carlson],[adder=sklansky],[booth],[booth,adder=kogge-stone]]' --set resize_winner=true --tag <name>`.
+Reproduce: `./bench.py --use-sdc --objective delay --set 'yosys_opts_sweep=[[],[adder=kogge-stone],[adder=han-carlson],[adder=sklansky],[booth],[booth,adder=kogge-stone]]' --set resize_winner=true --tag <name>` (add `--set full_sweep=true` for all recipes).
 
 ## Quick start
 

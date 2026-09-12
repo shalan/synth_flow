@@ -197,7 +197,7 @@ if none meets, the best WNS, then least area; ties by `RECIPE_PRIORITY`.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `objective` | string | `balanced` | `delay` \| `area` \| `balanced`. `fastest` → `delay`, `pareto` → `balanced` (aliases). |
+| `objective` | string | `delay` | `delay` \| `area` \| `balanced`. `fastest` → `delay`, `pareto` → `balanced` (aliases). |
 | `full_sweep` | bool | `false` | Run every recipe in `recipes/` (also `--full-sweep`). |
 | `select_margin_ps` | int | `0` | Slack a candidate needs to count as meeting timing. The multi-corner report is ~30 ps more pessimistic than the ranking STA, so 50 is a reasonable safety margin for marginal designs. |
 | `recipes` | list | — | Explicit recipes; overrides the objective subset. |

@@ -9,8 +9,8 @@ it emits.
 Status legend: ☐ not started · ◐ in progress · ☑ done
 
 **Where it stands (2026-09-12):** against the ORFS reference recipe the flow
-closes 13/16 bench designs instead of 3/16 at +1.7 % area (`objective: area`),
-or 14/16 at +12.7 % area with +1.24 ns mean WNS (`objective: pareto`)
+closes 14/16 bench designs instead of 3/16 (`objective: delay`, 5 recipes,
++0.82 ns mean WNS, +6.0 % area, 38 s/design; `--full-sweep`: 14/16, +2.8 % area)
 ([benchmarks.md](benchmarks.md#headline-result--pipelinecsv)). Levers that
 worked: recipe sweep (the classic `map` mapper in `delay_map*` above all),
 front-end variants, STA-guided sizing, no ABC `-D`.
