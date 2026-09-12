@@ -29,3 +29,6 @@ tmp/
 bench/external/
 bench/work/
 !bench/results/
+
+# Yosys abc -nocleanup scratch dirs
+_tmp_yosys-abc-*/
