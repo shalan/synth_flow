@@ -222,7 +222,9 @@ Effects are strongly design-specific: Booth is −26 % area / +0.45 ns on
 mul16_pipe but −2.3 ns WNS on mul32_mac; Kogge-Stone buys 0.6 to 0.8 ns on
 alu32, mul32_mac and sha256_core for 3 to 8 % area. Hence a sweep, not a
 default. `sweep6.csv` is the flow's own run with all six variants
-(`yosys_opts_sweep`), 96 candidates per design.
+(`yosys_opts_sweep`, 96 candidates per design): winners meeting timing
+6 → 9 of 16, mean best-WNS +0.236 ns, identical to the best-of analysis.
+Runtime per design 21 s (crc32_8) to 986 s (zxip, 16k cells).
 
 ## Post-passes on winners — `postpass.py`
 
