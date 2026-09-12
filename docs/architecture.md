@@ -286,6 +286,29 @@ by construction, so no equivalence check is needed. It is available in the
 flow as `resize_winner: true` / `--resize`, applied to each module's winner
 before the multi-corner STA; `winner.presize.v` keeps the input.
 
+### 2.8 `abc_new` (Yosys 0.68, experimental) is not ready for standard cells
+
+`abc_new` drives ABC through `abc9_exe` with an XAIGER interface and box
+files, the path built for FPGA LUT mapping. Measured with a pure GIA script
+(`&st; &dch -f; &nf`), the same constraint file, and OpenSTA at SS:
+
+| design | `abc` WNS / area | `abc_new` WNS / area | equivalent (3000-cycle random sim) |
+|---|---|---|---|
+| uart | −0.018 / 3880 | −0.303 / 4006 | yes |
+| alu32 | −1.599 / 11001 | −4.517 / 10772 | yes |
+| apb_timer | −0.597 / 11295 | −4.119 / 13345 | yes |
+
+Pitfalls found on the way: it must run before `dfflibmap` (after it, liberty
+flops with `RESET_B` fail with "Bad connection"); `dfflibmap` then emits
+`$_MUX_` cells for enable flops that a second plain `abc` has to map; and
+until that pass is added `stat` and OpenSTA silently ignore the unmapped
+cells, which made the first numbers (alu32 "+6.8 ns", −23 % area) look
+spectacular and were wrong. The mapped GIA comes back without the
+`buffer`/`upsize`/`dnsize` steps of the SCL flow and with flops as plain
+inputs (`box = 0`), so every cell is minimum drive. Revisit when Yosys
+derives boxes for liberty flops and the SCL sizing is reachable from the
+GIA path.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

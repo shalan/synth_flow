@@ -1,5 +1,5 @@
-# area_safe — AREA: full AIG cleanup + GIA delay mapping
-strash; ifraig; scorr; dc2; dretime; strash;
+# area_safe — AREA: ifraig + dc2 + rewriting + GIA delay mapping (sequential cmds removed: no-ops on the combinational network ABC sees)
+strash; ifraig; dc2; strash;
 balance; rewrite; refactor; balance; rewrite;
 rewrite -z; balance; refactor -z; rewrite -z; balance;
 &get -n; &st; &dch; &nf {D}; &put;
