@@ -54,8 +54,14 @@ SYNTH_FLOW = REPO_DIR / 'synth_flow.py'
 LIB_TT = REPO_DIR / 'sky130' / 'hd_120_tt.lib'
 LIB_SS = REPO_DIR / 'sky130' / 'hd_120_ss.lib'
 LIB_FF = REPO_DIR / 'sky130' / 'hd_120_ff.lib'
+# --lib-dir: a full sky130_fd_sc_hd liberty directory (e.g. from ciel/volare:
+# $PDK_ROOT/sky130A/libs.ref/sky130_fd_sc_hd/lib). Corner files by name.
+FULL_LIB_NAMES = {'tt': 'sky130_fd_sc_hd__tt_025C_1v80.lib', 'ss': 'sky130_fd_sc_hd__ss_100C_1v60.lib',
+                  'ff': 'sky130_fd_sc_hd__ff_n40C_1v95.lib'}
 
 QUICK_RECIPES = ['orfs_speed', 'balanced_resyn', 'area_classic', 'delay_choice_deep']
+
+LIBS = {'tt': LIB_TT, 'ss': LIB_SS, 'ff': LIB_FF}
 
 COLUMNS = ['design', 'category', 'top', 'recipe', 'is_winner', 'cells', 'area_um2',
            'wns_ns', 'tns_ns', 'abc_delay_ps', 'runtime_s', 'status', 'error']
@@ -91,7 +97,7 @@ def capture_env(yosys: str, sta: str | None) -> dict:
         'opensta': sta_v[0] if sta_v else '(not available)',
         'synth_flow_sha': sha,
         'synth_flow_dirty': dirty,
-        'lib_synth': LIB_SS.name,
+        'lib_synth': LIBS['ss'].name if 'LIBS' in globals() else LIB_SS.name,
     }
 
 
@@ -128,9 +134,9 @@ def write_config(d: dict, files: list[str], args, run_sta: bool, work: Path) -> 
         'rtl_files': files,
         'top': d['top'],
         'modules': [d['top']],
-        'lib_typ': str(LIB_TT),
-        'lib_slow': str(LIB_SS),
-        'lib_fast': str(LIB_FF),
+        'lib_typ': str(LIBS['tt']),
+        'lib_slow': str(LIBS['ss']),
+        'lib_fast': str(LIBS['ff']),
         'period_ps': int(d['period_ps']),
         'clock_port': d['clock'],
         'objective': args.objective,
@@ -352,12 +358,22 @@ def main() -> int:
     p.add_argument('--no-sta', action='store_true')
     p.add_argument('--keep-work', action='store_true', help='do not wipe bench/work/<design>')
     p.add_argument('--set', action='append', metavar='KEY=VALUE', help='extra synth_flow config (repeatable), e.g. --set path_groups=true')
+    p.add_argument('--lib-dir', help='directory with the full sky130_fd_sc_hd liberty files (tt/ss/ff corners) instead of the bundled hd_120 subset')
     p.add_argument('--tag', help='results file stem (default: timestamp)')
     p.add_argument('--compare', nargs=2, metavar=('A.csv', 'B.csv'), help='diff two result files and exit')
     args = p.parse_args()
 
     if args.compare:
         return compare(Path(args.compare[0]), Path(args.compare[1]))
+
+    global LIBS
+    LIBS = {'tt': LIB_TT, 'ss': LIB_SS, 'ff': LIB_FF}
+    if args.lib_dir:
+        d = Path(args.lib_dir).expanduser()
+        LIBS = {k: d / v for k, v in FULL_LIB_NAMES.items()}
+        missing = [str(v) for v in LIBS.values() if not v.exists()]
+        if missing:
+            sys.exit(f'--lib-dir: missing {missing}')
 
     if args.quick and not args.recipes:
         args.recipes = QUICK_RECIPES
