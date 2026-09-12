@@ -1,0 +1,5 @@
+# delay_map_resyn — DELAY: resyn2 cleanup, then choices + classic mapper (map)
+strash;
+balance; rewrite; refactor; balance; rewrite;
+rewrite -z; balance; refactor -z; rewrite -z; balance;
+dch -f; map; buffer; topo; upsize {D}; dnsize {D}; stime

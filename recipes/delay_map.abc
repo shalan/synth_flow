@@ -1,0 +1,2 @@
+# delay_map — DELAY: classic supergate mapper (map) after choice computation; fastest on 12/16 bench designs, more area
+strash; dch -f; map; buffer; topo; upsize {D}; dnsize {D}; stime
