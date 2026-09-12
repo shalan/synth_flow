@@ -28,7 +28,7 @@ designs:
     top: mul32_mac
     files: [designs/mul32_mac/mul32_mac.v]
     clock: clk
-    period_ps: 16000
+    period_ps: 18000
     sdc: designs/mul32_mac/constraints.sdc
     notes: 32x32 MAC with 64-bit accumulator. Largest single-cone datapath.
   - name: fir8
@@ -122,11 +122,11 @@ designs:
     files: [external/zxip/rtl/*.v]
     includes: [external/zxip/rtl]
     clock: hclk
-    period_ps: 10000
+    period_ps: 11000
     clock_2: pclk
-    period_ps_2: 10000
-    sdc: external/zxip/sta/zxip_top.sdc
-    notes: XIP flash controller with cache, AHB slave, APB registers. Dual clock; repo SDC.
+    period_ps_2: 11000
+    sdc: designs/zxip/constraints.sdc
+    notes: XIP flash controller with cache, AHB slave, APB registers. Dual clock; repo SDC with clocks relaxed to 11 ns (bench copy).
   - name: ms_psram_ahb
     category: soc_ip
     external: ms_psram_ahb

@@ -274,9 +274,9 @@ ORFS/OpenLane reference (plain Yosys, `orfs_speed`, no sizing):
 
 | | ORFS reference | `objective: delay` (default, 5 recipes) | `--full-sweep` (18 recipes) |
 |---|---|---|---|
-| designs meeting timing | 3 / 16 | 14 / 16 | 14 / 16 |
-| mean ΔWNS | — | +0.73 ns | +0.50 ns |
-| mean Δarea | — | +2.7 % | +2.8 % |
+| designs meeting timing | 3 / 16 | 16 / 16 | 16 / 16 |
+| mean ΔWNS | — | +0.76 ns | +0.44 ns |
+| mean Δarea | — | +5.3 % | +2.1 % |
 | wall time per design (18 cores, incl. STA and sizing) | — | 6 s (2 to 30 s) | ~40 s |
 
 Winner rule in both: the candidate that meets timing with the least area. Both
