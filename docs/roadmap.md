@@ -59,8 +59,8 @@ Deliverables
 - ☑ GitHub Actions: unit tests + smoke bench (OSS CAD Suite).
 
 Acceptance: one command reproduces the full matrix; CSV committed; recipe set
-reduced to distinct behaviors; quick-STA WNS within a few percent of
-corner-STA slow-corner WNS.
+reduced to distinct behaviors; quick-STA WNS equals corner-STA slow-corner
+WNS (met exactly since the report runs single-library sessions, §2.11).
 
 ## Phase 1 — SDC front end  ☑
 

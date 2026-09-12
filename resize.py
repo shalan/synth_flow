@@ -471,7 +471,7 @@ def pick_moves(paths: list[PathInfo], types: dict[str, str], fam: dict[str, list
 def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: int, clock_port: str,
            out_dir: Path, *, sdc=None, iters=10, margin_ps=0, yosys='yosys', opensta='sta',
            driving_cell='sky130_fd_sc_hd__inv_2', load_ff=17.65, unc_setup_ps=250, unc_hold_ps=100,
-           wire_load_model='auto', io_delay_frac=0.2, clock_port_2=None, period_ps_2=None,
+           wire_load_model='auto', io_delay_frac=0.2, io_delay_min_frac=0.4, clock_port_2=None, period_ps_2=None,
            per_path=1, max_paths=200, wns_tol=0.15, wns_repair_iters=8, final='tns',
            recover_area=False, recover_rounds=6,
            repair_design=False, max_fanout=8, buffer_iters=6,
@@ -482,7 +482,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         period_2_ns=(period_ps_2 / 1000.0) if (clock_port_2 and period_ps_2) else None,
         unc_setup_ns=unc_setup_ps / 1000.0, unc_hold_ns=unc_hold_ps / 1000.0, user_sdc=sdc,
         driving_cell=driving_cell, load_pf=load_ff / 1000.0,
-        wire_load_section=sf._wire_load_section(wire_load_model, sta_liberty), io_delay_frac=io_delay_frac)
+        wire_load_section=sf._wire_load_section(wire_load_model, sta_liberty), io_delay_frac=io_delay_frac,
+        io_delay_min_frac=io_delay_min_frac)
     fam = drive_families(liberty)
     margin = margin_ps / 1000.0
 

@@ -84,11 +84,9 @@ Known inconsistencies, fixed in Phase 0 of the roadmap:
 Status after Phase 0/1: both STA scripts share one constraint preamble
 (driving cell, load, liberty wire-load model, uncertainty on all clocks, user
 SDC last), and async-reset false paths are derived from register async pins
-with the name list as fallback. One residual: the multi-corner script
-(`define_corners fast typical slow`) reports slow-corner slack about 30 ps
-(0.8 %) more pessimistic than the single-library quick STA on the same
-netlist and constraints; ranking uses the quick STA, the report the corner
-STA, so numbers in `summary.json` differ from `selection.json` by that much.
+with the name list as fallback. The 30 ps gap between the multi-corner report and the single-library
+ranking STA is gone: the report now runs one single-library session per
+corner (§2.11), so `summary.json` and `selection.json` agree exactly.
 
 ## 2. Findings about ABC and constraints
 
@@ -359,6 +357,34 @@ construction (verified by 3000-cycle random simulation on every test):
 
 Both are opt-in (`repair_design`, `repair_hold`); bench results per design
 are in [benchmarks.md](benchmarks.md).
+
+### 2.11 OpenSTA's multi-corner wire-load estimate differs from single-library
+
+Same netlist, same constraints, same `Small` wire-load table in every corner
+library: a `define_corners fast typical slow` session reported the slow
+corner 11 to 33 ps worse than a session that read only the slow liberty.
+Bisected on uart_apb_sys:
+
+| session | slow-corner WNS |
+|---|---|
+| single library (slow) | 3.9566 ns |
+| three corners, slow library read first | 3.9566 ns |
+| three corners, fast library read first | 3.9456 ns |
+| any of the above without a wire-load model | identical |
+| `set_wire_load_model -library <slow lib>`, `-max`/`-min` split | no change |
+
+Only the wire-load estimate moves, every net's capacitance by a few
+femtofarads, and only when a different library was read first; the tables
+themselves are byte-identical across the three libraries. Binding the model
+to a library does not help. Rather than depend on read order, the
+multi-corner report now runs three single-library sessions (slow: setup and
+SDF; typical: setup and hold; fast: hold), the same script shape the ranking
+STA uses. Ranking and report agree to four decimals by construction.
+
+Related default change: minimum I/O delays were 0, which manufactures a hold
+violation on every short input-to-register path at the fast corner. The
+default is now 40 % of the maximum delay (`io_delay_min_frac`), the usual
+template value, and the in-house bench SDCs carry the same.
 
 ## 3. Target architecture (revised after §2.5)
 

@@ -313,7 +313,8 @@ def refine(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         period_2_ns=(period_ps_2 / 1000.0) if (clock_port_2 and period_ps_2) else None,
         unc_setup_ns=unc_setup_ps / 1000.0, unc_hold_ns=unc_hold_ps / 1000.0, user_sdc=sdc,
         driving_cell=driving_cell, load_pf=load_ff / 1000.0,
-        wire_load_section=sf._wire_load_section(wire_load_model, sta_liberty), io_delay_frac=io_delay_frac)
+        wire_load_section=sf._wire_load_section(wire_load_model, sta_liberty), io_delay_frac=io_delay_frac,
+        io_delay_min_frac=io_delay_min_frac)
     # Cone boundary model. 'flat' (default) reuses the flow's driving cell and
     # load: with a wire-load model in STA the conventional ~33 fF stands in
     # for pin cap + wire, and it measured better than the physically exact

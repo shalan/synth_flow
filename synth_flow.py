@@ -205,7 +205,11 @@ class Config:
     # STA modelling (applied identically to quick STA and multi-corner STA)
     clock_uncertainty_setup_ps: int = 250
     clock_uncertainty_hold_ps: int = 100
-    io_delay_frac: float = 0.2          # default input/output delay as fraction of period
+    io_delay_frac: float = 0.2          # default input/output delay (max) as fraction of period
+    # Default minimum I/O delay for hold, as a fraction of the max delay. Zero
+    # (the old default) manufactures hold violations on every short
+    # input-to-register path; 0.4 is the usual template value.
+    io_delay_min_frac: float = 0.4
     wire_load_model: str = 'auto'       # auto = liberty default_wire_load | none | <name>
     # Path-group partitioned mapping (docs/architecture.md §3): split the
     # combinational logic into in->reg / reg->out / in->out / relaxed groups
@@ -1360,7 +1364,7 @@ def _sta_constraints(*, clock_port: str, period_ns: float,
                      driving_cell: Optional[str] = None,
                      load_pf: Optional[float] = None,
                      wire_load_section: str = '',
-                     io_delay_frac: float = 0.2) -> str:
+                     io_delay_frac: float = 0.2, io_delay_min_frac: float = 0.4) -> str:
     """Constraint preamble shared by quick STA and multi-corner STA so that
     winner ranking and the final report see the same model. Order: clocks,
     uncertainty, default driving cell / load / wire load / I/O delays,
@@ -1379,8 +1383,11 @@ def _sta_constraints(*, clock_port: str, period_ns: float,
     if wire_load_section:
         L.append(wire_load_section.rstrip())
     io = round(period_ns * io_delay_frac, 4)
-    L.append(f'set_input_delay  -clock {clock_port} {io} [all_inputs -no_clocks]')
-    L.append(f'set_output_delay -clock {clock_port} {io} [all_outputs]')
+    io_min = round(io * io_delay_min_frac, 4)
+    L.append(f'set_input_delay  -clock {clock_port} -max {io} [all_inputs -no_clocks]')
+    L.append(f'set_input_delay  -clock {clock_port} -min {io_min} [all_inputs -no_clocks]')
+    L.append(f'set_output_delay -clock {clock_port} -max {io} [all_outputs]')
+    L.append(f'set_output_delay -clock {clock_port} -min {io_min} [all_outputs]')
     L.append(_ASYNC_RESET_FALSE_PATHS.rstrip())
     if user_sdc:
         # Last, so per-port delays, driving cells, loads and exceptions in the
@@ -1411,7 +1418,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
                load_ff: Optional[float] = None,
                unc_setup_ps: int = 250, unc_hold_ps: int = 100,
                wire_load_model: str = 'auto',
-               io_delay_frac: float = 0.2) -> tuple[Optional[float], Optional[float]]:
+               io_delay_frac: float = 0.2, io_delay_min_frac: float = 0.4) -> tuple[Optional[float], Optional[float]]:
     """Run a quick STA (ranking corner). Returns (wns_ns, tns_ns) or (None, None).
     Uses the same constraint preamble as the multi-corner STA."""
     period_ns = period_ps / 1000.0
@@ -1426,7 +1433,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
         user_sdc=sdc, driving_cell=driving_cell,
         load_pf=(load_ff / 1000.0) if load_ff is not None else None,
         wire_load_section=_wire_load_section(wire_load_model, liberty),
-        io_delay_frac=io_delay_frac,
+        io_delay_frac=io_delay_frac, io_delay_min_frac=io_delay_min_frac,
     )
     with tempfile.NamedTemporaryFile('w', suffix='.tcl', delete=False) as f:
         f.write(QSTA_TCL.format(
@@ -1474,7 +1481,8 @@ def _quick_sta_job(args: dict) -> tuple[str, Optional[float], Optional[float]]:
         macro_libs=(cfg.get('macro_libs') or {}).get(corner, []),
         sdc=cfg.get('sdc'), driving_cell=cfg['driving_cell'], load_ff=cfg['load_ff'],
         unc_setup_ps=cfg['clock_uncertainty_setup_ps'], unc_hold_ps=cfg['clock_uncertainty_hold_ps'],
-        wire_load_model=cfg['wire_load_model'], io_delay_frac=cfg['io_delay_frac'])
+        wire_load_model=cfg['wire_load_model'], io_delay_frac=cfg['io_delay_frac'],
+        io_delay_min_frac=cfg.get('io_delay_min_frac', 0.4))
     return args['recipe'], wns, tns
 
 
@@ -1591,46 +1599,28 @@ def select_winner(cands: list[Candidate], objective: str = 'balanced',
 # Corner STA on winner
 # ============================================================================
 
-CORNER_STA_TCL = """\
-define_corners fast typical slow
-read_liberty -corner fast {lib_fast}
-read_liberty -corner typical {lib_typ}
-read_liberty -corner slow {lib_slow}
-{macro_libs_fast}
-{macro_libs_typ}
-{macro_libs_slow}
+# One OpenSTA session per corner, each with a single liberty: the same script
+# shape as the ranking STA. OpenSTA's multi-corner mode (`define_corners`)
+# estimates wire loads slightly differently from a single-library session
+# (about 30 ps on a 10 ns design, docs/architecture.md), which made the report
+# disagree with the ranking. Running the corners separately removes that.
+CORNER_SESSION_TCL = """\
+read_liberty {liberty}
+{macro_libs}
 read_verilog {netlist}
 link_design {module}
 {constraints}
-# --- setup at slow ---
-puts ">>> SETUP_SLOW_BEGIN"
-report_checks -path_delay max -corner slow -group_path_count 5 -format full_clock
-report_worst_slack -max
-report_tns
-puts ">>> SETUP_SLOW_END"
-
-# --- setup at typical ---
-puts ">>> SETUP_TYP_BEGIN"
-report_checks -path_delay max -corner typical -group_path_count 5 -format full_clock
-report_worst_slack -max
-report_tns
-puts ">>> SETUP_TYP_END"
-
-# --- hold at fast ---
-puts ">>> HOLD_FAST_BEGIN"
-report_checks -path_delay min -corner fast -group_path_count 5 -format full_clock
-report_worst_slack -min
-report_tns
-puts ">>> HOLD_FAST_END"
-
-# --- hold at typical ---
-puts ">>> HOLD_TYP_BEGIN"
-report_checks -path_delay min -corner typical -group_path_count 5 -format full_clock
-report_worst_slack -min
-report_tns
-puts ">>> HOLD_TYP_END"
-
-write_sdf -corner slow {sdf_out}
+puts ">>> SETUP_BEGIN"
+report_checks -path_delay max -group_path_count 5 -format full_clock
+report_worst_slack -max -digits 4
+report_tns -max -digits 4
+puts ">>> SETUP_END"
+puts ">>> HOLD_BEGIN"
+report_checks -path_delay min -group_path_count 5 -format full_clock
+report_worst_slack -min -digits 4
+report_tns -min -digits 4
+puts ">>> HOLD_END"
+{sdf_line}
 exit
 """
 
@@ -1652,90 +1642,74 @@ class CornerResult:
 
 def run_corner_sta(cfg: Config, module: str, netlist: Path,
                    results_dir: Path) -> CornerResult:
+    """Multi-corner STA as three single-library sessions (slow: setup + SDF,
+    typical: setup and hold, fast: hold). Numbers are parsed from the section
+    markers; the slow-corner setup WNS equals the ranking STA by construction."""
     out_dir = results_dir / module
     out_dir.mkdir(parents=True, exist_ok=True)
-    sdf  = out_dir / 'winner.sdf'
-    rpt  = out_dir / 'sta.rpt'
-    log  = out_dir / 'sta.log'
-    tcl  = out_dir / 'sta.tcl'
+    sdf = out_dir / 'winner.sdf'
+    rpt = out_dir / 'sta.rpt'
+    log = out_dir / 'sta.log'
 
     period_ns = cfg.period_ps / 1000.0
-    constraints = _sta_constraints(
-        clock_port=cfg.clock_port, period_ns=period_ns,
-        clock_port_2=cfg.clock_port_2,
-        period_2_ns=(cfg.period_ps_2 / 1000.0) if (cfg.clock_port_2 and cfg.period_ps_2) else None,
-        unc_setup_ns=cfg.clock_uncertainty_setup_ps / 1000.0,
-        unc_hold_ns=cfg.clock_uncertainty_hold_ps / 1000.0,
-        user_sdc=cfg.sdc, driving_cell=cfg.driving_cell,
-        load_pf=cfg.load_ff / 1000.0,  # OpenSTA wants pF
-        wire_load_section=_wire_load_section(cfg.wire_load_model, cfg.lib_slow or cfg.lib_typ),
-        io_delay_frac=cfg.io_delay_frac,
-    )
-    # Per-corner macro liberty lines. OpenSTA corner is named "typical" in
-    # the Tcl while our internal key is "typ"; map at emission.
-    def _ml_lines(internal_key: str, sta_corner: str) -> str:
-        libs = cfg.macro_libs.get(internal_key, []) if cfg.macro_libs else []
-        if not libs:
-            return ''
-        return '\n'.join(f'read_liberty -corner {sta_corner} {f}' for f in libs)
+    corners = [('slow', cfg.lib_slow, 'slow'), ('typical', cfg.lib_typ, 'typ'), ('fast', cfg.lib_fast, 'fast')]
+    res = CornerResult(module=module, success=True, report_path=str(rpt))
+    report_parts, log_parts = [], []
 
-    tcl.write_text(CORNER_STA_TCL.format(
-        lib_fast=cfg.lib_fast, lib_typ=cfg.lib_typ, lib_slow=cfg.lib_slow,
-        macro_libs_fast=_ml_lines('fast', 'fast'),
-        macro_libs_typ =_ml_lines('typ',  'typical'),
-        macro_libs_slow=_ml_lines('slow', 'slow'),
-        netlist=netlist, module=module,
-        constraints=constraints,
-        sdf_out=sdf,
-    ))
+    def grab(text, pattern):
+        m = re.search(pattern, text, re.M | re.I)
+        return float(m.group(1)) if m else None
 
-    try:
-        r = subprocess.run(
-            [cfg.opensta, '-no_init', '-exit', str(tcl)],
-            capture_output=True, text=True, timeout=600,
+    for name, lib, key in corners:
+        if not lib:
+            continue
+        constraints = _sta_constraints(
+            clock_port=cfg.clock_port, period_ns=period_ns,
+            clock_port_2=cfg.clock_port_2,
+            period_2_ns=(cfg.period_ps_2 / 1000.0) if (cfg.clock_port_2 and cfg.period_ps_2) else None,
+            unc_setup_ns=cfg.clock_uncertainty_setup_ps / 1000.0,
+            unc_hold_ns=cfg.clock_uncertainty_hold_ps / 1000.0,
+            user_sdc=cfg.sdc, driving_cell=cfg.driving_cell,
+            load_pf=cfg.load_ff / 1000.0,  # OpenSTA wants pF
+            wire_load_section=_wire_load_section(cfg.wire_load_model, lib),
+            io_delay_frac=cfg.io_delay_frac, io_delay_min_frac=cfg.io_delay_min_frac,
         )
-        log.write_text(r.stdout + '\n--- stderr ---\n' + r.stderr)
+        macro = cfg.macro_libs.get(key, []) if cfg.macro_libs else []
+        tcl = out_dir / f'sta_{name}.tcl'
+        tcl.write_text(CORNER_SESSION_TCL.format(
+            liberty=lib, macro_libs='\n'.join(f'read_liberty {f}' for f in macro),
+            netlist=netlist, module=module, constraints=constraints,
+            sdf_line=(f'write_sdf {sdf}' if name == 'slow' else ''),
+        ))
+        try:
+            r = subprocess.run([cfg.opensta, '-no_init', '-exit', str(tcl)],
+                               capture_output=True, text=True, timeout=600)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            return CornerResult(module=module, success=False, error=f'{name}: {e}')
         out = r.stdout
-        rpt.write_text(out)
+        log_parts.append(f'##### corner {name} ({lib})\n{out}\n--- stderr ---\n{r.stderr}')
+        report_parts.append(f'##### corner {name} ({lib})\n{out}')
+        if r.returncode != 0:
+            res.success = False
+            res.error = (res.error or '') + f'opensta exit {r.returncode} at {name}; '
+            continue
+        setup = out[out.find('>>> SETUP_BEGIN'):out.find('>>> SETUP_END')]
+        hold = out[out.find('>>> HOLD_BEGIN'):out.find('>>> HOLD_END')]
+        ws = grab(setup, r'^worst slack(?:\s+max)?\s+([-0-9.eE+]+)')
+        ts = grab(setup, r'^tns(?:\s+max)?\s+([-0-9.eE+]+)')
+        wh = grab(hold, r'^worst slack(?:\s+min)?\s+([-0-9.eE+]+)')
+        th = grab(hold, r'^tns(?:\s+min)?\s+([-0-9.eE+]+)')
+        if name == 'slow':
+            res.wns_setup_slow, res.tns_setup_slow = ws, ts
+        elif name == 'typical':
+            res.wns_setup_typ, res.tns_setup_typ, res.wns_hold_typ, res.tns_hold_typ = ws, ts, wh, th
+        else:
+            res.wns_hold_fast, res.tns_hold_fast = wh, th
+    log.write_text('\n'.join(log_parts))
+    rpt.write_text('\n'.join(report_parts))
+    res.sdf_path = str(sdf) if sdf.exists() else None
+    return res
 
-        def section(tag_begin, tag_end):
-            m = re.search(rf'{tag_begin}(.+?){tag_end}', out, re.S)
-            return m.group(1) if m else out
-
-        setup_sec = section('>>> SETUP_SLOW_BEGIN', '>>> SETUP_SLOW_END')
-        setup_typ_sec = section('>>> SETUP_TYP_BEGIN', '>>> SETUP_TYP_END')
-        hold_sec  = section('>>> HOLD_FAST_BEGIN', '>>> HOLD_FAST_END')
-        hold_typ_sec = section('>>> HOLD_TYP_BEGIN', '>>> HOLD_TYP_END')
-
-        def grab_wns(text):
-            m = re.search(r'^worst slack(?:\s+(?:max|min))?\s+([-0-9.eE+]+)', text, re.M | re.I)
-            return float(m.group(1)) if m else None
-
-        def grab_tns(text):
-            m = re.search(r'^(?:tns(?:\s+(?:max|min))?|total negative slack)\s+([-0-9.eE+]+)', text, re.M | re.I)
-            return float(m.group(1)) if m else None
-
-        def grab_wns_from_paths(text):
-            m_all = re.findall(r'^\s+([-0-9.eE+]+)\s+slack\s', text, re.M)
-            return float(min(m_all, key=float)) if m_all else None
-
-        return CornerResult(
-            module=module,
-            success=(r.returncode == 0),
-            wns_setup_slow=grab_wns(setup_sec),
-            tns_setup_slow=grab_tns(setup_sec),
-            wns_setup_typ=grab_wns_from_paths(setup_typ_sec) or grab_wns(setup_typ_sec),
-            tns_setup_typ=grab_tns(setup_typ_sec),
-            wns_hold_fast=grab_wns(hold_sec),
-            tns_hold_fast=grab_tns(hold_sec),
-            wns_hold_typ=grab_wns_from_paths(hold_typ_sec) or grab_wns(hold_typ_sec),
-            tns_hold_typ=grab_tns(hold_typ_sec),
-            sdf_path=str(sdf) if sdf.exists() else None,
-            report_path=str(rpt),
-            error=None if r.returncode == 0 else f'opensta exit {r.returncode}',
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        return CornerResult(module=module, success=False, error=str(e))
 
 # ============================================================================
 # Gate-level simulation
@@ -2121,6 +2095,7 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
             driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
             unc_setup_ps=cfg.clock_uncertainty_setup_ps, unc_hold_ps=cfg.clock_uncertainty_hold_ps,
             wire_load_model=cfg.wire_load_model, io_delay_frac=cfg.io_delay_frac,
+            io_delay_min_frac=cfg.io_delay_min_frac,
             clock_port_2=cfg.clock_port_2, period_ps_2=cfg.period_ps_2,
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
