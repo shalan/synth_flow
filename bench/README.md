@@ -61,7 +61,8 @@ template; the two external repos ship their own SDC, used as-is.
 Notes:
 
 - "25 %" means `set_input_delay -max [expr 0.25 * $T]` on `all_inputs
-  -no_clocks` and the same for outputs; min delays are 0.
+  -no_clocks` and the same for outputs; `-min` delays are 10 % of T (40 % of
+  the max), matching the flow default `io_delay_min_frac`.
 - All in-house SDCs: `set_driving_cell -lib_cell sky130_fd_sc_hd__inv_1` on
   inputs, `set_load 0.033` (pF) on outputs, matching the flow's defaults for
   the Sky130 HD library.

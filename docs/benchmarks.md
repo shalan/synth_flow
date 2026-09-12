@@ -347,6 +347,16 @@ Setup WNS is unchanged on every design by construction of the acceptance
 rule. The hold violations were all short input-to-register or feed-through
 paths against zero minimum input delay and 0.10 ns hold uncertainty.
 
+## Realistic minimum I/O delays — `obj-delay-final.csv`
+
+After the in-house SDCs (and the flow default) gained `-min` I/O delays of
+40 % of the max, the default flow with all repairs on shows **no hold
+violation at the fast corner on any design before repair** (`repair_hold`
+inserted nothing): every violation in the table above was an artifact of a
+zero minimum input delay. Setup is unchanged (16/16 close, +0.78 ns, +5.3 %
+area vs the reference). The report now runs three single-library corner
+sessions, so the ranking WNS and the reported slow-corner WNS are identical.
+
 ## Post-passes on winners — `postpass.py`
 
 `./postpass.py --passes resize [--designs ...]` runs `resize.py` (and/or
