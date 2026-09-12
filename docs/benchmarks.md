@@ -293,6 +293,25 @@ frequent winner of the pipeline bench (8/16 under `pareto`, 4/16 under
 `area`). Second-round retirements from the same data: `area_safe`,
 `delay_choice_deep_v2` (never winners, fewest Pareto points).
 
+## Post-synth front-end tokens — `fe-post.csv`
+
+`opt_dff_sat` (`opt_dff -sat`), `opt_full` (`opt -full`) and `noshare` as
+variants on the `delay` recipe set, compared with the plain front end per
+design (best recipe of each):
+
+| variant | mean Δ best-WNS | designs better / worse | mean Δarea | netlists identical to plain |
+|---|---|---|---|---|
+| `opt_dff_sat` | +0.005 ns | 3 / 0 | +1.1 % | 13 / 16 |
+| `opt_full` | +0.010 ns | 3 / 1 | −0.5 % | 8 / 16 |
+| `opt_dff_sat` + `opt_full` | +0.031 ns | 5 / 1 | +0.6 % | 7 / 16 |
+| `noshare` | −0.003 ns | 0 / 1 | +0.8 % | 15 / 16 |
+
+Small but non-negative; the tokens are available for per-module use and are
+not in the recommended global sweep. The run also exposed that `opt -full`
+after `synth` can re-create a word-level `$mux` that ABC ignores; the flow now
+re-lowers after post-synth passes and fails any recipe whose netlist still
+contains generic cells instead of handing it to STA.
+
 ## Library experiment — `fulllib.csv`
 
 `./bench.py --use-sdc --lib-dir <sky130A/libs.ref/sky130_fd_sc_hd/lib> --set "dont_use=[lpflow_*, probe*, dly*, clkdly*, sdlclkp*]"`:
