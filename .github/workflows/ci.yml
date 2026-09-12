@@ -31,6 +31,8 @@ jobs:
       - run: pip install pyyaml
       - name: Install OSS CAD Suite (yosys, yosys-abc, sta)
         uses: YosysHQ/setup-oss-cad-suite@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Tool versions
         run: |
           yosys -V
