@@ -124,8 +124,10 @@ liberty flop timing are reused by Phase 3.
   selection unchanged. Bench: 9/16 designs close vs 6/16, mean best-WNS
   +0.24 ns, no design worse ([benchmarks.md](benchmarks.md#front-end-sweep--fe-csv)).
 - ☐ `opt_dff -sat`, `share` toggles as further tokens once measured.
-- ☐ Library experiment: `hd_120` versus full `sky130_fd_sc_hd` with an
-  ORFS-style dont-use list (needs the full liberty on the machine).
+- ☑ Library experiment: full `sky130_fd_sc_hd` (428 cells, ORFS-style
+  `dont_use`) is worse than the bundled 120-cell subset on 15/16 designs
+  (mean −0.70 ns WNS, ≈ same area). Subset stays the default
+  ([benchmarks.md](benchmarks.md#library-experiment--fulllibcsv)).
 - ☐ Replace the 80 ps/gate depth-only constant with a value calibrated from
   bench.
 

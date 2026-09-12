@@ -226,6 +226,27 @@ default. `sweep6.csv` is the flow's own run with all six variants
 6 → 9 of 16, mean best-WNS +0.236 ns, identical to the best-of analysis.
 Runtime per design 21 s (crc32_8) to 986 s (zxip, 16k cells).
 
+## Library experiment — `fulllib.csv`
+
+`./bench.py --use-sdc --lib-dir <sky130A/libs.ref/sky130_fd_sc_hd/lib> --set "dont_use=[lpflow_*, probe*, dly*, clkdly*, sdlclkp*]"`:
+the full 428-cell `sky130_fd_sc_hd` liberty (ORFS-style exclusions) against
+the bundled 120-cell subset, 16 recipes, plain front end.
+
+| | bundled `hd_120` | full liberty |
+|---|---|---|
+| designs whose best recipe meets timing | 6 / 16 | 4 / 16 |
+| mean Δ best-WNS | — | −0.70 ns (worse on 15 of 16 designs) |
+| mean Δ area of the best-WNS recipe | — | +0.1 % |
+| mean Δ min-area recipe | — | −0.5 % |
+
+The same netlist times identically under both libraries, so the difference
+is in what ABC chooses: with 3- and 4-input gates and high-stack complex
+cells available it builds slower structures at the SS corner
+(sha256_core −2.6 ns, rr_arbiter16 −1.7 ns, mul32_mac −1.0 ns) and recovers
+almost no area. The curated subset stays the default; the full liberty
+remains available through `--lib-dir` / `dont_use` for designs that need
+cells the subset lacks.
+
 ## Post-passes on winners — `postpass.py`
 
 `./postpass.py --passes resize [--designs ...]` runs `resize.py` (and/or
