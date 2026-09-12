@@ -1263,11 +1263,28 @@ def run_recipe(args: dict) -> RecipeResult:
 # designs that lack a given port are unaffected. PRESETn is the nc_lib
 # convention and was previously missing (WNS dominated by reset recovery).
 _ASYNC_RESET_FALSE_PATHS = """\
-# Async-reset ports: recovery/removal paths are not part of the synthesis
-# objective. Looked up by name to avoid "port not found" warnings.
+# Async-reset false paths, derived from the netlist: an input port whose
+# fanout ends only at register async pins (RESET_B/SET_B...) is a reset
+# distribution net; recovery/removal on it is not a synthesis objective.
+# The name list is a fallback for ports the derivation misses (e.g. a reset
+# that also feeds synchronous logic and is still meant to be excluded).
+set _async_pins {}
+foreach _rp [all_registers -async_pins] { lappend _async_pins [get_full_name $_rp] }
 set _async_resets {PRESETn PRESETN aresetn HRESETn hresetn rst_n resetn}
-foreach _p [all_inputs] {
-    if {[lsearch -exact $_async_resets [get_full_name $_p]] >= 0} { set_false_path -from $_p }
+foreach _p [all_inputs -no_clocks] {
+    set _pn [get_full_name $_p]
+    set _is_reset [expr {[lsearch -exact $_async_resets $_pn] >= 0}]
+    if {!$_is_reset && [llength $_async_pins] > 0} {
+        set _ends {}
+        catch { set _ends [get_fanout -from $_p -endpoints_only -flat] }
+        if {[llength $_ends] > 0} {
+            set _is_reset 1
+            foreach _e $_ends {
+                if {[lsearch -exact $_async_pins [get_full_name $_e]] < 0} { set _is_reset 0; break }
+            }
+        }
+    }
+    if {$_is_reset} { set_false_path -from $_p }
 }"""
 
 def _default_wire_load(liberty: str) -> Optional[str]:

@@ -27,9 +27,11 @@ One SDC file is the single source of timing constraints. It has two readers:
   STA-only commands are counted in the log.
 - `python3 sdc_parse.py top.sdc --netlist rtl.v --top NAME` prints what
   synthesis understood, what is STA-only and what is unknown.
-- Async-reset false paths still come from a fixed name list; the SDC's
-  `set_false_path -from` ports are reported in `synth.sdc` and become
-  relaxed path groups in Phase 2.
+- Async-reset false paths are derived in the STA script: an input port whose
+  fanout ends only at register async pins (`all_registers -async_pins`) gets
+  `set_false_path -from`. The fixed name list (`PRESETn`, `hresetn`,
+  `rst_n`, ...) remains as a fallback. Your SDC's own `set_false_path`
+  lines are applied as well (it is sourced last).
 
 ## Target (Phase 1 and later)
 

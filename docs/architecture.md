@@ -77,6 +77,15 @@ Known inconsistencies, fixed in Phase 0 of the roadmap:
 - Setup uncertainty is applied only in the dual-clock template.
 - Async-reset false paths come from a hardcoded port-name list.
 
+Status after Phase 0/1: both STA scripts share one constraint preamble
+(driving cell, load, liberty wire-load model, uncertainty on all clocks, user
+SDC last), and async-reset false paths are derived from register async pins
+with the name list as fallback. One residual: the multi-corner script
+(`define_corners fast typical slow`) reports slow-corner slack about 30 ps
+(0.8 %) more pessimistic than the single-library quick STA on the same
+netlist and constraints; ranking uses the quick STA, the report the corner
+STA, so numbers in `summary.json` differ from `selection.json` by that much.
+
 ## 2. Findings about ABC and constraints
 
 All experiments used the bundled `sky130/hd_120_tt.lib`, Yosys 0.68 and

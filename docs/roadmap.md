@@ -60,7 +60,7 @@ Acceptance: one command reproduces the full matrix; CSV committed; recipe set
 reduced to distinct behaviors; quick-STA WNS within a few percent of
 corner-STA slow-corner WNS.
 
-## Phase 1 — SDC front end  ◐
+## Phase 1 — SDC front end  ☑
 
 Deliverables
 - ☑ `sdc_parse.py`: run the user SDC through `tclsh` with stub procs; build a
@@ -71,8 +71,8 @@ Deliverables
 - ☑ Precedence: SDC overrides `period_ps`, `clock_port`, `clock_port_2`,
   `driving_cell`, `load_ff`, uncertainty; every override is logged.
 - ☑ `results/<module>/synth.sdc`: the derived constraints synthesis acted on.
-- ☐ Async-reset false paths derived from the netlist (trace flop async pins to
-  ports) instead of the hardcoded name list.
+- ☑ Async-reset false paths derived in the STA script from register async
+  pins (`get_fanout -endpoints_only`); the name list is now only a fallback.
 - ☑ Tests: sample SDCs with variables, `expr`, wildcards, `get_ports`,
   `all_inputs` (25 checks).
 

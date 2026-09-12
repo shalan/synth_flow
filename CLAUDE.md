@@ -13,20 +13,16 @@ Don't rely on ABC's `stime` output as a delay proxy when real OpenSTA is
 available — `stime` lacks wire RC, ignores SDC exceptions, and reports against
 the synthesis liberty only.
 
-## False-path SDC for APB peripherals
+## False-path SDC for async resets
 
-Async resets (`PRESETn`, `hresetn`, `rst_n`) create spurious recovery
-violations on the reset distribution buffer (often -100+ ns at SS).
-`synth_flow` auto-applies `set_false_path` (via `catch`) on a common set:
-
-`PRESETn`, `PRESETN`, `aresetn`, `HRESETn`, `hresetn`, `rst_n`, `resetn`.
-
-Still prefer an IP SDC for design-specific async inputs (UART RX, GPIO,
-etc.). Default I/O delay no longer applies to clock ports or those
-async-reset names.
-
-Without this, every recipe's WNS is dominated by the reset path and
-winner ranking becomes meaningless.
+Async resets create spurious recovery violations on the reset distribution
+net (often -4 ns and worse at SS), which would dominate WNS and make winner
+ranking meaningless. The STA preamble (`_sta_constraints` in synth_flow.py)
+derives them: any input port whose fanout ends only at register async pins
+gets `set_false_path -from`. A name list (`PRESETn`, `PRESETN`, `aresetn`,
+`HRESETn`, `hresetn`, `rst_n`, `resetn`) is the fallback for resets that
+also feed synchronous logic. Design-specific exceptions belong in the user
+SDC, which is sourced last and overrides the defaults.
 
 ## Synthesis library default
 
