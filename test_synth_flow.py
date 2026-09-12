@@ -13,6 +13,7 @@ from synth_flow import (
     discover_recipes, RecipeResult,
     DEFAULT_RECIPES_DIR, _strip_signed_decls, apply_sdc_overrides,
     build_path_groups, resolve_abc_target, _group_section, _materialize_recipe, _synth_flags,
+    _candidate_name, _base_recipe,
 )
 
 failures = []
@@ -146,6 +147,9 @@ cfg.abc_target = 'none'; check("'none' target (default) -> 0", resolve_abc_targe
 check('resize is opt-in', Config().resize_winner is False and Config().resize_final == 'tns')
 check('synth flags: booth + adder', _synth_flags(['booth', 'adder=kogge-stone']) == '-booth -extra-map +/choices/kogge-stone.v')
 check('synth flags: empty', _synth_flags([]) == '' and _synth_flags(None) == '')
+check('candidate naming', _candidate_name('orfs_speed', []) == 'orfs_speed' and _candidate_name('orfs_speed', ['booth', 'adder=kogge-stone']) == 'orfs_speed@booth+adder=kogge-stone')
+check('base recipe and stability through variants', _base_recipe('delay_triple@booth') == 'delay_triple' and _stability_idx('delay_triple@booth') == _stability_idx('delay_triple'))
+check('sweep is opt-in', Config().yosys_opts_sweep == [])
 try:
     _synth_flags(['adder=ripple']); check('unknown adder rejected', False)
 except ValueError:

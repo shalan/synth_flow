@@ -204,6 +204,13 @@ class Config:
     #   noshare               synth -noshare
     #   hieropt               synth -hieropt
     yosys_opts: list[str] = field(default_factory=list)
+    # Sweep front-end variants as a second candidate dimension: each entry is a
+    # yosys_opts list ([] = plain). Candidates are named <recipe>@<variant>.
+    # Bench: best-of (6 variants x 16 recipes) closes 9/16 designs vs 6/16 with
+    # recipes alone, mean best-WNS +0.24 ns, no design worse (docs/benchmarks.md).
+    # Recommended: [[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky],
+    #               [booth], [booth, adder=kogge-stone]]
+    yosys_opts_sweep: list = field(default_factory=list)
     resize_winner: bool = False
     resize_iters: int = 25
     resize_wns_tol_ps: int = 150       # WNS regression tolerated for a TNS gain ('tns' policy)
@@ -627,6 +634,21 @@ write_verilog -noattr -noexpr {out_netlist}
 """
 
 _ADDER_ARCHS = ('kogge-stone', 'han-carlson', 'sklansky')
+
+
+def _variant_tag(variant) -> str:
+    """Candidate-name suffix for a yosys_opts variant ('' for the plain front end)."""
+    toks = [str(t).strip() for t in (variant or []) if str(t).strip()]
+    return '+'.join(toks)
+
+
+def _candidate_name(recipe: str, variant) -> str:
+    tag = _variant_tag(variant)
+    return f'{recipe}@{tag}' if tag else recipe
+
+
+def _base_recipe(name: str) -> str:
+    return name.split('@', 1)[0]
 
 
 def _synth_flags(yosys_opts) -> str:
@@ -1128,6 +1150,10 @@ def run_recipe(args: dict) -> RecipeResult:
     if not rtl_files:
         rtl_files = cfg['rtl_files']
 
+    variant = args.get('variant')
+    if variant is not None:
+        cfg = dict(cfg)
+        cfg['yosys_opts'] = list(variant)
     groups_spec = args.get('groups')
     groups_txt = workdir / f'{recipe}.groups.txt'
     d_ps = int(cfg.get('abc_d_ps', cfg['period_ps']))
@@ -1387,7 +1413,8 @@ class Selection:
     rationale: str = ''
 
 def _stability_idx(recipe: str) -> int:
-    return RECIPE_PRIORITY.index(recipe) if recipe in RECIPE_PRIORITY else 999
+    base = _base_recipe(recipe)
+    return RECIPE_PRIORITY.index(base) if base in RECIPE_PRIORITY else 999
 
 def _pareto_front(cands: list[Candidate]) -> list[str]:
     """Compute Pareto front on (max wns, min area). Returns recipe names."""
@@ -1721,6 +1748,7 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
             'modules': list(selections.keys()),
             'abc_sequential': cfg.abc_sequential,
             'yosys_opts': cfg.yosys_opts,
+            'yosys_opts_sweep': cfg.yosys_opts_sweep,
             'abc_target': cfg.abc_target,
             'resize_winner': cfg.resize_winner,
         },
@@ -2223,6 +2251,16 @@ def main() -> int:
         return EXIT_CONFIG_ERR
     cfg.recipes = [name for name, _ in recipe_pairs]
     log.info(f"recipes: {', '.join(cfg.recipes)}")
+    fe_variants = [list(v or []) for v in cfg.yosys_opts_sweep] or [list(cfg.yosys_opts)]
+    try:
+        for v in fe_variants:
+            _synth_flags(v)
+    except ValueError as e:
+        log.error(str(e))
+        return EXIT_CONFIG_ERR
+    if len(fe_variants) > 1:
+        log.info(f"front-end variants: {', '.join(_variant_tag(v) or 'plain' for v in fe_variants)} "
+                 f"-> {len(fe_variants)} x {len(cfg.recipes)} candidates per module")
 
     # ----- generate constraint file -----
     constr = _write_constraint_file(work, cfg.driving_cell, cfg.load_ff)
@@ -2384,20 +2422,22 @@ def main() -> int:
 
             jobs = []
             mod_dir = work / module
-            for recipe_name, recipe_path in recipe_pairs:
-                jobs.append({
-                    'module': module,
-                    'recipe': recipe_name,
-                    'recipe_path': str(recipe_path),
-                    'workdir': str(mod_dir),
-                    'constr': str(constr),
-                    'cfg': cfg_dict,
-                    'dep_netlists': dep_nets,
-                    'dep_modules': dep_mods,
-                    'groups': module_groups.get(module),
-                })
+            for variant in fe_variants:
+                for recipe_name, recipe_path in recipe_pairs:
+                    jobs.append({
+                        'module': module,
+                        'recipe': _candidate_name(recipe_name, variant),
+                        'recipe_path': str(recipe_path),
+                        'variant': list(variant),
+                        'workdir': str(mod_dir),
+                        'constr': str(constr),
+                        'cfg': cfg_dict,
+                        'dep_netlists': dep_nets,
+                        'dep_modules': dep_mods,
+                        'groups': module_groups.get(module),
+                    })
             total = len(jobs)
-            log.info(f"  running {total} jobs ({total // len(recipe_pairs)} modules × "
+            log.info(f"  running {total} jobs ({len(fe_variants)} variants × "
                      f"{len(recipe_pairs)} recipes) on {cfg.effective_parallel()} workers")
             _run_jobs(jobs)
             _pick_winner(module)
@@ -2407,16 +2447,18 @@ def main() -> int:
         jobs = []
         for module in cfg.modules:
             mod_dir = work / module
-            for recipe_name, recipe_path in recipe_pairs:
-                jobs.append({
-                    'module': module,
-                    'recipe': recipe_name,
-                    'recipe_path': str(recipe_path),
-                    'workdir': str(mod_dir),
-                    'constr': str(constr),
-                    'cfg': cfg_dict,
-                    'groups': module_groups.get(module),
-                })
+            for variant in fe_variants:
+                for recipe_name, recipe_path in recipe_pairs:
+                    jobs.append({
+                        'module': module,
+                        'recipe': _candidate_name(recipe_name, variant),
+                        'recipe_path': str(recipe_path),
+                        'variant': list(variant),
+                        'workdir': str(mod_dir),
+                        'constr': str(constr),
+                        'cfg': cfg_dict,
+                        'groups': module_groups.get(module),
+                    })
 
         log.info(f"running {len(jobs)} jobs ({len(cfg.modules)} modules × {len(cfg.recipes)} recipes) "
                  f"on {cfg.effective_parallel()} workers")
