@@ -116,18 +116,18 @@ liberty flop timing are reused by Phase 3.
 - ☐ Buffering of high-fanout nets (the apb_timer/uart WNS spread across
   recipes comes from these) as a sizing-pass move.
 
-## Phase 5 — Front-end and library sweeps  ☐
+## Phase 5 — Front-end and library sweeps  ◐
 
-Deliverables
-- `yosys_opts` sweep dimension: `synth -booth`, `opt -full`, `opt_dff -sat`,
-  `share` on/off, adder architecture via `techmap -map +/choices/kogge-stone.v`
-  and `han-carlson.v`.
-- Library experiment: `hd_120` versus full `sky130_fd_sc_hd` with an
-  ORFS-style dont-use list; choose the default from bench data.
-- Replace the 80 ps/gate depth-only constant with a value calibrated from
+- ☑ `yosys_opts`: `booth`, `adder=kogge-stone|han-carlson|sklansky`
+  (`synth -extra-map +/choices/*.v`), `noshare`, `hieropt`.
+- ☑ `yosys_opts_sweep`: variants × recipes as one candidate space; winner
+  selection unchanged. Bench: 9/16 designs close vs 6/16, mean best-WNS
+  +0.24 ns, no design worse ([benchmarks.md](benchmarks.md#front-end-sweep--fe-csv)).
+- ☐ `opt_dff -sat`, `share` toggles as further tokens once measured.
+- ☐ Library experiment: `hd_120` versus full `sky130_fd_sc_hd` with an
+  ORFS-style dont-use list (needs the full liberty on the machine).
+- ☐ Replace the 80 ps/gate depth-only constant with a value calibrated from
   bench.
-
-Acceptance: bench CSV rows for each option; defaults chosen by data.
 
 ## Phase 6 — Sizing, hierarchy, packaging  ☐
 

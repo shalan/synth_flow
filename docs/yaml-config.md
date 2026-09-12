@@ -117,7 +117,8 @@ These are required only when `run_gls: true` (the default). Set
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `yosys_opts` | list | `[]` | Front-end options passed to `synth` (also `--yosys-opts`). Tokens: `booth` (Booth-encoded multipliers, `synth -booth`), `adder=kogge-stone` / `adder=han-carlson` / `adder=sklansky` (`synth -extra-map +/choices/<arch>.v`), `noshare`, `hieropt`, `nofsm`, `noalumacc`. Sweep results in docs/benchmarks.md. |
+| `yosys_opts` | list | `[]` | Front-end options passed to `synth` (also `--yosys-opts`). Tokens: `booth` (Booth-encoded multipliers, `synth -booth`), `adder=kogge-stone` / `adder=han-carlson` / `adder=sklansky` (`synth -extra-map +/choices/<arch>.v`), `noshare`, `hieropt`, `nofsm`, `noalumacc`. |
+| `yosys_opts_sweep` | list of lists | `[]` | Sweep several front ends: each entry is a `yosys_opts` list (`[]` = plain). Candidates are named `<recipe>@<variant>` and compete in the same winner selection. Recommended: `[[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky], [booth], [booth, adder=kogge-stone]]` (6× runtime; closes 9/16 bench designs vs 6/16). |
 
 ### Post-pass: winner sizing
 

@@ -177,6 +177,50 @@ WNS (mean −0.59 / −0.22 / −1.08 ns) for at most 3.9 % area; see
 [architecture.md §2.6](architecture.md#26-d-never-reached-abc-and-that-was-the-best-setting).
 `abc_target` therefore defaults to `none`.
 
+## Front-end sweep — `fe-*.csv`
+
+Same 16 × 16 matrix with one `yosys_opts` variant each
+(`--set 'yosys_opts=[...]'`), compared with `baseline-noD.csv`:
+
+| variant | mean Δ best-WNS | mean Δ area (best-WNS recipe) | designs meeting timing |
+|---|---|---|---|
+| plain (baseline) | — | — | 6 / 16 |
+| `booth` | -0.110 ns | -2.18 % | 7 / 16 |
+| `adder=kogge-stone` | +0.174 ns | +2.69 % | 8 / 16 |
+| `adder=han-carlson` | +0.073 ns | +1.47 % | 7 / 16 |
+| `adder=sklansky` | +0.075 ns | +0.69 % | 6 / 16 |
+| `booth + kogge-stone` | +0.052 ns | +0.55 % | 8 / 16 |
+
+Best over all variants and recipes per design (what `yosys_opts_sweep`
+selects automatically):
+
+| design | baseline best WNS | best over all variants | variant / recipe |
+|---|---|---|---|
+| alu32 | -0.922 | -0.331 | booth + kogge-stone / delay_choice_deep_v4 |
+| mul16_pipe | -0.411 | +0.272 | booth + kogge-stone / balanced_resyn2x |
+| mul32_mac | -2.584 | -1.784 | adder=kogge-stone / delay_iter_heavy |
+| fir8 | +0.323 | +0.669 | booth + kogge-stone / balanced_resyn2x |
+| aes_round | +1.422 | +1.422 | plain / balanced_resyn2x |
+| sha256_core | -0.074 | +0.760 | booth + kogge-stone / balanced_resyn |
+| crc32_8 | -0.030 | -0.030 | plain / delay_triple |
+| rr_arbiter16 | -0.430 | -0.430 | plain / delay_choice_deep_v3 |
+| uart | +0.054 | +0.312 | adder=sklansky / delay_choice_deep_v2 |
+| spi_master | +0.203 | +0.203 | plain / delay_aggressive |
+| apb_timer | -0.065 | +0.046 | booth + kogge-stone / orfs_speed |
+| fifo_sync | -0.602 | -0.602 | plain / area_lut6 |
+| zx16_core_ahb | -0.173 | -0.020 | adder=han-carlson / delay_choice_deep_v4 |
+| zxip | -1.238 | -1.237 | adder=sklansky / delay_choice_deep_v3 |
+| ms_psram_ahb | +0.117 | +0.117 | plain / balanced_resyn2x |
+| uart_apb_sys | +3.971 | +3.971 | plain / delay_iter_heavy |
+
+Mean best-WNS gain +0.24 ns; 9 of 16 designs close timing versus 6; no
+design gets worse because the plain front end stays in the candidate set.
+Effects are strongly design-specific: Booth is −26 % area / +0.45 ns on
+mul16_pipe but −2.3 ns WNS on mul32_mac; Kogge-Stone buys 0.6 to 0.8 ns on
+alu32, mul32_mac and sha256_core for 3 to 8 % area. Hence a sweep, not a
+default. `sweep6.csv` is the flow's own run with all six variants
+(`yosys_opts_sweep`), 96 candidates per design.
+
 ## Post-passes on winners — `postpass.py`
 
 `./postpass.py --passes resize [--designs ...]` runs `resize.py` (and/or

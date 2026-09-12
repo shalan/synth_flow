@@ -9,8 +9,10 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
 
 ## Features
 
-- **Recipe sweep** — runs multiple ABC optimization recipes in parallel,
-  picks the best result per module using the slow-corner (SS) for WNS ranking
+- **Recipe × front-end sweep** — runs multiple ABC recipes, optionally across
+  Yosys front-end variants (Booth multipliers, Kogge-Stone / Han-Carlson /
+  Sklansky adders), and picks the best result per module using the
+  slow-corner (SS) for WNS ranking
 - **16 built-in recipes** — delay, balanced, and area strategies, pruned
   against a 16-design STA benchmark (retired ones in `recipes/retired/`)
 - **5 optimization objectives** — `delay`, `area`, `fastest`, `pareto`,
