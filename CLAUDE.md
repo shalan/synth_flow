@@ -3,45 +3,26 @@
 ## OpenSTA discovery
 
 `synth_flow` calls OpenSTA via the binary name in `cfg.opensta` (default
-`sta`). On many setups (macOS in particular) `sta` is not on PATH but
-**is** installed via Nix. Before assuming OpenSTA is missing, search the
-Nix store:
+`sta`). On this machine OpenSTA 3.1.0 is built from source (parallaxsw/OpenSTA,
+CUDD from the mht208/formal tap, Homebrew tcl-tk@8) and installed at
+`~/.local/opt/opensta/bin/sta`, symlinked to `~/.local/bin/sta`, which is on
+PATH. There is no Nix store here. If `sta` is missing, check that path first;
+rebuild with the recipe in docs/benchmarks.md → Requirements.
 
-```bash
-# Quick discovery — pick the newest version found.
-find /nix/store -maxdepth 3 -name sta -type f 2>/dev/null | head
-# Then verify:
-/nix/store/<hash>-devshell-dir/bin/sta -version
-/nix/store/<hash>-openroad/bin/sta -version
-```
+Don't rely on ABC's `stime` output as a delay proxy when real OpenSTA is
+available — `stime` lacks wire RC, ignores SDC exceptions, and reports against
+the synthesis liberty only.
 
-If found, wire it into the YAML config:
+## False-path SDC for async resets
 
-```yaml
-opensta: /nix/store/<hash>-devshell-dir/bin/sta
-```
-
-…and re-run **without** `--no-sta`. Don't rely on ABC's `stime` output
-as a delay proxy when real OpenSTA is available — `stime` lacks wire RC,
-ignores SDC false-paths, and reports against the synthesis liberty only.
-
-The user keeps OpenSTA in Nix on this machine; check there first before
-falling back to ABC-internal estimates or asking the user to install it.
-
-## False-path SDC for APB peripherals
-
-Async resets (`PRESETn`, `hresetn`, `rst_n`) create spurious recovery
-violations on the reset distribution buffer (often -100+ ns at SS).
-`synth_flow` auto-applies `set_false_path` (via `catch`) on a common set:
-
-`PRESETn`, `PRESETN`, `aresetn`, `HRESETn`, `hresetn`, `rst_n`, `resetn`.
-
-Still prefer an IP SDC for design-specific async inputs (UART RX, GPIO,
-etc.). Default I/O delay no longer applies to clock ports or those
-async-reset names.
-
-Without this, every recipe's WNS is dominated by the reset path and
-winner ranking becomes meaningless.
+Async resets create spurious recovery violations on the reset distribution
+net (often -4 ns and worse at SS), which would dominate WNS and make winner
+ranking meaningless. The STA preamble (`_sta_constraints` in synth_flow.py)
+derives them: any input port whose fanout ends only at register async pins
+gets `set_false_path -from`. A name list (`PRESETn`, `PRESETN`, `aresetn`,
+`HRESETn`, `hresetn`, `rst_n`, `resetn`) is the fallback for resets that
+also feed synchronous logic. Design-specific exceptions belong in the user
+SDC, which is sourced last and overrides the defaults.
 
 ## Synthesis library default
 

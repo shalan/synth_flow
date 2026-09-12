@@ -104,6 +104,51 @@ These are required only when `run_gls: true` (the default). Set
 | `driving_cell` | string | `sky130_fd_sc_hd__inv_2` | Cell used in `set_driving_cell` for ABC's input boundary model. Must exist in `lib_typ`. |
 | `load_ff` | float | `17.65` | Output load in **femtofarads** for ABC's `set_load`. The OpenLane Sky130 HD default. |
 
+### ABC delay target
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `abc_target` | string | `none` | ABC `-D` substituted for `{D}` in recipes. `none` removes it (minimum-delay mapping; measured best, docs/architecture.md §2.6); `period` = full clock period; `reg2reg` = `period − t_cq − t_su − clock_uncertainty_setup_ps`; or an integer in ps. Also `--abc-target`. |
+| `min_budget_frac` | float | `0.25` | Floor for any derived target, as a fraction of the period. |
+| `path_groups` | bool | `false` | EXPERIMENTAL: one `abc` call per path group with its own budget. Measured worse than flat mapping (docs/architecture.md §2.5); off by default. |
+| `relaxed_factor` | float | `3.0` | `-D` multiplier for false-path cones when `path_groups` is on. |
+
+### Yosys front end
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `yosys_opts` | list | `[]` | Front-end options passed to `synth` (also `--yosys-opts`). Tokens: `booth` (Booth-encoded multipliers, `synth -booth`), `adder=kogge-stone` / `adder=han-carlson` / `adder=sklansky` (`synth -extra-map +/choices/<arch>.v`), `noshare`, `hieropt`, `nofsm`, `noalumacc`. |
+| `yosys_opts_sweep` | list of lists | `[]` | Sweep several front ends: each entry is a `yosys_opts` list (`[]` = plain). Candidates are named `<recipe>@<variant>` and compete in the same winner selection. Recommended: `[[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky], [booth], [booth, adder=kogge-stone]]` (6× runtime; closes 9/16 bench designs vs 6/16). |
+
+### Library cell exclusion
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `dont_use` | list | `[]` | Liberty cell names or glob patterns passed as `-dont_use` to `abc` and `dfflibmap` (also `--dont-use`; SDC `set_dont_use` entries are merged in). Required with a full PDK liberty, e.g. `['sky130_fd_sc_hd__lpflow_*', 'sky130_fd_sc_hd__probe*', 'sky130_fd_sc_hd__dly*', 'sky130_fd_sc_hd__clkdly*', 'sky130_fd_sc_hd__sdlclkp*']`. The bundled `hd_120` subset already excludes them. |
+
+### Post-pass: winner sizing
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `resize_winner` | bool | `false` | Run `resize.py` on each module's winner before multi-corner STA (needs OpenSTA). Also `--resize`. Input kept as `winner.presize.v`; log in `resize.json`. |
+| `resize_iters` | int | `25` | Sizing iterations (STA calls) in the TNS phase. |
+| `resize_wns_tol_ps` | int | `150` | WNS regression tolerated for a TNS gain under the `tns` policy. |
+| `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. Timing-clean states are always eligible. |
+
+### STA modelling
+
+Applied identically to the quick STA used for winner ranking and to the
+multi-corner STA on the winner, so both see the same model. The user `sdc`
+is sourced **last** and overrides any of these defaults per port.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `clock_uncertainty_setup_ps` | int | `250` | `set_clock_uncertainty -setup` on all clocks. |
+| `clock_uncertainty_hold_ps` | int | `100` | `set_clock_uncertainty -hold` on all clocks. |
+| `io_delay_frac` | float | `0.2` | Default `set_input_delay` / `set_output_delay` as a fraction of the period, on ports the SDC does not constrain. |
+| `wire_load_model` | string | `auto` | `auto` uses the liberty `default_wire_load` (Sky130 HD: `Small`) with `set_wire_load_mode top`; `none` disables wire load; any other value is passed to `set_wire_load_model -name`. |
+| `sdc` | path | — | User SDC (also `--sdc`). Sourced into every STA script after the defaults, and read for synthesis: its clocks, uncertainty, driving cell and load override the YAML fields above. See [sdc-support.md](sdc-support.md). |
+
 ### Tool paths
 
 | Field | Type | Default | Description |
@@ -278,7 +323,7 @@ parallel: 4
 ### Final characterization
 
 ```yaml
-# All 14 recipes, full STA, full GLS
+# All recipes, full STA, full GLS
 objective: pareto    # see the trade-off space
 parallel: 0          # use all cores
 ```

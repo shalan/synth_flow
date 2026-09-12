@@ -43,6 +43,16 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import sdc_parse
+except ImportError:  # pragma: no cover
+    sdc_parse = None
+try:
+    import liberty_timing
+except ImportError:  # pragma: no cover
+    liberty_timing = None
+
 # YAML is required for config files; YAML-less invocations work too (CLI-only).
 try:
     import yaml
@@ -58,26 +68,24 @@ DEFAULT_RECIPES_DIR = SCRIPT_DIR / 'recipes'
 
 # Stability tiebreaker — lower index = preferred when QoR ties.
 # Order: fastest-and-most-robust first, exotic/heavy recipes last.
+# Tie-break order for winner selection (lower = preferred when metrics tie).
+# Ordered by mean WNS rank across the 16-design STA baseline
+# (bench/results/baseline-sta.csv, 2026-09-12); references last.
 RECIPE_PRIORITY = [
-    'delay_retime',
-    'delay_triple',
-    'delay_choice_deep',
-    'delay_iter_heavy',
-    'delay_aggressive',
-    'delay_choice_deep_v2',
     'delay_choice_deep_v3',
-    'delay_choice_deep_v4',
-    'delay_choice_deep_combined',
-    'delay_choice_deep_bb',
+    'delay_triple',
+    'delay_iter_heavy',
     'balanced_resyn',
+    'delay_choice_deep',
     'balanced_resyn2x',
-    'balanced_struct',
+    'delay_choice_deep_v2',
+    'delay_choice_deep_bb',
+    'delay_aggressive',
     'area_safe',
+    'delay_choice_deep_v4',
     'area_classic',
     'area_lut6',
     'area_max',
-    'lazy_man',
-    'lms',
     'orfs_speed',
     'yosys_default',
 ]
@@ -168,6 +176,53 @@ class Config:
     # --- ABC constraints (Sky130 HD defaults) ---
     driving_cell: str = 'sky130_fd_sc_hd__inv_2'
     load_ff: float = 17.65
+    # STA modelling (applied identically to quick STA and multi-corner STA)
+    clock_uncertainty_setup_ps: int = 250
+    clock_uncertainty_hold_ps: int = 100
+    io_delay_frac: float = 0.2          # default input/output delay as fraction of period
+    wire_load_model: str = 'auto'       # auto = liberty default_wire_load | none | <name>
+    # Path-group partitioned mapping (docs/architecture.md §3): split the
+    # combinational logic into in->reg / reg->out / in->out / relaxed groups
+    # and give each its own ABC delay target derived from the SDC and the
+    # liberty flop timing. reg->reg logic gets T - t_cq - t_su - uncertainty.
+    # ABC delay target (-D) substituted for {D} in recipes.
+    #   'none'    (default) no -D: ABC maps for minimum delay in its own model.
+    #             Measured best on the bench: any -D lets ABC relax/downsize
+    #             against a model without wire load, and OpenSTA disagrees
+    #             (period: mean WNS -0.59 ns for -3 % area; see docs/architecture.md §2.6).
+    #   'period'  full clock period (ORFS convention)
+    #   'reg2reg' T - t_cq - t_su - setup uncertainty from the synthesis liberty
+    #   '<ps>'    explicit integer
+    abc_target: str = 'none'
+    # OpenSTA-guided drive-strength sizing of each module's winner (resize.py).
+    # Sizing only, function preserved; measured on the bench: TNS down on every
+    # failing design for <1 % area on most (docs/architecture.md §2.7).
+    # Yosys front-end options (Phase 5 sweep dimension). Tokens:
+    #   booth                 synth -booth (Booth-encoded $mul)
+    #   adder=<arch>          synth -extra-map +/choices/<arch>.v
+    #                         (kogge-stone | han-carlson | sklansky; default ripple/Brent-Kung)
+    #   noshare               synth -noshare
+    #   hieropt               synth -hieropt
+    yosys_opts: list[str] = field(default_factory=list)
+    # Sweep front-end variants as a second candidate dimension: each entry is a
+    # yosys_opts list ([] = plain). Candidates are named <recipe>@<variant>.
+    # Bench: best-of (6 variants x 16 recipes) closes 9/16 designs vs 6/16 with
+    # recipes alone, mean best-WNS +0.24 ns, no design worse (docs/benchmarks.md).
+    # Recommended: [[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky],
+    #               [booth], [booth, adder=kogge-stone]]
+    yosys_opts_sweep: list = field(default_factory=list)
+    # Liberty cells excluded from mapping (glob patterns), passed as
+    # `-dont_use` to both `abc` and `dfflibmap`. Needed with a full PDK
+    # liberty (probe, lpflow, delay cells...). The bundled hd_120 subset
+    # already excludes them.
+    dont_use: list[str] = field(default_factory=list)
+    resize_winner: bool = False
+    resize_iters: int = 25
+    resize_wns_tol_ps: int = 150       # WNS regression tolerated for a TNS gain ('tns' policy)
+    resize_final: str = 'tns'          # tns | wns (never regress WNS)
+    path_groups: bool = False
+    relaxed_factor: float = 3.0         # -D multiplier for false-path cones
+    min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
 
     # --- tool paths ---
     yosys: str = 'yosys'
@@ -200,6 +255,7 @@ class Config:
     # Can also misbehave with async resets, clock gating, and set/reset
     # semantics. Disabled by default; matches OpenLane behavior.
     abc_sequential: bool = False
+    dual_clock_synthesis: bool = False   # experimental: abc -dff per clock domain
 
     @classmethod
     def from_yaml(cls, path: Path) -> 'Config':
@@ -431,6 +487,7 @@ class RecipeResult:
     cells: int = 0
     area: float = 0.0
     error: Optional[str] = None
+    groups: Optional[list] = None   # path-group stats when path_groups is on
 
 # Standard flow: dfflibmap first, then ABC sees only combinational logic.
 # This is what OpenLane does and what produces formally-verifiable netlists
@@ -443,10 +500,32 @@ YOSYS_DRIVER_STD = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
-dfflibmap -liberty {liberty}
-abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
+dfflibmap -liberty {liberty} {dont_use}
+abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
+setundef -zero
+splitnets
+opt_clean -purge
+tee -o {stats_json} stat -liberty {liberty} -json
+write_verilog -noattr -noexpr {out_netlist}
+"""
+
+# Path-group flow: same as STD, but the single abc call is replaced by one
+# call per path group (tightest budget first) and a final call for the
+# remaining reg->reg logic. Generated by _group_section().
+YOSYS_DRIVER_GROUPS = """\
+# generated yosys driver (path-group partitioned ABC)
+{pre_read_section}
+{macro_lib_section}
+{read_verilog_lines}
+{param_flags}
+hierarchy -top {module}
+{keep_hierarchy_section}
+synth -top {module} -flatten -noabc {synth_flags}
+write_verilog -noattr {syn_netlist}
+dfflibmap -liberty {liberty} {dont_use}
+{group_section}
 setundef -zero
 splitnets
 opt_clean -purge
@@ -468,11 +547,11 @@ YOSYS_DRIVER_SEQ = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
 # ABC with -dff: generic flops are part of the optimization
-abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
-dfflibmap -liberty {liberty}
+abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
+dfflibmap -liberty {liberty} {dont_use}
 setundef -zero
 splitnets
 opt_clean -purge
@@ -497,10 +576,10 @@ YOSYS_DRIVER_HIER = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
-dfflibmap -liberty {liberty}
-abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps}
+dfflibmap -liberty {liberty} {dont_use}
+abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
 setundef -zero
 splitnets
 opt_clean -purge
@@ -531,7 +610,7 @@ YOSYS_DRIVER_DUAL_CLK = """\
 {param_flags}
 hierarchy -top {module}
 {keep_hierarchy_section}
-synth -top {module} -flatten -noabc
+synth -top {module} -flatten -noabc {synth_flags}
 write_verilog -noattr {syn_netlist}
 
 # Partition into clock domains
@@ -546,18 +625,60 @@ select -set domain_2 @ffs_2 %x:+@ffs %d %xe*:+@ffs_2 @ffs_2
 select -set domain_2 @domain_2 @domain_1 %d
 
 # ABC on domain 1 (fast clock)
-abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} @domain_1
+abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use} @domain_1
 
 # ABC on domain 2 (slow clock)
-abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps_2} @domain_2
+abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps_2} {dont_use} @domain_2
 
-dfflibmap -liberty {liberty}
+dfflibmap -liberty {liberty} {dont_use}
 setundef -zero
 splitnets
 opt_clean -purge
 tee -o {stats_json} stat -liberty {liberty} -json
 write_verilog -noattr -noexpr {out_netlist}
 """
+
+_ADDER_ARCHS = ('kogge-stone', 'han-carlson', 'sklansky')
+
+
+def _variant_tag(variant) -> str:
+    """Candidate-name suffix for a yosys_opts variant ('' for the plain front end)."""
+    toks = [str(t).strip() for t in (variant or []) if str(t).strip()]
+    return '+'.join(toks)
+
+
+def _candidate_name(recipe: str, variant) -> str:
+    tag = _variant_tag(variant)
+    return f'{recipe}@{tag}' if tag else recipe
+
+
+def _base_recipe(name: str) -> str:
+    return name.split('@', 1)[0]
+
+
+def _dont_use_flags(patterns) -> str:
+    return ' '.join(f"-dont_use '{p}'" if any(ch in str(p) for ch in '*?[') else f'-dont_use {p}'
+                    for p in (patterns or []) if str(p).strip())
+
+
+def _synth_flags(yosys_opts) -> str:
+    """Translate cfg.yosys_opts tokens into `synth` flags."""
+    flags: list[str] = []
+    for tok in yosys_opts or []:
+        t = str(tok).strip().lower()
+        if t == 'booth':
+            flags.append('-booth')
+        elif t.startswith('adder='):
+            arch = t.split('=', 1)[1]
+            if arch not in _ADDER_ARCHS:
+                raise ValueError(f"yosys_opts: unknown adder architecture '{arch}' (choose from {_ADDER_ARCHS})")
+            flags.append(f'-extra-map +/choices/{arch}.v')
+        elif t in ('noshare', 'hieropt', 'nofsm', 'noalumacc'):
+            flags.append(f'-{t}')
+        elif t:
+            raise ValueError(f"yosys_opts: unknown token '{tok}'")
+    return ' '.join(flags)
+
 
 def _read_verilog_lines(rtl_files: list[str], verilog_defines: list[str] = None,
                         verilog_includes: list[str] = None) -> str:
@@ -675,6 +796,26 @@ def _write_constraint_file(work_dir: Path, driving_cell: str, load_ff: float) ->
     p.write_text(f"set_driving_cell {driving_cell}\nset_load {load_ff}\n")
     return p
 
+_SIGNED_DECL_RE = re.compile(r'^(\s*(?:input|output|inout|wire|reg)\s+)signed\s+', re.M)
+
+
+def _strip_signed_decls(netlist: Path) -> int:
+    """Remove `signed` from port/wire declarations in a gate-level netlist.
+
+    Yosys keeps the RTL signedness on ports (`input signed [11:0] x;`).
+    OpenSTA's Verilog reader rejects that syntax ("syntax error"), and
+    signedness carries no meaning in a mapped netlist. Returns the number of
+    declarations rewritten."""
+    try:
+        text = netlist.read_text()
+    except OSError:
+        return 0
+    new_text, n = _SIGNED_DECL_RE.subn(r'\1', text)
+    if n:
+        netlist.write_text(new_text)
+    return n
+
+
 def _read_stats(stats_json: Path, module: str) -> tuple[int, float]:
     """Read cell count + area from yosys stats JSON. Robust to module
     name variations (\\name vs name)."""
@@ -770,6 +911,220 @@ def _strip_param_overrides(rtl_path: str, dep_modules: set[str],
     return str(out)
 
 
+# ============================================================================
+# Path groups (Phase 2): budgets from SDC + liberty, Yosys selections per group
+# ============================================================================
+
+_DEFAULT_ASYNC_RESETS = {'PRESETn', 'PRESETN', 'aresetn', 'HRESETn', 'hresetn', 'rst_n', 'resetn'}
+
+
+def resolve_abc_target(cfg: Config) -> tuple[int, str]:
+    """Return (D_ps, note) for ABC's -D from cfg.abc_target."""
+    T = cfg.period_ps
+    mode = str(cfg.abc_target).strip().lower()
+    if mode in ('', 'none', 'off', 'best'):
+        return 0, 'none: ABC minimum-delay mapping, {D} removed from recipes'
+    if mode == 'period':
+        return T, 'full period'
+    if mode == 'reg2reg':
+        if liberty_timing is None:
+            return T, 'reg2reg requested but liberty_timing unavailable; full period'
+        lt = liberty_timing.read_liberty_timing(_synth_lib(asdict(cfg)))
+        if lt.t_cq_ps is None or lt.t_su_ps is None:
+            return T, 'reg2reg requested but no flop timing in liberty; full period'
+        d = T - lt.t_cq_ps - lt.t_su_ps - cfg.clock_uncertainty_setup_ps
+        floor = int(cfg.min_budget_frac * T)
+        if d < floor:
+            return floor, (f'reg2reg budget {d:.0f} ps below floor; using {floor} ps '
+                           f'(t_cq={lt.t_cq_ps:.0f}, t_su={lt.t_su_ps:.0f}, unc={cfg.clock_uncertainty_setup_ps})')
+        return int(d), (f'T - t_cq {lt.t_cq_ps:.0f} - t_su {lt.t_su_ps:.0f} - '
+                        f'unc {cfg.clock_uncertainty_setup_ps} ({Path(lt.path).name}, ref {lt.reference_flop})')
+    try:
+        return int(float(mode)), 'explicit'
+    except ValueError:
+        return T, f"unknown abc_target '{cfg.abc_target}'; full period"
+
+
+def _ff_rules(flop_cells: list[str]) -> str:
+    """`%co*` / `%ci*` rule suffix that refuses to traverse flop cells."""
+    return ''.join(f':-{c}' for c in flop_cells)
+
+
+def build_path_groups(cfg: Config, module: str, constraints, ports: dict[str, str],
+                      lt, group_dir: Path) -> Optional[dict]:
+    """Compute the path groups for `module`.
+
+    Returns {'groups': [...], 'reg2reg_ps': int, 'ff_rules': str, 'notes': [...]}
+    or None when nothing useful can be derived (no ports known, no flops in
+    the liberty). Each group: {name, kind, budget_ps, ports, constr}.
+    Groups are returned sorted by budget (tightest first); overlaps are
+    resolved by that order at mapping time."""
+    if not ports or lt is None or not lt.flop_cells:
+        return None
+    T = cfg.period_ps
+    unc = cfg.clock_uncertainty_setup_ps
+    tcq = lt.t_cq_ps or 0.0
+    tsu = lt.t_su_ps or 0.0
+    floor = int(cfg.min_budget_frac * T)
+    notes: list[str] = []
+
+    def clamp(x: float) -> int:
+        return int(max(floor, min(x, cfg.relaxed_factor * T)))
+
+    clock_ports = {cfg.clock_port}
+    if cfg.clock_port_2:
+        clock_ports.add(cfg.clock_port_2)
+    fp_ports: set[str] = set()
+    if constraints is not None:
+        clock_ports |= set(constraints.clocks_on_ports())
+        fp_ports |= {p for p in constraints.false_path_ports() if p in ports}
+    fp_ports |= {p for p in ports if p in _DEFAULT_ASYNC_RESETS}
+
+    default_io = cfg.io_delay_frac * T
+    in_delay: dict[str, float] = {}
+    out_delay: dict[str, float] = {}
+    for pname, d in ports.items():
+        if pname in clock_ports or pname in fp_ports:
+            continue
+        if d in ('input', 'inout'):
+            dly = None
+            if constraints is not None:
+                io = constraints.input_delay_for(pname)
+                if io is not None and io.max_ns is not None:
+                    dly = io.max_ns * 1000.0
+            in_delay[pname] = default_io if dly is None else dly
+        if d in ('output', 'inout'):
+            dly = None
+            if constraints is not None:
+                io = constraints.output_delay_for(pname)
+                if io is not None and io.max_ns is not None:
+                    dly = io.max_ns * 1000.0
+            out_delay[pname] = default_io if dly is None else dly
+
+    group_dir.mkdir(parents=True, exist_ok=True)
+    groups: list[dict] = []
+
+    def add(name: str, kind: str, budget: float, plist: list[str], driving: str, load_ff: float):
+        if not plist:
+            return
+        constr = group_dir / f'{name}.constr'
+        constr.write_text(f'set_driving_cell {driving}\nset_load {load_ff}\n')
+        groups.append({'name': name, 'kind': kind, 'budget_ps': clamp(budget),
+                       'raw_budget_ps': int(budget), 'ports': sorted(plist), 'constr': str(constr)})
+
+    # in -> out (combinational feed-through): tightest, conservative on delays
+    if in_delay and out_delay:
+        add('in2out', 'in2out', T - max(in_delay.values()) - max(out_delay.values()),
+            sorted(in_delay), cfg.driving_cell, cfg.load_ff)
+        groups[-1]['out_ports'] = sorted(out_delay)
+
+    # in -> reg, one group per distinct input delay
+    by_val: dict[float, list[str]] = {}
+    for pn, v in in_delay.items():
+        by_val.setdefault(round(v, 1), []).append(pn)
+    for v, plist in sorted(by_val.items(), key=lambda kv: -kv[0]):
+        drv = cfg.driving_cell
+        if constraints is not None:
+            for pn in plist:
+                dc = constraints.driving_cell_for(pn)
+                if dc:
+                    drv = dc
+                    break
+        add(f'in_{int(v)}ps', 'in2reg', T - v - tsu - unc, plist, drv, cfg.load_ff)
+
+    # reg -> out, one group per distinct output delay
+    by_val = {}
+    for pn, v in out_delay.items():
+        by_val.setdefault(round(v, 1), []).append(pn)
+    for v, plist in sorted(by_val.items(), key=lambda kv: -kv[0]):
+        load = cfg.load_ff
+        if constraints is not None:
+            for pn in plist:
+                lf = constraints.load_for(pn)
+                if lf is not None:
+                    load = round(lf * 1000.0, 3)
+                    break
+        add(f'out_{int(v)}ps', 'reg2out', T - tcq - v - unc, plist, cfg.driving_cell, load)
+
+    # false-path / async-reset cones: relaxed
+    if fp_ports:
+        add('relaxed', 'relaxed', cfg.relaxed_factor * T, sorted(fp_ports), cfg.driving_cell, cfg.load_ff)
+
+    reg2reg = clamp(T - tcq - tsu - unc)
+    if T - tcq - tsu - unc < floor:
+        notes.append(f'reg2reg budget {int(T - tcq - tsu - unc)} ps below floor {floor} ps; using floor')
+    groups.sort(key=lambda g: g['budget_ps'])
+    notes.append(f'liberty {Path(lt.path).name}: t_cq={tcq:.0f} ps t_su={tsu:.0f} ps (ref {lt.reference_flop})')
+    return {'groups': groups, 'reg2reg_ps': reg2reg, 'ff_rules': _ff_rules(lt.flop_cells),
+            'notes': notes, 'period_ps': T}
+
+
+def _sel(ports: list[str], prefix: str) -> str:
+    return ' '.join(f'{prefix}:{p}' for p in ports)
+
+
+def _group_section(spec: dict, liberty: str, constr_default: str, recipe: str,
+                   groups_txt: str, dont_use: str = '') -> str:
+    """Yosys script lines: one abc per group (tightest first), then reg->reg."""
+    R = spec['ff_rules']
+    L = [f'# path groups: {len(spec["groups"])} + reg2reg (budgets in ps)',
+         f'tee -q -o {groups_txt} log PERIOD {spec["period_ps"]}']
+    for g in spec['groups']:
+        n = g['name']
+        if g['kind'] == 'in2out':
+            expr = (f'{_sel(g["ports"], "i")} %co*{R} '
+                    f'{_sel(g.get("out_ports", []), "o")} %ci*{R} %i t:$_* %i')
+        elif g['kind'] == 'reg2out':
+            expr = f'{_sel(g["ports"], "o")} %ci*{R} t:$_* %i'
+        else:  # in2reg, relaxed
+            expr = f'{_sel(g["ports"], "i")} %co*{R} t:$_* %i'
+        L.append(f'select -set g_{n} {expr}')
+        L.append(f'tee -q -a {groups_txt} log GROUP {n} {g["kind"]} {g["budget_ps"]}')
+        L.append(f'tee -q -a {groups_txt} select -count @g_{n}')
+        L.append(f'abc -liberty {liberty} -constr {g["constr"]} -script {recipe} -D {g["budget_ps"]} {dont_use} @g_{n}')
+    L.append(f'tee -q -a {groups_txt} log GROUP reg2reg reg2reg {spec["reg2reg_ps"]}')
+    L.append(f'tee -q -a {groups_txt} select -count t:$_*')
+    L.append(f'abc -liberty {liberty} -constr {constr_default} -script {recipe} -D {spec["reg2reg_ps"]} {dont_use} t:$_*')
+    return '\n'.join(L)
+
+
+def _parse_groups_txt(path: Path) -> list[dict]:
+    """GROUP/count pairs written by the group section -> [{name, kind, budget_ps, cells}]."""
+    out: list[dict] = []
+    try:
+        lines = path.read_text(errors='ignore').splitlines()
+    except OSError:
+        return out
+    cur = None
+    for ln in lines:
+        m = re.match(r'GROUP\s+(\S+)\s+(\S+)\s+(\d+)', ln)
+        if m:
+            cur = {'name': m.group(1), 'kind': m.group(2), 'budget_ps': int(m.group(3)), 'cells': None}
+            out.append(cur)
+            continue
+        m = re.match(r'\s*(\d+)\s+objects', ln)
+        if m and cur is not None and cur['cells'] is None:
+            cur['cells'] = int(m.group(1))
+    return out
+
+
+def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path) -> Path:
+    """Write a copy of the recipe with `{D}` replaced by `-D <d_ps>`.
+
+    Yosys only substitutes {D} in inline (`-script +...`) scripts; a script
+    file is passed to ABC with `source <file>` untouched, so `&nf {D}`,
+    `upsize {D}` and `dnsize {D}` reached ABC literally. d_ps <= 0 removes
+    {D} (minimum-delay mapping, the measured best default). The copy lives
+    next to the netlist so a run directory is self-describing."""
+    src = Path(recipe_path)
+    text = src.read_text()
+    d_ps = int(d_ps or 0)
+    text = text.replace('{D}', f'-D {d_ps}' if d_ps > 0 else '')
+    out = out_dir / (f'{src.stem}.D{d_ps}.abc' if d_ps > 0 else f'{src.stem}.noD.abc')
+    out.write_text(text)
+    return out
+
+
 def run_recipe(args: dict) -> RecipeResult:
     """Worker function — runs Yosys for one (module, recipe) pair.
     Must be top-level for multiprocessing pickling."""
@@ -805,12 +1160,22 @@ def run_recipe(args: dict) -> RecipeResult:
     if not rtl_files:
         rtl_files = cfg['rtl_files']
 
+    variant = args.get('variant')
+    if variant is not None:
+        cfg = dict(cfg)
+        cfg['yosys_opts'] = list(variant)
+    groups_spec = args.get('groups')
+    groups_txt = workdir / f'{recipe}.groups.txt'
+    d_ps = int(cfg.get('abc_d_ps', cfg['period_ps']))
+    recipe_path = str(_materialize_recipe(recipe_path, d_ps, workdir))
     if dep_netlists:
         template = YOSYS_DRIVER_HIER
     elif cfg.get('abc_sequential', False):
         template = YOSYS_DRIVER_SEQ
     elif cfg.get('clock_port_2') and cfg.get('dual_clock_synthesis', False):
         template = YOSYS_DRIVER_DUAL_CLK
+    elif groups_spec:
+        template = YOSYS_DRIVER_GROUPS
     else:
         template = YOSYS_DRIVER_STD
     bb = cfg.get('cell_blackbox', '') or ''
@@ -828,7 +1193,7 @@ def run_recipe(args: dict) -> RecipeResult:
         liberty=_synth_lib(cfg),
         constr=constr,
         recipe=recipe_path,
-        period_ps=cfg['period_ps'],
+        period_ps=cfg.get('abc_d_ps', cfg['period_ps']),
         period_ps_2=cfg.get('period_ps_2', cfg['period_ps']),
         clock_port=cfg['clock_port'],
         clock_port_2=cfg.get('clock_port_2', ''),
@@ -836,6 +1201,11 @@ def run_recipe(args: dict) -> RecipeResult:
         stats_json=stats,
         syn_netlist=syn_nl,
         out_netlist=netlist,
+        group_section=(_group_section(groups_spec, _synth_lib(cfg), constr, recipe_path, str(groups_txt),
+                                      _dont_use_flags(cfg.get('dont_use')))
+                       if groups_spec else ''),
+        synth_flags=_synth_flags(cfg.get('yosys_opts')),
+        dont_use=_dont_use_flags(cfg.get('dont_use')),
     ))
 
     start = time.time()
@@ -859,12 +1229,18 @@ def run_recipe(args: dict) -> RecipeResult:
                 runtime_s=runtime, log=str(log),
                 error="netlist not produced",
             )
+        _strip_signed_decls(netlist)
         cells, area = _read_stats(stats, module)
+        gstats = _parse_groups_txt(groups_txt) if groups_spec else None
+        if gstats is not None:
+            (workdir / f'{recipe}.groups.json').write_text(json.dumps(
+                {'period_ps': groups_spec['period_ps'], 'notes': groups_spec['notes'],
+                 'groups': gstats}, indent=2))
         return RecipeResult(
             module=module, recipe=recipe, success=True,
             runtime_s=runtime, netlist=str(netlist),
             stats_json=str(stats), log=str(log),
-            cells=cells, area=area,
+            cells=cells, area=area, groups=gstats,
         )
     except subprocess.TimeoutExpired:
         return RecipeResult(
@@ -887,65 +1263,131 @@ def run_recipe(args: dict) -> RecipeResult:
 # designs that lack a given port are unaffected. PRESETn is the nc_lib
 # convention and was previously missing (WNS dominated by reset recovery).
 _ASYNC_RESET_FALSE_PATHS = """\
-catch {{ set_false_path -from [get_ports PRESETn] }}
-catch {{ set_false_path -from [get_ports PRESETN] }}
-catch {{ set_false_path -from [get_ports aresetn] }}
-catch {{ set_false_path -from [get_ports HRESETn] }}
-catch {{ set_false_path -from [get_ports hresetn] }}
-catch {{ set_false_path -from [get_ports rst_n] }}
-catch {{ set_false_path -from [get_ports resetn] }}
-"""
+# Async-reset false paths, derived from the netlist: an input port whose
+# fanout ends only at register async pins (RESET_B/SET_B...) is a reset
+# distribution net; recovery/removal on it is not a synthesis objective.
+# The name list is a fallback for ports the derivation misses (e.g. a reset
+# that also feeds synchronous logic and is still meant to be excluded).
+set _async_pins {}
+foreach _rp [all_registers -async_pins] { lappend _async_pins [get_full_name $_rp] }
+set _async_resets {PRESETn PRESETN aresetn HRESETn hresetn rst_n resetn}
+foreach _p [all_inputs -no_clocks] {
+    set _pn [get_full_name $_p]
+    set _is_reset [expr {[lsearch -exact $_async_resets $_pn] >= 0}]
+    if {!$_is_reset && [llength $_async_pins] > 0} {
+        set _ends {}
+        catch { set _ends [get_fanout -from $_p -endpoints_only -flat] }
+        if {[llength $_ends] > 0} {
+            set _is_reset 1
+            foreach _e $_ends {
+                if {[lsearch -exact $_async_pins [get_full_name $_e]] < 0} { set _is_reset 0; break }
+            }
+        }
+    }
+    if {$_is_reset} { set_false_path -from $_p }
+}"""
+
+def _default_wire_load(liberty: str) -> Optional[str]:
+    """Return the liberty `default_wire_load` name, or None."""
+    try:
+        text = Path(liberty).read_text(errors='ignore')[:400000]
+    except OSError:
+        return None
+    m = re.search(r'default_wire_load\s*:\s*"?([A-Za-z0-9_]+)"?', text)
+    return m.group(1) if m else None
+
+
+def _wire_load_section(mode: str, liberty: str) -> str:
+    """`set_wire_load_mode top` + model. mode: auto | none | <model name>."""
+    if not mode or mode == 'none':
+        return ''
+    name = _default_wire_load(liberty) if mode == 'auto' else mode
+    if not name:
+        return ''
+    return f'set_wire_load_mode top\nset_wire_load_model -name {name}\n'
+
+
+def _sta_constraints(*, clock_port: str, period_ns: float,
+                     clock_port_2: Optional[str] = None,
+                     period_2_ns: Optional[float] = None,
+                     unc_setup_ns: float = 0.25, unc_hold_ns: float = 0.10,
+                     user_sdc: Optional[str] = None,
+                     driving_cell: Optional[str] = None,
+                     load_pf: Optional[float] = None,
+                     wire_load_section: str = '',
+                     io_delay_frac: float = 0.2) -> str:
+    """Constraint preamble shared by quick STA and multi-corner STA so that
+    winner ranking and the final report see the same model. Order: clocks,
+    uncertainty, default driving cell / load / wire load / I/O delays,
+    async-reset false paths, then the user SDC last so it overrides."""
+    L = [f'create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]']
+    if clock_port_2 and period_2_ns:
+        L.append(f'create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]')
+        L.append(f'set_clock_groups -asynchronous -group [get_clocks {clock_port}] '
+                 f'-group [get_clocks {clock_port_2}]')
+    L.append(f'set_clock_uncertainty -setup {unc_setup_ns} [all_clocks]')
+    L.append(f'set_clock_uncertainty -hold {unc_hold_ns} [all_clocks]')
+    if driving_cell:
+        L.append(f'set_driving_cell -lib_cell {driving_cell} [all_inputs -no_clocks]')
+    if load_pf is not None:
+        L.append(f'set_load {load_pf} [all_outputs]')
+    if wire_load_section:
+        L.append(wire_load_section.rstrip())
+    io = round(period_ns * io_delay_frac, 4)
+    L.append(f'set_input_delay  -clock {clock_port} {io} [all_inputs -no_clocks]')
+    L.append(f'set_output_delay -clock {clock_port} {io} [all_outputs]')
+    L.append(_ASYNC_RESET_FALSE_PATHS.rstrip())
+    if user_sdc:
+        # Last, so per-port delays, driving cells, loads and exceptions in the
+        # user SDC override the defaults above (later set_* replaces earlier).
+        L.append('# User-supplied SDC (overrides defaults above)')
+        L.append(f'source {user_sdc}')
+    return '\n'.join(L) + '\n'
+
 
 QSTA_TCL = """\
 read_liberty {liberty}
 {macro_lib_section}
 read_verilog {netlist}
 link_design {module}
-# Clock object name matches the port (common SDC style). User SDC may redefine
-# the same name; default I/O delays use get_clocks with that name.
-create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]
-{clock_2_section}
-""" + _ASYNC_RESET_FALSE_PATHS + """\
-{user_sdc_section}
-# OpenSTA: all_inputs -no_clocks excludes registered clocks (no remove_from_collection)
-set_input_delay  -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_inputs -no_clocks]
-set_output_delay -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_outputs]
+{constraints}
 # Prefer report_worst_slack: report_wns can print 0.00 even when paths have slack.
-report_worst_slack -max
-report_tns
+report_worst_slack -max -digits 4
+report_tns -max -digits 4
 exit
-"""
-
-QSTA_CLK2 = """\
-create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]
-set_clock_groups -asynchronous -group {clock_port} -group {clock_port_2}
 """
 
 def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
                period_ps: int, clock_port: str, log_path: Path,
                clock_port_2: str = None, period_ps_2: int = None,
                macro_libs: list = None,
-               sdc: Optional[str] = None) -> tuple[Optional[float], Optional[float]]:
-    """Run a quick STA at typical corner. Returns (wns_ns, tns_ns) or (None, None)."""
+               sdc: Optional[str] = None,
+               driving_cell: Optional[str] = None,
+               load_ff: Optional[float] = None,
+               unc_setup_ps: int = 250, unc_hold_ps: int = 100,
+               wire_load_model: str = 'auto',
+               io_delay_frac: float = 0.2) -> tuple[Optional[float], Optional[float]]:
+    """Run a quick STA (ranking corner). Returns (wns_ns, tns_ns) or (None, None).
+    Uses the same constraint preamble as the multi-corner STA."""
     period_ns = period_ps / 1000.0
-    if clock_port_2 and period_ps_2:
-        clk2 = QSTA_CLK2.format(
-            period_2_ns=period_ps_2 / 1000.0,
-            clock_port=clock_port,
-            clock_port_2=clock_port_2,
-        )
-    else:
-        clk2 = ''
     macro_lib_section = ''
     if macro_libs:
         macro_lib_section = '\n'.join(f'read_liberty {f}' for f in macro_libs)
+    constraints = _sta_constraints(
+        clock_port=clock_port, period_ns=period_ns,
+        clock_port_2=clock_port_2,
+        period_2_ns=(period_ps_2 / 1000.0) if (clock_port_2 and period_ps_2) else None,
+        unc_setup_ns=unc_setup_ps / 1000.0, unc_hold_ns=unc_hold_ps / 1000.0,
+        user_sdc=sdc, driving_cell=driving_cell,
+        load_pf=(load_ff / 1000.0) if load_ff is not None else None,
+        wire_load_section=_wire_load_section(wire_load_model, liberty),
+        io_delay_frac=io_delay_frac,
+    )
     with tempfile.NamedTemporaryFile('w', suffix='.tcl', delete=False) as f:
         f.write(QSTA_TCL.format(
             liberty=liberty, netlist=netlist, module=module,
-            period_ns=period_ns, clock_port=clock_port,
-            clock_2_section=clk2,
             macro_lib_section=macro_lib_section,
-            user_sdc_section=(f'source {sdc}' if sdc else ''),
+            constraints=constraints,
         ))
         tcl = f.name
     try:
@@ -958,7 +1400,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
         wns = tns = None
         for line in out.splitlines():
             # report_worst_slack -max → "worst slack <n>"
-            m = re.search(r'^worst slack\s+([-0-9.eE+]+)', line, re.I)
+            m = re.search(r'^worst slack(?:\s+(?:max|min))?\s+([-0-9.eE+]+)', line, re.I)
             if m and wns is None:
                 wns = float(m.group(1))
                 continue
@@ -967,7 +1409,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
             if m and wns is None:
                 wns = float(m.group(1))
                 continue
-            m = re.search(r'(?:^tns|total negative slack)\s+([-0-9.eE+]+)', line, re.I)
+            m = re.search(r'(?:^tns(?:\s+(?:max|min))?|total negative slack)\s+([-0-9.eE+]+)', line, re.I)
             if m and tns is None:
                 tns = float(m.group(1))
         return wns, tns
@@ -1000,7 +1442,8 @@ class Selection:
     rationale: str = ''
 
 def _stability_idx(recipe: str) -> int:
-    return RECIPE_PRIORITY.index(recipe) if recipe in RECIPE_PRIORITY else 999
+    base = _base_recipe(recipe)
+    return RECIPE_PRIORITY.index(base) if base in RECIPE_PRIORITY else 999
 
 def _pareto_front(cands: list[Candidate]) -> list[str]:
     """Compute Pareto front on (max wns, min area). Returns recipe names."""
@@ -1112,57 +1555,37 @@ read_liberty -corner slow {lib_slow}
 {macro_libs_slow}
 read_verilog {netlist}
 link_design {module}
-create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]
-{clock_2_section}
-""" + _ASYNC_RESET_FALSE_PATHS + """\
-# User-supplied exceptions (false_path, multicycle, set_clock_groups, ...)
-# Applied before default I/O delay so SDC can fully own constraints if desired.
-{user_sdc_section}
-# OpenSTA has no remove_from_collection; use all_inputs -no_clocks.
-set_driving_cell -lib_cell {driving_cell} [all_inputs -no_clocks]
-set_load {load_pf} [all_outputs]
-set_input_delay  -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_inputs -no_clocks]
-set_output_delay -clock {clock_port} [expr {{{period_ns} * 0.2}}] [all_outputs]
-
+{constraints}
 # --- setup at slow ---
 puts ">>> SETUP_SLOW_BEGIN"
-report_checks -path_delay max -corner slow -group_count 5 -format full_clock
+report_checks -path_delay max -corner slow -group_path_count 5 -format full_clock
 report_worst_slack -max
 report_tns
 puts ">>> SETUP_SLOW_END"
 
 # --- setup at typical ---
 puts ">>> SETUP_TYP_BEGIN"
-report_checks -path_delay max -corner typical -group_count 5 -format full_clock
+report_checks -path_delay max -corner typical -group_path_count 5 -format full_clock
 report_worst_slack -max
 report_tns
 puts ">>> SETUP_TYP_END"
 
 # --- hold at fast ---
 puts ">>> HOLD_FAST_BEGIN"
-report_checks -path_delay min -corner fast -group_count 5 -format full_clock
+report_checks -path_delay min -corner fast -group_path_count 5 -format full_clock
 report_worst_slack -min
 report_tns
 puts ">>> HOLD_FAST_END"
 
 # --- hold at typical ---
 puts ">>> HOLD_TYP_BEGIN"
-report_checks -path_delay min -corner typical -group_count 5 -format full_clock
+report_checks -path_delay min -corner typical -group_path_count 5 -format full_clock
 report_worst_slack -min
 report_tns
 puts ">>> HOLD_TYP_END"
 
 write_sdf -corner slow {sdf_out}
 exit
-"""
-
-CORNER_STA_CLK2 = """\
-create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]
-set_clock_uncertainty -setup 0.25 [get_clocks {clock_port}]
-set_clock_uncertainty -setup 0.25 [get_clocks {clock_port_2}]
-set_clock_uncertainty -hold 0.10 [get_clocks {clock_port}]
-set_clock_uncertainty -hold 0.10 [get_clocks {clock_port_2}]
-set_clock_groups -asynchronous -group [get_clocks {clock_port}] -group [get_clocks {clock_port_2}]
 """
 
 @dataclass
@@ -1191,14 +1614,17 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
     tcl  = out_dir / 'sta.tcl'
 
     period_ns = cfg.period_ps / 1000.0
-    if cfg.clock_port_2 and cfg.period_ps_2:
-        clk2 = CORNER_STA_CLK2.format(
-            period_2_ns=cfg.period_ps_2 / 1000.0,
-            clock_port=cfg.clock_port,
-            clock_port_2=cfg.clock_port_2,
-        )
-    else:
-        clk2 = ''
+    constraints = _sta_constraints(
+        clock_port=cfg.clock_port, period_ns=period_ns,
+        clock_port_2=cfg.clock_port_2,
+        period_2_ns=(cfg.period_ps_2 / 1000.0) if (cfg.clock_port_2 and cfg.period_ps_2) else None,
+        unc_setup_ns=cfg.clock_uncertainty_setup_ps / 1000.0,
+        unc_hold_ns=cfg.clock_uncertainty_hold_ps / 1000.0,
+        user_sdc=cfg.sdc, driving_cell=cfg.driving_cell,
+        load_pf=cfg.load_ff / 1000.0,  # OpenSTA wants pF
+        wire_load_section=_wire_load_section(cfg.wire_load_model, cfg.lib_slow or cfg.lib_typ),
+        io_delay_frac=cfg.io_delay_frac,
+    )
     # Per-corner macro liberty lines. OpenSTA corner is named "typical" in
     # the Tcl while our internal key is "typ"; map at emission.
     def _ml_lines(internal_key: str, sta_corner: str) -> str:
@@ -1212,12 +1638,8 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         macro_libs_fast=_ml_lines('fast', 'fast'),
         macro_libs_typ =_ml_lines('typ',  'typical'),
         macro_libs_slow=_ml_lines('slow', 'slow'),
-        user_sdc_section=_user_sdc_section(cfg),
         netlist=netlist, module=module,
-        period_ns=period_ns, clock_port=cfg.clock_port,
-        clock_2_section=clk2,
-        driving_cell=cfg.driving_cell,
-        load_pf=cfg.load_ff / 1000.0,  # OpenSTA wants pF
+        constraints=constraints,
         sdf_out=sdf,
     ))
 
@@ -1240,11 +1662,11 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         hold_typ_sec = section('>>> HOLD_TYP_BEGIN', '>>> HOLD_TYP_END')
 
         def grab_wns(text):
-            m = re.search(r'^worst slack\s+([-0-9.eE+]+)', text, re.M)
+            m = re.search(r'^worst slack(?:\s+(?:max|min))?\s+([-0-9.eE+]+)', text, re.M | re.I)
             return float(m.group(1)) if m else None
 
         def grab_tns(text):
-            m = re.search(r'^total negative slack\s+([-0-9.eE+]+)', text, re.M)
+            m = re.search(r'^(?:tns(?:\s+(?:max|min))?|total negative slack)\s+([-0-9.eE+]+)', text, re.M | re.I)
             return float(m.group(1)) if m else None
 
         def grab_wns_from_paths(text):
@@ -1354,6 +1776,11 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
             'recipes': cfg.recipes,
             'modules': list(selections.keys()),
             'abc_sequential': cfg.abc_sequential,
+            'yosys_opts': cfg.yosys_opts,
+            'yosys_opts_sweep': cfg.yosys_opts_sweep,
+            'abc_target': cfg.abc_target,
+            'resize_winner': cfg.resize_winner,
+            'dont_use': cfg.dont_use,
         },
         'modules': {
             m: {
@@ -1477,6 +1904,182 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
 # CLI / main
 # ============================================================================
 
+# ============================================================================
+# SDC → synthesis constraints
+# ============================================================================
+
+def load_sdc_constraints(cfg: Config, log=None):
+    """Parse cfg.sdc (if any) with the top-level ports of the RTL. Returns a
+    sdc_parse.Constraints or None. Never fatal: OpenSTA still sources the SDC."""
+    if not cfg.sdc:
+        return None
+    if sdc_parse is None:
+        if log: log.warning("sdc_parse module not available; SDC used by OpenSTA only")
+        return None
+    ports: dict = {}
+    for f in cfg.rtl_files:
+        try:
+            ports = sdc_parse.ports_from_verilog(f, cfg.top)
+        except OSError:
+            ports = {}
+        if ports:
+            break
+    try:
+        return sdc_parse.parse_sdc(cfg.sdc, ports=ports or None)
+    except Exception as e:  # tclsh missing, Tcl error, ...
+        if log: log.warning(f"could not read SDC for synthesis ({e}); OpenSTA will still source it")
+        return None
+
+
+def apply_sdc_overrides(cfg: Config, c, log=None) -> list[str]:
+    """SDC wins over YAML for clocks and boundary conditions (docs/sdc-support.md).
+    Returns the list of override messages (also logged)."""
+    msgs: list[str] = []
+    if c is None:
+        return msgs
+    primary = [ck for ck in c.clocks.values() if not ck.generated and ck.ports and ck.period_ns]
+    primary.sort(key=lambda ck: ck.period_ns)
+    if primary:
+        ck = primary[0]
+        new_port, new_T = ck.ports[0], int(round(ck.period_ns * 1000))
+        if new_port != cfg.clock_port or new_T != cfg.period_ps:
+            msgs.append(f"clock_port/period_ps {cfg.clock_port}/{cfg.period_ps} -> "
+                        f"{new_port}/{new_T} (SDC create_clock {ck.name})")
+            cfg.clock_port, cfg.period_ps = new_port, new_T
+        if len(primary) >= 2:
+            ck2 = primary[1]
+            p2, T2 = ck2.ports[0], int(round(ck2.period_ns * 1000))
+            if p2 != cfg.clock_port_2 or T2 != cfg.period_ps_2:
+                msgs.append(f"clock_port_2/period_ps_2 -> {p2}/{T2} (SDC create_clock {ck2.name})")
+                cfg.clock_port_2, cfg.period_ps_2 = p2, T2
+        if len(primary) > 2:
+            msgs.append(f"SDC defines {len(primary)} clocks; synthesis targets the two fastest, "
+                        f"STA sees all")
+        if ck.uncertainty_setup_ns is not None:
+            v = int(round(ck.uncertainty_setup_ns * 1000))
+            if v != cfg.clock_uncertainty_setup_ps:
+                msgs.append(f"clock_uncertainty_setup_ps {cfg.clock_uncertainty_setup_ps} -> {v} (SDC)")
+                cfg.clock_uncertainty_setup_ps = v
+        if ck.uncertainty_hold_ns is not None:
+            v = int(round(ck.uncertainty_hold_ns * 1000))
+            if v != cfg.clock_uncertainty_hold_ps:
+                msgs.append(f"clock_uncertainty_hold_ps {cfg.clock_uncertainty_hold_ps} -> {v} (SDC)")
+                cfg.clock_uncertainty_hold_ps = v
+    # Boundary conditions: take a driving cell / load that applies to every
+    # constrained port (ABC has one global value for each).
+    if c.driving_cells:
+        cells = {d['cell'] for d in c.driving_cells}
+        cell = c.driving_cells[-1]['cell']
+        if len(cells) > 1:
+            msgs.append(f"SDC has {len(cells)} driving cells; ABC uses one ({cell}), STA sees all")
+        if cell != cfg.driving_cell:
+            msgs.append(f"driving_cell {cfg.driving_cell} -> {cell} (SDC set_driving_cell)")
+            cfg.driving_cell = cell
+    if c.dont_use:
+        added = [x for x in c.dont_use if x not in cfg.dont_use]
+        if added:
+            msgs.append(f"dont_use += {added} (SDC set_dont_use)")
+            cfg.dont_use = list(cfg.dont_use) + added
+    max_loads = [d for d in c.loads if not d.get('min')]
+    if max_loads:
+        pf = max_loads[-1]['pf']
+        ff = round(pf * 1000.0, 3)
+        if abs(ff - cfg.load_ff) > 1e-6:
+            msgs.append(f"load_ff {cfg.load_ff} -> {ff} (SDC set_load {pf} pF)")
+            cfg.load_ff = ff
+    if log:
+        for m in msgs:
+            log.info(f"[sdc] override: {m}")
+        for u in c.unknown:
+            log.warning(f"[sdc] unknown command (OpenSTA only): {u}")
+        if c.sta_only:
+            log.info(f"[sdc] {len(c.sta_only)} command(s) left to OpenSTA only")
+        for w in c.warnings:
+            log.warning(f"[sdc] {w}")
+    return msgs
+
+
+def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: Optional[dict] = None) -> None:
+    """results/<module>/synth.sdc — what synthesis actually acted on."""
+    L = ['# Derived by synth_flow: constraints used for SYNTHESIS (ABC targets).',
+         '# OpenSTA sources the original SDC verbatim; this file is for inspection.',
+         f'# source SDC: {cfg.sdc or "(none: YAML defaults)"}', '']
+    for m in overrides:
+        L.append(f'# override: {m}')
+    if overrides:
+        L.append('')
+    T = cfg.period_ps / 1000.0
+    L.append(f'create_clock -name {cfg.clock_port} -period {T} [get_ports {cfg.clock_port}]')
+    if cfg.clock_port_2 and cfg.period_ps_2:
+        L.append(f'create_clock -name {cfg.clock_port_2} -period {cfg.period_ps_2 / 1000.0} '
+                 f'[get_ports {cfg.clock_port_2}]')
+        L.append(f'set_clock_groups -asynchronous -group {cfg.clock_port} -group {cfg.clock_port_2}')
+    L.append(f'set_clock_uncertainty -setup {cfg.clock_uncertainty_setup_ps / 1000.0} [all_clocks]')
+    L.append(f'set_clock_uncertainty -hold {cfg.clock_uncertainty_hold_ps / 1000.0} [all_clocks]')
+    L.append(f'set_driving_cell -lib_cell {cfg.driving_cell} [all_inputs -no_clocks]')
+    L.append(f'set_load {cfg.load_ff / 1000.0} [all_outputs]')
+    if groups:
+        L.append(f'# ABC delay targets per path group (ps): reg2reg={groups["reg2reg_ps"]}, '
+                 + ', '.join(f'{g["name"]}={g["budget_ps"]}' for g in groups['groups']))
+        for n in groups['notes']:
+            L.append(f'# {n}')
+    else:
+        d, note = resolve_abc_target(cfg)
+        L.append(f'# ABC delay target: -D {d} ps ({note})')
+    if c is not None:
+        fps = sorted(c.false_path_ports())
+        if fps:
+            L.append('# false-path ports from SDC (excluded from I/O delay defaults, relaxed in synthesis):')
+            for fp in fps:
+                L.append(f'set_false_path -from [get_ports {fp}]')
+        n_in = len({p for d in c.input_delays for p in d.ports})
+        n_out = len({p for d in c.output_delays for p in d.ports})
+        L.append(f'# SDC I/O delays: {n_in} input port(s), {n_out} output port(s) '
+                 f'(used by OpenSTA now; used for path-group budgets in Phase 2)')
+        for e in c.exceptions:
+            if e.kind != 'false_path' or e.to or e.through:
+                L.append(f'# exception (OpenSTA now, cone budget in Phase 2): {e.kind} from={e.from_} '
+                         f'to={e.to} through={e.through} value={e.value}')
+        if c.sta_only:
+            L.append(f'# {len(c.sta_only)} STA-only command(s) not used by synthesis')
+        if c.unknown:
+            L.append(f'# {len(c.unknown)} unknown command(s), passed to OpenSTA only')
+    path.write_text('\n'.join(L) + '\n')
+
+
+def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, log) -> None:
+    """Run resize.py on results/<module>/winner.v; keep the pre-sizing netlist
+    as winner.presize.v and write resize.json. Never fatal."""
+    try:
+        import resize as resize_mod
+    except ImportError:
+        log.warning('[resize] resize.py not found; skipping')
+        return
+    winner = mod_results / 'winner.v'
+    presize = mod_results / 'winner.presize.v'
+    shutil.copy(winner, presize)
+    sta_lib = cfg.lib_slow or cfg.lib_typ
+    try:
+        res = resize_mod.resize(
+            presize, module, _synth_lib(asdict(cfg)), sta_lib, cfg.period_ps, cfg.clock_port, work_dir,
+            sdc=cfg.sdc, iters=cfg.resize_iters, yosys=cfg.yosys, opensta=cfg.opensta,
+            driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
+            unc_setup_ps=cfg.clock_uncertainty_setup_ps, unc_hold_ps=cfg.clock_uncertainty_hold_ps,
+            wire_load_model=cfg.wire_load_model, io_delay_frac=cfg.io_delay_frac,
+            clock_port_2=cfg.clock_port_2, period_ps_2=cfg.period_ps_2,
+            wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
+            log=lambda *x: log.debug('[resize] ' + ' '.join(str(v) for v in x)))
+    except Exception as e:
+        log.warning(f'[resize] {module}: failed ({e}); winner left unsized')
+        return
+    shutil.copy(res['output'], winner)
+    (mod_results / 'resize.json').write_text(json.dumps(res, indent=2))
+    s0, s1 = res['start'], res['end']
+    log.info(f"[resize] {module}: WNS {s0['wns_ns']:+.3f} -> {s1['wns_ns']:+.3f}  "
+             f"TNS {s0['tns_ns']:+.2f} -> {s1['tns_ns']:+.2f}  area {s0['area']:.0f} -> {s1['area']:.0f}  "
+             f"({len(res['moves'])} upsizes)")
+
+
 def parse_cli() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1495,6 +2098,12 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--top', help='top module name')
     p.add_argument('--period-ps', type=int, help='target clock period in ps')
     p.add_argument('--clock-port', help='clock port name (default: clk)')
+    p.add_argument('--sdc', help='SDC file: sourced by OpenSTA and read for synthesis clocks/budgets')
+    p.add_argument('--path-groups', action='store_true', help='EXPERIMENTAL: per-path-group ABC delay targets (see docs/architecture.md §2.5)')
+    p.add_argument('--abc-target', help="ABC -D: 'none' (default, min-delay mapping), 'period', 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
+    p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
+    p.add_argument('--yosys-opts', nargs='+', help='front-end options: booth, adder=kogge-stone|han-carlson|sklansky, noshare, hieropt')
+    p.add_argument('--dont-use', nargs='+', help='liberty cell patterns excluded from abc and dfflibmap')
     p.add_argument('--objective', choices=['delay', 'area', 'fastest', 'pareto', 'balanced'])
     p.add_argument('--modules', nargs='+', help='modules to synthesize')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep')
@@ -1524,7 +2133,7 @@ def parse_cli() -> argparse.Namespace:
 def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
     map_ = {
         'rtl': 'rtl_files', 'lib': 'lib_typ', 'lib_fast': 'lib_fast',
-        'lib_slow': 'lib_slow', 'top': 'top', 'period_ps': 'period_ps',
+        'lib_slow': 'lib_slow', 'top': 'top', 'period_ps': 'period_ps', 'sdc': 'sdc',
         'clock_port': 'clock_port', 'objective': 'objective',
         'modules': 'modules', 'recipes': 'recipes',
         'driving_cell': 'driving_cell', 'load_ff': 'load_ff',
@@ -1539,6 +2148,16 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.run_sta = False
     if args.no_gls:
         cfg.run_gls = False
+    if getattr(args, 'path_groups', False):
+        cfg.path_groups = True
+    if getattr(args, 'abc_target', None):
+        cfg.abc_target = args.abc_target
+    if getattr(args, 'resize', False):
+        cfg.resize_winner = True
+    if getattr(args, 'yosys_opts', None):
+        cfg.yosys_opts = list(args.yosys_opts)
+    if getattr(args, 'dont_use', None):
+        cfg.dont_use = list(args.dont_use)
     if args.abc_sequential:
         cfg.abc_sequential = True
     if args.hierarchical:
@@ -1591,6 +2210,17 @@ def main() -> int:
         for e in errs:
             log.error(f"config error: {e}")
         return EXIT_CONFIG_ERR
+
+    try:
+        if cfg.yosys_opts:
+            log.info(f"yosys front-end flags: {_synth_flags(cfg.yosys_opts)}")
+    except ValueError as e:
+        log.error(str(e))
+        return EXIT_CONFIG_ERR
+
+    # ----- SDC: constraints for synthesis (OpenSTA sources the file itself) -----
+    sdc_constraints = load_sdc_constraints(cfg, log)
+    sdc_overrides = apply_sdc_overrides(cfg, sdc_constraints, log)
 
     if cfg.abc_sequential:
         log.warning("=" * 70)
@@ -1659,6 +2289,16 @@ def main() -> int:
         return EXIT_CONFIG_ERR
     cfg.recipes = [name for name, _ in recipe_pairs]
     log.info(f"recipes: {', '.join(cfg.recipes)}")
+    fe_variants = [list(v or []) for v in cfg.yosys_opts_sweep] or [list(cfg.yosys_opts)]
+    try:
+        for v in fe_variants:
+            _synth_flags(v)
+    except ValueError as e:
+        log.error(str(e))
+        return EXIT_CONFIG_ERR
+    if len(fe_variants) > 1:
+        log.info(f"front-end variants: {', '.join(_variant_tag(v) or 'plain' for v in fe_variants)} "
+                 f"-> {len(fe_variants)} x {len(cfg.recipes)} candidates per module")
 
     # ----- generate constraint file -----
     constr = _write_constraint_file(work, cfg.driving_cell, cfg.load_ff)
@@ -1673,10 +2313,45 @@ def main() -> int:
             if all_deps.get(m):
                 log.info(f"  {m} depends on: {', '.join(sorted(all_deps[m]))}")
 
+    cfg_dict = asdict(cfg)
+
+    # ----- ABC delay target -----
+    abc_d_ps, abc_d_note = resolve_abc_target(cfg)
+    log.info(f"ABC -D = {abc_d_ps} ps ({abc_d_note})")
+    cfg_dict['abc_d_ps'] = abc_d_ps
+
+    # ----- path groups (per module; SDC applies to the top) -----
+    module_groups: dict[str, Optional[dict]] = {}
+    if cfg.path_groups:
+        if cfg.hierarchical or cfg.abc_sequential or (cfg.clock_port_2 and cfg.dual_clock_synthesis):
+            log.warning("path_groups: only supported in the flat standard flow; ignoring")
+        elif liberty_timing is None or sdc_parse is None:
+            log.warning("path_groups: liberty_timing/sdc_parse modules missing; ignoring")
+        else:
+            lt = liberty_timing.read_liberty_timing(_synth_lib(asdict(cfg)))
+            for module in cfg.modules:
+                ports: dict = {}
+                for f in cfg.rtl_files:
+                    try:
+                        ports = sdc_parse.ports_from_verilog(f, module)
+                    except OSError:
+                        ports = {}
+                    if ports:
+                        break
+                spec = build_path_groups(cfg, module,
+                                         sdc_constraints if module == cfg.top else None,
+                                         ports, lt, work / module / 'groups')
+                module_groups[module] = spec
+                if spec:
+                    desc = ', '.join(f"{g['name']}={g['budget_ps']}" for g in spec['groups'])
+                    log.info(f"[groups] {module}: {desc}, reg2reg={spec['reg2reg_ps']} ps "
+                             f"(T={spec['period_ps']}; {'; '.join(spec['notes'])})")
+                else:
+                    log.warning(f"[groups] {module}: no ports/flop timing found; flat mapping")
+
     # ----- assemble jobs (module x recipe) -----
     # In hierarchical mode we process modules one at a time in dependency
     # order so that winner netlists are available for parent modules.
-    cfg_dict = asdict(cfg)
     by_module: dict[str, list[RecipeResult]] = {m: [] for m in cfg.modules}
     winner_netlists: dict[str, str] = {}  # module → winner.v path
     any_synth_failed = False
@@ -1726,6 +2401,11 @@ def main() -> int:
                 period_ps_2=cfg.period_ps_2,
                 macro_libs=cfg.macro_libs.get(qsta_corner, []) if cfg.macro_libs else [],
                 sdc=cfg.sdc,
+                driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
+                unc_setup_ps=cfg.clock_uncertainty_setup_ps,
+                unc_hold_ps=cfg.clock_uncertainty_hold_ps,
+                wire_load_model=cfg.wire_load_model,
+                io_delay_frac=cfg.io_delay_frac,
             )
             cands.append(Candidate(
                 recipe=r.recipe, netlist=r.netlist,
@@ -1748,6 +2428,13 @@ def main() -> int:
             if win.netlist:
                 shutil.copy(win.netlist, mod_results / 'winner.v')
                 winner_netlists[module] = str(mod_results / 'winner.v')
+                if cfg.resize_winner and cfg.run_sta:
+                    _resize_winner(cfg, module, mod_results, work / module / 'resize', log)
+            write_derived_sdc(cfg, sdc_constraints, mod_results / 'synth.sdc', sdc_overrides,
+                              groups=module_groups.get(module))
+            win_groups = work / module / f'{sel.winner}.groups.json'
+            if win_groups.exists():
+                shutil.copy(win_groups, mod_results / 'groups.json')
             (mod_results / 'selection.json').write_text(
                 json.dumps({
                     'winner': sel.winner,
@@ -1773,19 +2460,22 @@ def main() -> int:
 
             jobs = []
             mod_dir = work / module
-            for recipe_name, recipe_path in recipe_pairs:
-                jobs.append({
-                    'module': module,
-                    'recipe': recipe_name,
-                    'recipe_path': str(recipe_path),
-                    'workdir': str(mod_dir),
-                    'constr': str(constr),
-                    'cfg': cfg_dict,
-                    'dep_netlists': dep_nets,
-                    'dep_modules': dep_mods,
-                })
+            for variant in fe_variants:
+                for recipe_name, recipe_path in recipe_pairs:
+                    jobs.append({
+                        'module': module,
+                        'recipe': _candidate_name(recipe_name, variant),
+                        'recipe_path': str(recipe_path),
+                        'variant': list(variant),
+                        'workdir': str(mod_dir),
+                        'constr': str(constr),
+                        'cfg': cfg_dict,
+                        'dep_netlists': dep_nets,
+                        'dep_modules': dep_mods,
+                        'groups': module_groups.get(module),
+                    })
             total = len(jobs)
-            log.info(f"  running {total} jobs ({total // len(recipe_pairs)} modules × "
+            log.info(f"  running {total} jobs ({len(fe_variants)} variants × "
                      f"{len(recipe_pairs)} recipes) on {cfg.effective_parallel()} workers")
             _run_jobs(jobs)
             _pick_winner(module)
@@ -1795,15 +2485,18 @@ def main() -> int:
         jobs = []
         for module in cfg.modules:
             mod_dir = work / module
-            for recipe_name, recipe_path in recipe_pairs:
-                jobs.append({
-                    'module': module,
-                    'recipe': recipe_name,
-                    'recipe_path': str(recipe_path),
-                    'workdir': str(mod_dir),
-                    'constr': str(constr),
-                    'cfg': cfg_dict,
-                })
+            for variant in fe_variants:
+                for recipe_name, recipe_path in recipe_pairs:
+                    jobs.append({
+                        'module': module,
+                        'recipe': _candidate_name(recipe_name, variant),
+                        'recipe_path': str(recipe_path),
+                        'variant': list(variant),
+                        'workdir': str(mod_dir),
+                        'constr': str(constr),
+                        'cfg': cfg_dict,
+                        'groups': module_groups.get(module),
+                    })
 
         log.info(f"running {len(jobs)} jobs ({len(cfg.modules)} modules × {len(cfg.recipes)} recipes) "
                  f"on {cfg.effective_parallel()} workers")

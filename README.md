@@ -9,12 +9,19 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
 
 ## Features
 
-- **Recipe sweep** — runs multiple ABC optimization recipes in parallel,
-  picks the best result per module using the slow-corner (SS) for WNS ranking
-- **15 built-in recipes** — delay, balanced, area, and specialty strategies
-  (all verified on ABC 1.01+)
+- **Recipe × front-end sweep** — runs multiple ABC recipes, optionally across
+  Yosys front-end variants (Booth multipliers, Kogge-Stone / Han-Carlson /
+  Sklansky adders), and picks the best result per module using the
+  slow-corner (SS) for WNS ranking
+- **16 built-in recipes** — delay, balanced, and area strategies, pruned
+  against a 16-design STA benchmark (retired ones in `recipes/retired/`)
 - **5 optimization objectives** — `delay`, `area`, `fastest`, `pareto`,
   `balanced`
+- **SDC in, SDC out** — one SDC drives OpenSTA verbatim and synthesis
+  (clocks, boundary conditions); `results/<module>/synth.sdc` shows what
+  synthesis used ([docs/sdc-support.md](docs/sdc-support.md))
+- **STA-guided sizing** — `--resize` fixes drive strengths on failing paths
+  with OpenSTA as the judge; TNS down on every failing bench design
 - **Multi-corner STA** — SS (setup), TT (setup+hold), FF (hold) via OpenSTA
 - **Hierarchical (bottom-up) synthesis** — leaf modules first, winning
   netlists reused by parents
@@ -94,6 +101,10 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--top NAME` | Top module name |
 | `--period-ps N` | Clock period in picoseconds |
 | `--clock-port NAME` | Clock port name (default: `clk`) |
+| `--sdc FILE` | SDC file: sourced by OpenSTA and read for synthesis clocks and boundary conditions (overrides `--period-ps`/`--clock-port`) |
+| `--abc-target T` | ABC `-D`: `none` (default), `period`, `reg2reg`, or ps. Measured: `none` is best (docs/architecture.md §2.6) |
+| `--resize` | OpenSTA-guided drive-strength sizing of each winner (`winner.presize.v` keeps the input) |
+| `--yosys-opts T...` | Front-end options: `booth`, `adder=kogge-stone\|han-carlson\|sklansky`, `noshare`, `hieropt`. Sweep several with `yosys_opts_sweep` in YAML |
 | `--objective OBJ` | `delay`, `area`, `fastest`, `pareto`, `balanced` |
 | `--modules M1 M2` | Modules to synthesize (default: auto-detect) |
 | `--recipes R1 R2` | Recipes to sweep (default: all) |
@@ -160,7 +171,7 @@ CLI form is flat-list only; use the YAML dict for per-corner control.
 
 ## Recipes
 
-15 ABC scripts in `recipes/*.abc`, all compatible with ABC 1.01+. Each recipe
+16 ABC scripts in `recipes/*.abc`, all compatible with ABC 1.01+. Each recipe
 uses only commands confirmed available: `strash`, `ifraig`, `scorr`, `dc2`,
 `dretime`, `balance`, `rewrite`, `refactor`, `dch`, `map`, `mfs`, and the GIA
 subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
@@ -168,24 +179,26 @@ subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
 
 | Recipe | Class | Strategy | Runtime |
 |--------|-------|----------|---------|
-| `delay_retime` | Delay | Retiming + double-pass GIA mapping | 1.3× |
 | `delay_triple` | Delay | Triple-pass remap with sizing | 1.4× |
-| `delay_choice_deep` | Delay | Choice-driven, high conflict limit | 1.0× |
+| `delay_choice_deep` | Delay | Choice-driven (`&dch; &nf`), 2 sizing rounds | 1.0× |
+| `delay_choice_deep_v2` | Delay | As above, 3 sizing rounds | 1.0× |
+| `delay_choice_deep_v3` | Delay | `&dch -f` (more choices); best mean WNS rank in the baseline | 1.0× |
+| `delay_choice_deep_v4` | Delay | `&b` before `&dch` | 1.0× |
+| `delay_choice_deep_bb` | Delay | Double `&b` before `&dch` | 1.0× |
+| `delay_aggressive` | Delay | Full cleanup + 4-pass mapping + aggressive sizing | 1.7× |
 | `delay_iter_heavy` | Delay | Quadruple-pass explicit unrolling | 1.7× |
 | `balanced_resyn` | Balanced | Inlined resyn2 + single GIA map | 1.0× |
 | `balanced_resyn2x` | Balanced | Two rewriting passes + double map | 1.4× |
-| `balanced_struct` | Structural | GIA structural cleanup (`&scl`, `&lcorr`) | 1.0× |
 | `area_safe` | Area | Full AIG cleanup + retiming + GIA mapping | 1.2× |
 | `area_classic` | Area | Rewriting + scorr/dc2 + GIA mapping | 1.1× |
 | `area_lut6` | Area | Heavy scorr + dc2 + dretime + rewriting | 1.2× |
 | `area_max` | Area | Double everything + retiming + double map | 1.3× |
-| `lazy_man` | Heavy | PULP-style: 8 opt + 8 opt+map iterations | 1.0× |
-| `lms` | Heavy | PULP LMS port: opt iters + placement-aware buffering | 1.1× |
 | `orfs_speed` | Reference | ORFS/OpenLane DELAY 0 port | 0.8× |
 | `yosys_default` | Reference | Yosys default flow baseline | 0.8× |
 
 Runtime multipliers are relative to `balanced_resyn` on a typical Sky130 HD
-module. Add custom recipes by dropping `<name>.abc` into `recipes/`.
+module. Add custom recipes by dropping `<name>.abc` into `recipes/`. Recipes
+retired after benchmarking live in `recipes/retired/` with the reasons.
 
 ## Objectives
 
@@ -231,16 +244,56 @@ synth_flow/
   synth_flow.py       # Main orchestrator
   area_report.py      # Cell count + area report utility
   test_synth_flow.py  # Unit tests (no EDA tools needed)
-  recipes/            # 14 ABC recipe scripts
+  recipes/            # 16 ABC recipe scripts (+ retired/)
   sky130/             # Curated Sky130 HD PDK subset
     hd_120_tt.lib     # Stripped TT liberty (synthesis)
     abc_constr.txt    # ABC constraints
     sky130_hd-clean.v # Behavioral Verilog (GLS)
-  docs/
-    yaml-config.md    # Full config reference
+  bench/              # Benchmark suite (designs, manifest, runner)
+  docs/               # Architecture, SDC support, CLI spec, benchmarks, roadmap
   examples/
     synth.yaml        # Example configuration
 ```
+
+## Results
+
+On the 16-design benchmark (Sky130 HD, SS corner, per-design SDC), the full
+flow (front-end sweep × recipe sweep × OpenSTA-guided sizing) against the
+ORFS/OpenLane reference (plain Yosys, `orfs_speed`, no sizing):
+
+| | ORFS reference | synth_flow |
+|---|---|---|
+| designs meeting timing | 3 / 16 | 9 / 16 |
+| mean ΔWNS | — | +0.68 ns |
+| mean Δarea | — | +1.5 % |
+
+Per-design numbers and every intermediate experiment (including the negative
+ones) are in [docs/benchmarks.md](docs/benchmarks.md).
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/yaml-config.md](docs/yaml-config.md) | Full YAML config reference |
+| [docs/architecture.md](docs/architecture.md) | How the flow works, verified findings about Yosys/ABC and constraints, target timing-driven architecture |
+| [docs/sdc-support.md](docs/sdc-support.md) | Which SDC commands synthesis uses, which are STA-only, precedence over YAML |
+| [docs/cli.md](docs/cli.md) | Target CLI, configuration keys, outputs, exit codes, Python API |
+| [docs/benchmarks.md](docs/benchmarks.md) | Benchmark suite: designs, metrics, running and comparing |
+| [docs/roadmap.md](docs/roadmap.md) | Phased plan with deliverables and acceptance criteria |
+
+## Benchmarks
+
+`bench/` holds 16 designs (12 in-house, 4 external shalan/* IPs at pinned
+commits) and a runner that sweeps recipes and writes CSV/Markdown reports.
+
+```bash
+cd bench
+./fetch_external.sh                 # once
+./bench.py --quick --tag before     # 4 representative recipes
+./bench.py --compare results/before.csv results/after.csv
+```
+
+See [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Requirements
 
