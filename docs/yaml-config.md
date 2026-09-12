@@ -118,8 +118,8 @@ These are required only when `run_gls: true` (the default). Set
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `yosys_opts` | list | `[]` | Front-end options passed to `synth` (also `--yosys-opts`). Tokens: `booth` (Booth-encoded multipliers, `synth -booth`), `adder=kogge-stone` / `adder=han-carlson` / `adder=sklansky` (`synth -extra-map +/choices/<arch>.v`), `noshare`, `hieropt`, `nofsm`, `noalumacc`. |
-| `yosys_opts_sweep` | list of lists | `[]` | Sweep several front ends: each entry is a `yosys_opts` list (`[]` = plain). Candidates are named `<recipe>@<variant>` and compete in the same winner selection. Recommended: `[[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky], [booth], [booth, adder=kogge-stone]]` (6× runtime; closes 9/16 bench designs vs 6/16). |
+| `yosys_opts` | list or dict | `[]` | Front-end options passed to `synth` (also `--yosys-opts`, which replaces any sweep). Tokens: `booth` (`synth -booth`), `adder=kogge-stone` / `adder=han-carlson` / `adder=sklansky` (`synth -extra-map +/choices/<arch>.v`), `noshare`, `hieropt`, `nofsm`, `noalumacc`, and post-synth passes `opt_dff_sat` (`opt_dff -sat`), `opt_full` (`opt -full`). A dict `{module: [tokens], '*': [tokens]}` sets options per module (`'*'` is the default). |
+| `yosys_opts_sweep` | list or dict | `[]` | Sweep several front ends: each entry is a `yosys_opts` list (`[]` = plain). Candidates are named `<recipe>@<variant>` and compete in the same winner selection. A dict `{module: [variants], '*': [variants]}` sweeps different variants per module (a datapath core can try Booth and adder architectures while a control block stays plain). Recommended global set: `[[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky], [booth], [booth, adder=kogge-stone]]`. |
 
 ### Library cell exclusion
 

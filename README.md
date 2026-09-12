@@ -107,7 +107,7 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--resize` | OpenSTA-guided drive-strength sizing of each winner (`winner.presize.v` keeps the input) |
 | `--repair-design` | Buffer trees on high-fanout nets of failing paths, judged by OpenSTA (`--max-fanout N`, default 8; SDC `set_max_fanout` overrides) |
 | `--repair-hold` | Delay cells on failing hold endpoints at the fast corner, kept only while slow-corner setup holds |
-| `--yosys-opts T...` | Front-end options: `booth`, `adder=kogge-stone\|han-carlson\|sklansky`, `noshare`, `hieropt`. Sweep several with `yosys_opts_sweep` in YAML |
+| `--yosys-opts T...` | Front-end options: `booth`, `adder=kogge-stone\|han-carlson\|sklansky`, `noshare`, `hieropt`, `opt_dff_sat`, `opt_full`. Sweep several, globally or per module, with `yosys_opts_sweep` in YAML |
 | `--objective OBJ` | Recipe subset to run: `delay`, `area`, `balanced` (default). Selection is always min-area-meeting-timing |
 | `--full-sweep` | Run every recipe instead of the objective subset |
 | `--select-margin-ps N` | WNS a candidate needs to count as meeting timing (default 0) |

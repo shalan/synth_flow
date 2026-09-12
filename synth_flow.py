@@ -237,14 +237,18 @@ class Config:
     #                         (kogge-stone | han-carlson | sklansky; default ripple/Brent-Kung)
     #   noshare               synth -noshare
     #   hieropt               synth -hieropt
-    yosys_opts: list[str] = field(default_factory=list)
+    #   opt_dff_sat           `opt_dff -sat` after synth
+    #   opt_full              `opt -full` after synth
+    # Either a token list (all modules) or a dict {module: [tokens], '*': [...]}.
+    yosys_opts: Any = field(default_factory=list)
     # Sweep front-end variants as a second candidate dimension: each entry is a
     # yosys_opts list ([] = plain). Candidates are named <recipe>@<variant>.
     # Bench: best-of (6 variants x 16 recipes) closes 9/16 designs vs 6/16 with
     # recipes alone, mean best-WNS +0.24 ns, no design worse (docs/benchmarks.md).
     # Recommended: [[], [adder=kogge-stone], [adder=han-carlson], [adder=sklansky],
     #               [booth], [booth, adder=kogge-stone]]
-    yosys_opts_sweep: list = field(default_factory=list)
+    # Either a list of variants (all modules) or a dict {module: [variants], '*': [...]}.
+    yosys_opts_sweep: Any = field(default_factory=list)
     # Liberty cells excluded from mapping (glob patterns), passed as
     # `-dont_use` to both `abc` and `dfflibmap`. Needed with a full PDK
     # liberty (probe, lpflow, delay cells...). The bundled hd_120 subset
@@ -546,6 +550,7 @@ YOSYS_DRIVER_STD = """\
 hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc {synth_flags}
+{post_synth}
 write_verilog -noattr {syn_netlist}
 dfflibmap -liberty {liberty} {dont_use}
 abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
@@ -568,6 +573,7 @@ YOSYS_DRIVER_GROUPS = """\
 hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc {synth_flags}
+{post_synth}
 write_verilog -noattr {syn_netlist}
 dfflibmap -liberty {liberty} {dont_use}
 {group_section}
@@ -593,6 +599,7 @@ YOSYS_DRIVER_SEQ = """\
 hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc {synth_flags}
+{post_synth}
 write_verilog -noattr {syn_netlist}
 # ABC with -dff: generic flops are part of the optimization
 abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
@@ -622,6 +629,7 @@ YOSYS_DRIVER_HIER = """\
 hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc {synth_flags}
+{post_synth}
 write_verilog -noattr {syn_netlist}
 dfflibmap -liberty {liberty} {dont_use}
 abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
@@ -656,6 +664,7 @@ YOSYS_DRIVER_DUAL_CLK = """\
 hierarchy -top {module}
 {keep_hierarchy_section}
 synth -top {module} -flatten -noabc {synth_flags}
+{post_synth}
 write_verilog -noattr {syn_netlist}
 
 # Partition into clock domains
@@ -706,9 +715,16 @@ def _dont_use_flags(patterns) -> str:
                     for p in (patterns or []) if str(p).strip())
 
 
-def _synth_flags(yosys_opts) -> str:
-    """Translate cfg.yosys_opts tokens into `synth` flags."""
+_POST_SYNTH_TOKENS = {
+    'opt_dff_sat': 'opt_dff -sat',        # SAT-based flop init/enable simplification after synth
+    'opt_full':    'opt -full',           # extra opt round with full mux/expr optimisation
+}
+
+
+def _front_end(yosys_opts) -> tuple[str, str]:
+    """(synth flags, post-synth commands) for a yosys_opts token list."""
     flags: list[str] = []
+    post: list[str] = []
     for tok in yosys_opts or []:
         t = str(tok).strip().lower()
         if t == 'booth':
@@ -720,9 +736,32 @@ def _synth_flags(yosys_opts) -> str:
             flags.append(f'-extra-map +/choices/{arch}.v')
         elif t in ('noshare', 'hieropt', 'nofsm', 'noalumacc'):
             flags.append(f'-{t}')
+        elif t in _POST_SYNTH_TOKENS:
+            post.append(_POST_SYNTH_TOKENS[t])
         elif t:
-            raise ValueError(f"yosys_opts: unknown token '{tok}'")
-    return ' '.join(flags)
+            raise ValueError(f"yosys_opts: unknown token '{tok}' (booth, adder=<arch>, noshare, hieropt, "
+                             f"nofsm, noalumacc, {', '.join(_POST_SYNTH_TOKENS)})")
+    if post:
+        # post-synth optimisation can re-create coarse cells ($mux, ...); lower them again
+        post += ['techmap', 'opt -fast']
+    return ' '.join(flags), '\n'.join(post)
+
+
+def _synth_flags(yosys_opts) -> str:
+    """Translate cfg.yosys_opts tokens into `synth` flags (post-synth passes excluded)."""
+    return _front_end(yosys_opts)[0]
+
+
+def _fe_variants_for(cfg_or_dict, module: str) -> list[list[str]]:
+    """Front-end variants for `module`. `yosys_opts_sweep` / `yosys_opts` may be
+    global (list) or per module (dict keyed by module name, '*' as default)."""
+    get = (lambda k: cfg_or_dict.get(k)) if isinstance(cfg_or_dict, dict) else (lambda k: getattr(cfg_or_dict, k))
+    sweep, opts = get('yosys_opts_sweep'), get('yosys_opts')
+    if isinstance(sweep, dict):
+        sweep = sweep.get(module, sweep.get('*', []))
+    if isinstance(opts, dict):
+        opts = opts.get(module, opts.get('*', []))
+    return [list(v or []) for v in (sweep or [])] or [list(opts or [])]
 
 
 def _read_verilog_lines(rtl_files: list[str], verilog_defines: list[str] = None,
@@ -859,6 +898,19 @@ def _strip_signed_decls(netlist: Path) -> int:
     if n:
         netlist.write_text(new_text)
     return n
+
+
+_UNMAPPED_RE = re.compile(r'^\s*\\?\$[\w$]+\s', re.M)
+
+
+def _count_unmapped(netlist: Path) -> int:
+    """Number of Yosys internal cells ($mux, $_AND_, ...) left in a mapped netlist.
+    Anything non-zero means the mapping is incomplete; stat and OpenSTA would
+    silently ignore those cells and report an optimistic, wrong result."""
+    try:
+        return len(_UNMAPPED_RE.findall(netlist.read_text(errors='ignore')))
+    except OSError:
+        return 0
 
 
 def _read_stats(stats_json: Path, module: str) -> tuple[int, float]:
@@ -1210,9 +1262,8 @@ def run_recipe(args: dict) -> RecipeResult:
         rtl_files = cfg['rtl_files']
 
     variant = args.get('variant')
-    if variant is not None:
-        cfg = dict(cfg)
-        cfg['yosys_opts'] = list(variant)
+    cfg = dict(cfg)
+    cfg['yosys_opts'] = list(variant) if variant is not None else _fe_variants_for(cfg, module)[0]
     groups_spec = args.get('groups')
     groups_txt = workdir / f'{recipe}.groups.txt'
     d_ps = int(cfg.get('abc_d_ps', cfg['period_ps']))
@@ -1253,7 +1304,8 @@ def run_recipe(args: dict) -> RecipeResult:
         group_section=(_group_section(groups_spec, _synth_lib(cfg), constr, recipe_path, str(groups_txt),
                                       _dont_use_flags(cfg.get('dont_use')))
                        if groups_spec else ''),
-        synth_flags=_synth_flags(cfg.get('yosys_opts')),
+        synth_flags=_front_end(cfg.get('yosys_opts'))[0],
+        post_synth=_front_end(cfg.get('yosys_opts'))[1],
         dont_use=_dont_use_flags(cfg.get('dont_use')),
     ))
 
@@ -1279,6 +1331,13 @@ def run_recipe(args: dict) -> RecipeResult:
                 error="netlist not produced",
             )
         _strip_signed_decls(netlist)
+        n_unmapped = _count_unmapped(netlist)
+        if n_unmapped:
+            return RecipeResult(
+                module=module, recipe=recipe, success=False,
+                runtime_s=runtime, netlist=None, log=str(log),
+                error=f"{n_unmapped} unmapped generic cell(s) left in the netlist",
+            )
         cells, area = _read_stats(stats, module)
         gstats = _parse_groups_txt(groups_txt) if groups_spec else None
         if gstats is not None:
@@ -2208,6 +2267,7 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.max_fanout = args.max_fanout
     if getattr(args, 'yosys_opts', None):
         cfg.yosys_opts = list(args.yosys_opts)
+        cfg.yosys_opts_sweep = []            # an explicit front end on the CLI replaces any sweep
     if getattr(args, 'dont_use', None):
         cfg.dont_use = list(args.dont_use)
     if getattr(args, 'abc_wire_load', False):
@@ -2272,8 +2332,12 @@ def main() -> int:
         return EXIT_CONFIG_ERR
 
     try:
-        if cfg.yosys_opts:
-            log.info(f"yosys front-end flags: {_synth_flags(cfg.yosys_opts)}")
+        for v in ([cfg.yosys_opts] if isinstance(cfg.yosys_opts, list) else list(cfg.yosys_opts.values())):
+            _front_end(v)
+        sweeps = cfg.yosys_opts_sweep if isinstance(cfg.yosys_opts_sweep, list) else \
+            [v for vs in cfg.yosys_opts_sweep.values() for v in vs]
+        for v in sweeps:
+            _front_end(v)
     except ValueError as e:
         log.error(str(e))
         return EXIT_CONFIG_ERR
@@ -2361,16 +2425,11 @@ def main() -> int:
         return EXIT_CONFIG_ERR
     cfg.recipes = [name for name, _ in recipe_pairs]
     log.info(f"recipes: {', '.join(cfg.recipes)}")
-    fe_variants = [list(v or []) for v in cfg.yosys_opts_sweep] or [list(cfg.yosys_opts)]
-    try:
-        for v in fe_variants:
-            _synth_flags(v)
-    except ValueError as e:
-        log.error(str(e))
-        return EXIT_CONFIG_ERR
-    if len(fe_variants) > 1:
-        log.info(f"front-end variants: {', '.join(_variant_tag(v) or 'plain' for v in fe_variants)} "
-                 f"-> {len(fe_variants)} x {len(cfg.recipes)} candidates per module")
+    fe_by_module = {m: _fe_variants_for(cfg, m) for m in cfg.modules}
+    for m, vs in fe_by_module.items():
+        if len(vs) > 1 or (vs and vs[0]):
+            log.info(f"front end for {m}: {', '.join(_variant_tag(v) or 'plain' for v in vs)}"
+                     + (f" -> {len(vs)} x {len(cfg.recipes)} candidates" if len(vs) > 1 else ''))
 
     # ----- generate constraint file -----
     constr = _write_constraint_file(work, cfg.driving_cell, cfg.load_ff)
@@ -2539,7 +2598,7 @@ def main() -> int:
 
             jobs = []
             mod_dir = work / module
-            for variant in fe_variants:
+            for variant in fe_by_module[module]:
                 for recipe_name, recipe_path in recipe_pairs:
                     jobs.append({
                         'module': module,
@@ -2554,7 +2613,7 @@ def main() -> int:
                         'groups': module_groups.get(module),
                     })
             total = len(jobs)
-            log.info(f"  running {total} jobs ({len(fe_variants)} variants × "
+            log.info(f"  running {total} jobs ({len(fe_by_module[module])} variants × "
                      f"{len(recipe_pairs)} recipes) on {cfg.effective_parallel()} workers")
             _run_jobs(jobs)
             _pick_winner(module)
@@ -2564,7 +2623,7 @@ def main() -> int:
         jobs = []
         for module in cfg.modules:
             mod_dir = work / module
-            for variant in fe_variants:
+            for variant in fe_by_module[module]:
                 for recipe_name, recipe_path in recipe_pairs:
                     jobs.append({
                         'module': module,

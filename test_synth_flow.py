@@ -13,7 +13,7 @@ from synth_flow import (
     discover_recipes, RecipeResult,
     DEFAULT_RECIPES_DIR, _strip_signed_decls, apply_sdc_overrides,
     build_path_groups, resolve_abc_target, _group_section, _materialize_recipe, _synth_flags,
-    _candidate_name, _base_recipe, _dont_use_flags,
+    _candidate_name, _base_recipe, _dont_use_flags, _front_end, _fe_variants_for, _count_unmapped,
 )
 
 failures = []
@@ -147,6 +147,16 @@ cfg.abc_target = 'none'; check("'none' target (default) -> 0", resolve_abc_targe
 check('resize is opt-in', Config().resize_winner is False and Config().resize_final == 'tns')
 check('synth flags: booth + adder', _synth_flags(['booth', 'adder=kogge-stone']) == '-booth -extra-map +/choices/kogge-stone.v')
 check('synth flags: empty', _synth_flags([]) == '' and _synth_flags(None) == '')
+check('post-synth tokens re-lower coarse cells', _front_end(['opt_dff_sat', 'opt_full', 'booth']) == ('-booth', 'opt_dff -sat\nopt -full\ntechmap\nopt -fast'), str(_front_end(['opt_dff_sat', 'opt_full', 'booth'])))
+with tempfile.TemporaryDirectory() as td:
+    nl = Path(td) / 'u.v'
+    nl.write_text("module m(a,y);\n  input a; output y;\n  sky130_fd_sc_hd__inv_1 _1_ (.A(a), .Y(y));\n  \\$mux  #(\n    .WIDTH(32'd1)\n  ) _2_ (\n    .A(a)\n  );\n  \\$_AND_ _3_ (.A(a), .B(a), .Y(z));\nendmodule\n")
+    check('unmapped-cell guard counts $mux and $_AND_ but not liberty cells', _count_unmapped(nl) == 2, str(_count_unmapped(nl)))
+_c = Config(yosys_opts_sweep={'cpu': [[], ['booth']], '*': [['adder=kogge-stone']]}, yosys_opts={'uart': ['noshare']})
+check('per-module sweep', _fe_variants_for(_c, 'cpu') == [[], ['booth']] and _fe_variants_for(_c, 'other') == [['adder=kogge-stone']], str(_fe_variants_for(_c, 'cpu')))
+_c2 = Config(yosys_opts={'uart': ['noshare'], '*': []})
+check('per-module opts without sweep', _fe_variants_for(_c2, 'uart') == [['noshare']] and _fe_variants_for(_c2, 'x') == [[]])
+check('global list forms unchanged', _fe_variants_for(Config(yosys_opts_sweep=[[], ['booth']]), 'm') == [[], ['booth']] and _fe_variants_for(Config(yosys_opts=['booth']), 'm') == [['booth']])
 check('candidate naming', _candidate_name('orfs_speed', []) == 'orfs_speed' and _candidate_name('orfs_speed', ['booth', 'adder=kogge-stone']) == 'orfs_speed@booth+adder=kogge-stone')
 check('base recipe and stability through variants', _base_recipe('delay_triple@booth') == 'delay_triple' and _stability_idx('delay_triple@booth') == _stability_idx('delay_triple'))
 check('sweep is opt-in', Config().yosys_opts_sweep == [])
