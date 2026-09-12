@@ -34,7 +34,10 @@ Objectives differ only in the recipe subset (5 each) or all 18 (`--full-sweep`).
 | **meeting / mean ΔWNS / mean Δarea / time** | 3 / 16 | **14 / 16, +0.82 ns, +6.0 %, 38 s** | **13 / 16, +0.74 ns, +4.8 %, 115 s** | **4 / 16, -0.58 ns, -1.1 %, 68 s** | **14 / 16, +0.50 ns, +2.8 %, 295 s** |
 
 Reading: the `delay` subset closes as many designs as the full sweep in an
-eighth of the time and is the default; the full sweep buys area back where
+eighth of the time and is the default. `obj-delay2.csv` is the same run after
+parallel quick STA and the knee fallback: still 14/16, +0.73 ns, +2.7 % area,
+95 s wall time for all 16 designs (mul32_mac now −1.84 ns at +2.0 % instead
+of −0.56 ns at +54 %; zxip −0.67 ns at −0.1 %); the full sweep buys area back where
 several candidates close; the `area` subset is for relaxed periods (only 4
 designs close at these periods, area −1.1 %). The two designs no objective
 closes are mul32_mac (−0.56 ns at 16 ns; the fallback picks the fastest
