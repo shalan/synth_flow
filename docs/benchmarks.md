@@ -256,6 +256,28 @@ default. `sweep6.csv` is the flow's own run with all six variants
 6 → 9 of 16, mean best-WNS +0.236 ns, identical to the best-of analysis.
 Runtime per design 21 s (crc32_8) to 986 s (zxip, 16k cells).
 
+## New-recipe candidates — `newrecipes.csv`
+
+Eight candidate recipes run with the plain front end and scored against the
+16 existing recipes on every design (`--set recipes_dir=<dir>`):
+
+| candidate | best-WNS designs | Pareto points | smallest timing-meeting | verdict |
+|---|---|---|---|---|
+| `delay_map` (`strash; dch -f; map; buffer; topo; upsize; dnsize`) | 12 / 16 | 12 | 6 | **added**; closes alu32, mul16_pipe, sha256_core, crc32_8, rr_arbiter16, zx16_core_ahb that nothing else closed, at +8 to +60 % area |
+| `orfs_area` (`&syn2; &if -g; &synch2; &nf`) | 1 (aes_round) | 3 | 0 | added |
+| `delay_syn2` | 0 | 3 | 1 (spi_master) | added |
+| `delay_resyn3` (resub ladder) | 0 | 4 | 0 | not adopted |
+| `area_amap` | 0 | 9 | 0 | not adopted (Pareto points are area-only, all fail timing) |
+| `area_deepsyn` (`&deepsyn -T 4`) | 0 | 9 | 0 | not adopted; 7× runtime |
+| `area_relax50` / `area_relax200` (`&nf -R`) | 0 | 0 / 5 | 0 | not adopted |
+
+`delay_map` is the classic supergate mapper instead of `&nf`. It maps for
+delay with duplication (alu32: 2453 cells vs 2055), which is exactly the
+trade the area-flow mapper refuses; verified fully mapped and equivalent by
+4000-cycle random simulation on four designs. `delay_map_resyn` (resyn2 then
+`dch -f; map`) was added untested as its natural companion; the pipeline
+bench decides whether it stays.
+
 ## Library experiment — `fulllib.csv`
 
 `./bench.py --use-sdc --lib-dir <sky130A/libs.ref/sky130_fd_sc_hd/lib> --set "dont_use=[lpflow_*, probe*, dly*, clkdly*, sdlclkp*]"`:
