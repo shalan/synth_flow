@@ -1,0 +1,5 @@
+# delay_map_resyn — DELAY: resyn2 cleanup, then choices + classic mapper (map); sizing uses the liberty wire-load model (-c)
+strash;
+balance; rewrite; refactor; balance; rewrite;
+rewrite -z; balance; refactor -z; rewrite -z; balance;
+dch -f; map; buffer -c; topo; upsize -c {D}; dnsize -c {D}; stime -c

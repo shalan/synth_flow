@@ -64,9 +64,13 @@ depth estimate, no mapping).
 
 ### Winner selection
 
-Each netlist gets a quick OpenSTA run at the slow corner (`QSTA_TCL`). The
-objective (`delay`, `area`, `fastest`, `balanced`, `pareto`) picks a winner
-from `(wns, tns, area, cells)`. The user SDC, if configured, is sourced into
+Each netlist gets a quick OpenSTA run at the slow corner (`QSTA_TCL`); the
+runs are independent processes and go through the same worker pool as
+synthesis (108 candidates: 0.5 to 3 s on 18 workers versus 6 s serial). One
+rule for every objective: the candidate that meets timing (WNS ≥
+`select_margin_ps`) with the least area; if none meets, the knee of the
+WNS/area Pareto front (`fallback: knee`) or the fastest (`best_wns`). The
+objective only chose which recipes ran. The user SDC, if configured, is sourced into
 both STA scripts after the tool's own `create_clock`.
 
 Known inconsistencies, fixed in Phase 0 of the roadmap:
@@ -285,6 +289,51 @@ forbids that and rolls back to the input). Sizing is function-preserving
 by construction, so no equivalence check is needed. It is available in the
 flow as `resize_winner: true` / `--resize`, applied to each module's winner
 before the multi-corner STA; `winner.presize.v` keeps the input.
+
+### 2.8 `abc_new` (Yosys 0.68, experimental) is not ready for standard cells
+
+`abc_new` drives ABC through `abc9_exe` with an XAIGER interface and box
+files, the path built for FPGA LUT mapping. Measured with a pure GIA script
+(`&st; &dch -f; &nf`), the same constraint file, and OpenSTA at SS:
+
+| design | `abc` WNS / area | `abc_new` WNS / area | equivalent (3000-cycle random sim) |
+|---|---|---|---|
+| uart | −0.018 / 3880 | −0.303 / 4006 | yes |
+| alu32 | −1.599 / 11001 | −4.517 / 10772 | yes |
+| apb_timer | −0.597 / 11295 | −4.119 / 13345 | yes |
+
+Pitfalls found on the way: it must run before `dfflibmap` (after it, liberty
+flops with `RESET_B` fail with "Bad connection"); `dfflibmap` then emits
+`$_MUX_` cells for enable flops that a second plain `abc` has to map; and
+until that pass is added `stat` and OpenSTA silently ignore the unmapped
+cells, which made the first numbers (alu32 "+6.8 ns", −23 % area) look
+spectacular and were wrong. The mapped GIA comes back without the
+`buffer`/`upsize`/`dnsize` steps of the SCL flow and with flops as plain
+inputs (`box = 0`), so every cell is minimum drive. Revisit when Yosys
+derives boxes for liberty flops and the SCL sizing is reachable from the
+GIA path.
+
+### 2.9 ABC's own wire-load model: on for the `map` recipes
+
+ABC's SCL commands `buffer`, `upsize`, `dnsize` and `stime` accept `-c`,
+"use wire-loads if specified", and read the liberty's `default_wire_load`
+(`Small` here). No recipe used it, so ABC sized against pure pin
+capacitance while OpenSTA charged the wire-load table, one of the mismatches
+behind the sizing gaps of §2.5 and §2.7. Paired bench, each recipe with and
+without `-c` on all 16 designs (`bench/results/wireload.csv`):
+
+| recipe | mean ΔWNS | better / worse designs | mean Δarea |
+|---|---|---|---|
+| `delay_map_resyn` | +0.035 ns | 10 / 0 | +0.6 % |
+| `delay_map` | +0.086 ns | 10 / 3 | +1.7 % |
+| `balanced_resyn2x` | −0.003 ns | 12 / 2 | +0.7 % |
+| `orfs_speed` | −0.007 ns | 4 / 6 | +0.6 % |
+| `delay_choice_deep_v3` | −0.019 ns | 7 / 6 | +0.4 % |
+
+The `map` mapper's netlists, with their duplication and higher fanout,
+respond to the wire-load-aware sizing; the `&nf` netlists do not. `-c` is
+baked into `delay_map` and `delay_map_resyn`; `abc_wire_load: true`
+(`--abc-wire-load`) adds it to every recipe for experiments.
 
 ## 3. Target architecture (revised after §2.5)
 

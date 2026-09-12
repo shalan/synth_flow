@@ -1,0 +1,2 @@
+# orfs_area — AREA: ORFS/OpenLane AREA-style script (&syn2, SOP-balanced &if, &synch2, &nf)
+strash; &get -n; &st; &syn2; &if -g -K 6; &synch2; &nf {D}; &put; buffer; topo; upsize {D}; dnsize {D}; stime

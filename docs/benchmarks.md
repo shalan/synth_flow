@@ -5,35 +5,47 @@
 recipe, a flow change or a library choice should be backed by a `bench.py`
 run, and every before/after comparison by `bench.py --compare`.
 
-## Headline result — `pipeline.csv`
+## Headline result — `obj-*.csv`
 
-The whole flow as it stands (six front-end variants × 16 recipes, winner by
-slow-corner OpenSTA, then OpenSTA-guided sizing) against the ORFS/OpenLane
-reference (plain Yosys front end, `orfs_speed` recipe, no sizing), both at
-the SS corner with each design's SDC, area in µm²:
+The flow as it stands, per objective, against the ORFS/OpenLane reference
+(plain Yosys front end, `orfs_speed`, no sizing), SS corner, per-design SDC.
+Every run: 6 front-end variants per recipe, winner = the candidate that meets
+timing with the least area (fallback best WNS), then OpenSTA-guided sizing.
+Objectives differ only in the recipe subset (5 each) or all 18 (`--full-sweep`).
 
-| design | ORFS reference WNS / area | pipeline final WNS / area | ΔWNS | Δarea |
-|---|---|---|---|---|
-| alu32 | -1.947 / 10884 | -0.160 / 11760 | +1.787 | +8.0 % |
-| mul16_pipe | -0.435 / 12391 | +0.220 / 9483 | +0.655 | -23.5 % |
-| mul32_mac | -2.725 / 39508 | -1.490 / 41814 | +1.235 | +5.8 % |
-| fir8 | +0.323 / 13294 | +0.620 / 15014 | +0.297 | +12.9 % |
-| aes_round | +1.265 / 55919 | +1.400 / 53538 | +0.135 | -4.3 % |
-| sha256_core | -0.214 / 67690 | +0.730 / 68230 | +0.944 | +0.8 % |
-| crc32_8 | -0.131 / 2251 | -0.020 / 2168 | +0.111 | -3.7 % |
-| rr_arbiter16 | -0.723 / 3052 | -0.380 / 3087 | +0.343 | +1.1 % |
-| uart | -0.101 / 3784 | +0.310 / 3940 | +0.411 | +4.1 % |
-| spi_master | -0.378 / 4716 | +0.190 / 4853 | +0.568 | +2.9 % |
-| apb_timer | -0.079 / 11295 | +0.020 / 11866 | +0.099 | +5.1 % |
-| fifo_sync | -1.302 / 26410 | -0.710 / 29439 | +0.592 | +11.5 % |
-| zx16_core_ahb | -0.724 / 20202 | -0.060 / 21660 | +0.664 | +7.2 % |
-| zxip | -2.322 / 160807 | -0.470 / 161572 | +1.852 | +0.5 % |
-| ms_psram_ahb | -1.134 / 26906 | +0.100 / 25149 | +1.234 | -6.5 % |
-| uart_apb_sys | +3.968 / 16714 | +3.940 / 16917 | -0.028 | +1.2 % |
-| **mean / count** | **3 / 16 meet timing** | **9 / 16 meet timing** | **+0.681 ns** | **+1.5 %** |
+| design | ORFS ref WNS | `delay` WNS / Δarea | `balanced` WNS / Δarea | `area` WNS / Δarea | `--full-sweep` WNS / Δarea |
+|---|---|---|---|---|---|
+| alu32 | -1.947 | +0.470 / +6.5 % | +0.470 / +6.5 % | -1.190 / +3.9 % | +0.470 / +6.5 % |
+| mul16_pipe | -0.435 | +0.920 / -3.2 % | +0.020 / -26.0 % | -1.820 / +3.4 % | +0.020 / -26.0 % |
+| mul32_mac | -2.725 | -0.560 / +54.2 % | -0.560 / +54.2 % | -5.730 / +3.2 % | -0.560 / +54.2 % |
+| fir8 | +0.323 | +0.210 / +0.3 % | +0.160 / -2.1 % | -0.330 / +6.6 % | +0.160 / -2.1 % |
+| aes_round | +1.265 | +1.360 / +2.5 % | +1.310 / -6.0 % | +0.960 / -11.2 % | +0.960 / -11.2 % |
+| sha256_core | -0.214 | -0.000 / +3.6 % | +0.060 / -2.2 % | -2.240 / -3.2 % | +0.060 / -2.2 % |
+| crc32_8 | -0.131 | +0.180 / +12.8 % | +0.270 / +23.5 % | -0.240 / +0.5 % | +0.180 / +12.8 % |
+| rr_arbiter16 | -0.723 | +0.010 / +26.7 % | -0.010 / +25.1 % | -0.480 / -0.8 % | +0.010 / +26.7 % |
+| uart | -0.101 | +0.010 / -1.7 % | +0.070 / -2.7 % | -0.950 / -8.5 % | +0.070 / -2.7 % |
+| spi_master | -0.378 | +0.120 / -0.7 % | +0.290 / +11.1 % | +0.010 / -3.4 % | +0.010 / -3.4 % |
+| apb_timer | -0.079 | +0.110 / +0.5 % | +0.040 / +1.2 % | -2.270 / -3.1 % | +0.110 / +0.5 % |
+| fifo_sync | -1.302 | +0.030 / +3.2 % | +0.030 / +3.2 % | -0.710 / +11.5 % | +0.030 / +3.2 % |
+| zx16_core_ahb | -0.724 | +0.110 / +1.8 % | +0.110 / +1.8 % | -0.770 / -1.8 % | +0.110 / +1.8 % |
+| zxip | -2.322 | -0.470 / +0.5 % | -0.670 / -0.1 % | -0.840 / -0.9 % | -0.470 / +0.5 % |
+| ms_psram_ahb | -1.134 | +0.470 / -8.1 % | +0.100 / -6.5 % | +0.500 / -6.8 % | +0.100 / -6.5 % |
+| uart_apb_sys | +3.968 | +3.450 / -2.8 % | +3.530 / -4.5 % | +0.090 / -6.6 % | +0.090 / -6.6 % |
+| **meeting / mean ΔWNS / mean Δarea / time** | 3 / 16 | **14 / 16, +0.82 ns, +6.0 %, 38 s** | **13 / 16, +0.74 ns, +4.8 %, 115 s** | **4 / 16, -0.58 ns, -1.1 %, 68 s** | **14 / 16, +0.50 ns, +2.8 %, 295 s** |
 
-Reproduce: `./bench.py --use-sdc --set 'yosys_opts_sweep=[[],[adder=kogge-stone],[adder=han-carlson],[adder=sklansky],[booth],[booth,adder=kogge-stone]]' --set resize_winner=true --tag pipeline`.
-Runtime: 16 to 51 s per design (16k-cell zxip: ~3 min) on an 18-core laptop.
+Reading: the `delay` subset closes as many designs as the full sweep in an
+eighth of the time and is the default. `obj-delay2.csv` is the same run after
+parallel quick STA and the knee fallback: still 14/16, +0.73 ns, +2.7 % area,
+95 s wall time for all 16 designs (mul32_mac now −1.84 ns at +2.0 % instead
+of −0.56 ns at +54 %; zxip −0.67 ns at −0.1 %); the full sweep buys area back where
+several candidates close; the `area` subset is for relaxed periods (only 4
+designs close at these periods, area −1.1 %). The two designs no objective
+closes are mul32_mac (−0.56 ns at 16 ns; the fallback picks the fastest
+netlist, hence +54 % area) and zxip (−0.47 ns at 10 ns, the repo's own SDC).
+`pipeline2*.csv` are the earlier runs with the previous per-objective
+selection rules.
+
+Reproduce: `./bench.py --use-sdc --objective delay --set 'yosys_opts_sweep=[[],[adder=kogge-stone],[adder=han-carlson],[adder=sklansky],[booth],[booth,adder=kogge-stone]]' --set resize_winner=true --tag <name>` (add `--set full_sweep=true` for all recipes).
 
 ## Quick start
 
@@ -255,6 +267,30 @@ default. `sweep6.csv` is the flow's own run with all six variants
 (`yosys_opts_sweep`, 96 candidates per design): winners meeting timing
 6 → 9 of 16, mean best-WNS +0.236 ns, identical to the best-of analysis.
 Runtime per design 21 s (crc32_8) to 986 s (zxip, 16k cells).
+
+## New-recipe candidates — `newrecipes.csv`
+
+Eight candidate recipes run with the plain front end and scored against the
+16 existing recipes on every design (`--set recipes_dir=<dir>`):
+
+| candidate | best-WNS designs | Pareto points | smallest timing-meeting | verdict |
+|---|---|---|---|---|
+| `delay_map` (`strash; dch -f; map; buffer; topo; upsize; dnsize`) | 12 / 16 | 12 | 6 | **added**; closes alu32, mul16_pipe, sha256_core, crc32_8, rr_arbiter16, zx16_core_ahb that nothing else closed, at +8 to +60 % area |
+| `orfs_area` (`&syn2; &if -g; &synch2; &nf`) | 1 (aes_round) | 3 | 0 | added |
+| `delay_syn2` | 0 | 3 | 1 (spi_master) | added |
+| `delay_resyn3` (resub ladder) | 0 | 4 | 0 | not adopted |
+| `area_amap` | 0 | 9 | 0 | not adopted (Pareto points are area-only, all fail timing) |
+| `area_deepsyn` (`&deepsyn -T 4`) | 0 | 9 | 0 | not adopted; 7× runtime |
+| `area_relax50` / `area_relax200` (`&nf -R`) | 0 | 0 / 5 | 0 | not adopted |
+
+`delay_map` is the classic supergate mapper instead of `&nf`. It maps for
+delay with duplication (alu32: 2453 cells vs 2055), which is exactly the
+trade the area-flow mapper refuses; verified fully mapped and equivalent by
+4000-cycle random simulation on four designs. `delay_map_resyn` (resyn2 then
+`dch -f; map`) was added as its natural companion and became the most
+frequent winner of the pipeline bench (8/16 under `pareto`, 4/16 under
+`area`). Second-round retirements from the same data: `area_safe`,
+`delay_choice_deep_v2` (never winners, fewest Pareto points).
 
 ## Library experiment — `fulllib.csv`
 

@@ -13,8 +13,8 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
   Yosys front-end variants (Booth multipliers, Kogge-Stone / Han-Carlson /
   Sklansky adders), and picks the best result per module using the
   slow-corner (SS) for WNS ranking
-- **16 built-in recipes** — delay, balanced, and area strategies, pruned
-  against a 16-design STA benchmark (retired ones in `recipes/retired/`)
+- **18 built-in recipes** — delay, balanced, and area strategies, pruned and
+  extended against a 16-design STA benchmark (retired ones in `recipes/retired/`)
 - **5 optimization objectives** — `delay`, `area`, `fastest`, `pareto`,
   `balanced`
 - **SDC in, SDC out** — one SDC drives OpenSTA verbatim and synthesis
@@ -105,12 +105,15 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--abc-target T` | ABC `-D`: `none` (default), `period`, `reg2reg`, or ps. Measured: `none` is best (docs/architecture.md §2.6) |
 | `--resize` | OpenSTA-guided drive-strength sizing of each winner (`winner.presize.v` keeps the input) |
 | `--yosys-opts T...` | Front-end options: `booth`, `adder=kogge-stone\|han-carlson\|sklansky`, `noshare`, `hieropt`. Sweep several with `yosys_opts_sweep` in YAML |
-| `--objective OBJ` | `delay`, `area`, `fastest`, `pareto`, `balanced` |
+| `--objective OBJ` | Recipe subset to run: `delay`, `area`, `balanced` (default). Selection is always min-area-meeting-timing |
+| `--full-sweep` | Run every recipe instead of the objective subset |
+| `--select-margin-ps N` | WNS a candidate needs to count as meeting timing (default 0) |
+| `--fallback knee\|best_wns` | Pick when nothing meets timing: knee of the WNS/area front (default) or the fastest netlist |
+| `--parallel N` | Workers for synthesis and quick STA (0 = all cores) |
 | `--modules M1 M2` | Modules to synthesize (default: auto-detect) |
-| `--recipes R1 R2` | Recipes to sweep (default: all) |
+| `--recipes R1 R2` | Recipes to sweep (default: the objective's subset) |
 | `--driving-cell CELL` | ABC driving cell |
 | `--load-ff LOAD` | ABC load in fF |
-| `--parallel N` | Worker count (0 = auto) |
 | `--no-sta` | Skip multi-corner STA |
 | `--no-gls` | Skip gate-level simulation |
 | `--abc-sequential` | Enable ABC `-dff` (experimental) |
@@ -171,7 +174,7 @@ CLI form is flat-list only; use the YAML dict for per-corner control.
 
 ## Recipes
 
-16 ABC scripts in `recipes/*.abc`, all compatible with ABC 1.01+. Each recipe
+18 ABC scripts in `recipes/*.abc`, all compatible with ABC 1.01+. Each recipe
 uses only commands confirmed available: `strash`, `ifraig`, `scorr`, `dc2`,
 `dretime`, `balance`, `rewrite`, `refactor`, `dch`, `map`, `mfs`, and the GIA
 subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
@@ -179,9 +182,11 @@ subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
 
 | Recipe | Class | Strategy | Runtime |
 |--------|-------|----------|---------|
+| `delay_map` | Delay | `dch -f` choices + classic supergate `map`; best WNS on 12/16 bench designs, +8..60 % area | 1.0× |
+| `delay_map_resyn` | Delay | resyn2 cleanup, then `dch -f; map` | 1.3× |
+| `delay_syn2` | Delay | `&syn2` restructuring before choices + `&nf` | 1.0× |
 | `delay_triple` | Delay | Triple-pass remap with sizing | 1.4× |
 | `delay_choice_deep` | Delay | Choice-driven (`&dch; &nf`), 2 sizing rounds | 1.0× |
-| `delay_choice_deep_v2` | Delay | As above, 3 sizing rounds | 1.0× |
 | `delay_choice_deep_v3` | Delay | `&dch -f` (more choices); best mean WNS rank in the baseline | 1.0× |
 | `delay_choice_deep_v4` | Delay | `&b` before `&dch` | 1.0× |
 | `delay_choice_deep_bb` | Delay | Double `&b` before `&dch` | 1.0× |
@@ -189,7 +194,7 @@ subset (`&get`, `&st`, `&dch`, `&nf`, `&put`, `&scl`, `&lcorr`, `&if`,
 | `delay_iter_heavy` | Delay | Quadruple-pass explicit unrolling | 1.7× |
 | `balanced_resyn` | Balanced | Inlined resyn2 + single GIA map | 1.0× |
 | `balanced_resyn2x` | Balanced | Two rewriting passes + double map | 1.4× |
-| `area_safe` | Area | Full AIG cleanup + retiming + GIA mapping | 1.2× |
+| `orfs_area` | Area | ORFS AREA-style: `&syn2; &if -g; &synch2; &nf` | 1.0× |
 | `area_classic` | Area | Rewriting + scorr/dc2 + GIA mapping | 1.1× |
 | `area_lut6` | Area | Heavy scorr + dc2 + dretime + rewriting | 1.2× |
 | `area_max` | Area | Double everything + retiming + double map | 1.3× |
@@ -202,17 +207,23 @@ retired after benchmarking live in `recipes/retired/` with the reasons.
 
 ## Objectives
 
-| Objective | Selection Strategy |
-|-----------|-------------------|
-| `delay` | Maximize WNS (SS corner), then minimize area |
-| `area` | Minimize area among timing-meeting recipes, fallback to max WNS |
-| `fastest` | Max WNS among timing-meeting |
-| `balanced` | Equal-weight rank score on WNS and area |
-| `pareto` | Reports Pareto front, picks max-WNS representative |
+`objective` chooses **which recipes run**; the winner is always chosen the
+same way: the candidate that meets timing (slow-corner WNS ≥
+`select_margin_ps`) with the least area. When nothing meets, the knee of the
+WNS/area front is returned (`fallback: knee`; `best_wns` returns the fastest
+netlist regardless of area). The subsets are the top-5 of each leaderboard on the
+16-design bench (`docs/benchmarks.md`).
 
-**Note:** WNS ranking uses `lib_slow` (SS corner) by default so the winner
-meets timing at worst-case conditions. Set `objective: pareto` to see the
-full trade-off space.
+| Objective | Recipes run | When to use |
+|-----------|-------------|-------------|
+| `delay` (default) | `delay_map_resyn`, `delay_map`, `orfs_area`, `delay_choice_deep_v3`, `delay_syn2` | closing a clock period; closes as many bench designs as the full sweep in 1/8 of the time |
+| `area` | `delay_aggressive`, `area_lut6`, `area_max`, `yosys_default`, `area_classic` | relaxed period, smallest netlist |
+| `balanced` | `balanced_resyn`, `balanced_resyn2x`, `delay_triple`, `delay_iter_heavy`, `delay_map_resyn` | general use |
+| `--full-sweep` | all 18 | final characterization |
+
+`--recipes R1 R2` overrides the subset. `fastest` and `pareto` are accepted
+as aliases of `delay` and `balanced` for old configs. With `yosys_opts_sweep`
+each recipe also runs once per front-end variant.
 
 ## Hierarchical Mode
 
@@ -244,7 +255,7 @@ synth_flow/
   synth_flow.py       # Main orchestrator
   area_report.py      # Cell count + area report utility
   test_synth_flow.py  # Unit tests (no EDA tools needed)
-  recipes/            # 16 ABC recipe scripts (+ retired/)
+  recipes/            # 18 ABC recipe scripts (+ retired/)
   sky130/             # Curated Sky130 HD PDK subset
     hd_120_tt.lib     # Stripped TT liberty (synthesis)
     abc_constr.txt    # ABC constraints
@@ -261,11 +272,15 @@ On the 16-design benchmark (Sky130 HD, SS corner, per-design SDC), the full
 flow (front-end sweep × recipe sweep × OpenSTA-guided sizing) against the
 ORFS/OpenLane reference (plain Yosys, `orfs_speed`, no sizing):
 
-| | ORFS reference | synth_flow |
-|---|---|---|
-| designs meeting timing | 3 / 16 | 9 / 16 |
-| mean ΔWNS | — | +0.68 ns |
-| mean Δarea | — | +1.5 % |
+| | ORFS reference | `objective: delay` (default, 5 recipes) | `--full-sweep` (18 recipes) |
+|---|---|---|---|
+| designs meeting timing | 3 / 16 | 14 / 16 | 14 / 16 |
+| mean ΔWNS | — | +0.73 ns | +0.50 ns |
+| mean Δarea | — | +2.7 % | +2.8 % |
+| wall time per design (18 cores, incl. STA and sizing) | — | 6 s (2 to 30 s) | ~40 s |
+
+Winner rule in both: the candidate that meets timing with the least area. Both
+sweep 6 front-end variants per recipe and finish with OpenSTA-guided sizing.
 
 Per-design numbers and every intermediate experiment (including the negative
 ones) are in [docs/benchmarks.md](docs/benchmarks.md).

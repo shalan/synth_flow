@@ -1,0 +1,2 @@
+# delay_map — DELAY: classic supergate mapper (map) after choice computation; fastest on 12/16 bench designs, more area; sizing uses the liberty wire-load model (-c)
+strash; dch -f; map; buffer -c; topo; upsize -c {D}; dnsize -c {D}; stime -c

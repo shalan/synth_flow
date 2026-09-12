@@ -1,0 +1,2 @@
+# delay_syn2 — DELAY: &syn2 restructuring before choices + GIA mapping, extra sizing round
+strash; &get -n; &st; &syn2; &st; &dch -f; &nf {D}; &put; buffer; topo; upsize {D}; dnsize {D}; upsize {D}; dnsize {D}; stime

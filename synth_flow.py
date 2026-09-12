@@ -5,7 +5,7 @@
 synth_flow.py — generic ASIC synthesis + STA + GLS orchestrator.
 
 Sweeps multiple ABC recipes per RTL module, picks the winner per a chosen
-objective (delay / area / fastest / pareto / balanced), runs multi-corner
+objective (delay / area / balanced recipe sets; winner = min area meeting timing), runs multi-corner
 OpenSTA (FF/TT/SS) on winners, and optionally runs gate-level simulation
 with iverilog.  Supports flat and hierarchical (bottom-up) synthesis modes.
 
@@ -68,22 +68,33 @@ DEFAULT_RECIPES_DIR = SCRIPT_DIR / 'recipes'
 
 # Stability tiebreaker — lower index = preferred when QoR ties.
 # Order: fastest-and-most-robust first, exotic/heavy recipes last.
+# Recipe subsets per objective. Top-5 of the 108-candidate pipeline bench
+# (bench/results/pipeline2.csv, 2026-09-12): normalized gap to the best
+# candidate per design, mean over 16 designs. --full-sweep runs every recipe.
+RECIPE_SETS = {
+    'delay':    ['delay_map_resyn', 'delay_map', 'orfs_area', 'delay_choice_deep_v3', 'delay_syn2'],
+    'area':     ['delay_aggressive', 'area_lut6', 'area_max', 'yosys_default', 'area_classic'],
+    'balanced': ['balanced_resyn', 'balanced_resyn2x', 'delay_triple', 'delay_iter_heavy', 'delay_map_resyn'],
+}
+
 # Tie-break order for winner selection (lower = preferred when metrics tie).
-# Ordered by mean WNS rank across the 16-design STA baseline
-# (bench/results/baseline-sta.csv, 2026-09-12); references last.
+# Ordered by mean WNS rank across the 16-design STA bench (2026-09-12:
+# baseline-noD.csv, newrecipes.csv); references last.
 RECIPE_PRIORITY = [
+    'delay_map',
+    'delay_map_resyn',
     'delay_choice_deep_v3',
     'delay_triple',
     'delay_iter_heavy',
     'balanced_resyn',
     'delay_choice_deep',
     'balanced_resyn2x',
-    'delay_choice_deep_v2',
+    'delay_syn2',
     'delay_choice_deep_bb',
     'delay_aggressive',
-    'area_safe',
     'delay_choice_deep_v4',
     'area_classic',
+    'orfs_area',
     'area_lut6',
     'area_max',
     'orfs_speed',
@@ -164,7 +175,22 @@ class Config:
     clock_port: str = 'clk'
     clock_port_2: Optional[str] = None
     period_ps_2: Optional[int] = None
-    objective: str = 'delay'  # delay | area | fastest | pareto | balanced
+    # objective picks WHICH recipes run (RECIPE_SETS); the winner is always the
+    # candidate that meets timing (WNS >= select_margin_ps) with the least
+    # area, falling back to best WNS when nothing meets. 'fastest' and
+    # 'pareto' are accepted as aliases (delay / balanced) for old configs.
+    objective: str = 'delay'
+    full_sweep: bool = False           # run every recipe regardless of objective
+    select_margin_ps: int = 0          # slack a candidate needs to count as meeting timing
+    # When no candidate meets timing:
+    #   knee     (default) the knee of the WNS/area Pareto front among the
+    #            failing candidates: closest point to (best WNS, least area)
+    #            after normalizing both axes over the front, with WNS clipped
+    #            to one period below the best so hopeless candidates do not
+    #            stretch the scale. Parameter-free. mul32_mac: -2.07 ns at
+    #            40 142 um2 instead of -0.57 ns at 60 888 (+52 %).
+    #   best_wns the fastest candidate regardless of area (old behaviour).
+    fallback: str = 'knee'
     modules: list[str] = field(default_factory=list)  # empty = auto-detect
     recipes: list[str] = field(default_factory=list)  # empty = all available
     params: dict = field(default_factory=dict)  # {module: {param: value}}
@@ -194,6 +220,10 @@ class Config:
     #   'reg2reg' T - t_cq - t_su - setup uncertainty from the synthesis liberty
     #   '<ps>'    explicit integer
     abc_target: str = 'none'
+    # Make ABC's buffer/upsize/dnsize/stime use the liberty wire-load model
+    # (`-c`) in every recipe. Measured: clear gain only for the `map`-based
+    # recipes (baked into delay_map*.abc); noise for `&nf` recipes. Off by default.
+    abc_wire_load: bool = False
     # OpenSTA-guided drive-strength sizing of each module's winner (resize.py).
     # Sizing only, function preserved; measured on the bench: TNS down on every
     # failing design for <1 % area on most (docs/architecture.md §2.7).
@@ -319,8 +349,10 @@ class Config:
             for f in self.tb_files:
                 if not Path(f).exists():
                     errs.append(f"tb file missing: {f}")
-        if self.objective not in ('delay', 'area', 'fastest', 'pareto', 'balanced'):
-            errs.append(f"objective must be delay|area|fastest|pareto|balanced, got {self.objective}")
+        if self.objective not in ('delay', 'area', 'balanced', 'fastest', 'pareto'):
+            errs.append(f"objective must be delay|area|balanced, got {self.objective}")
+        if self.fallback not in ('knee', 'best_wns'):
+            errs.append(f"fallback must be knee|best_wns, got {self.fallback}")
         if self.parallel < 0:
             errs.append("parallel must be >= 0")
         if self.run_sta:
@@ -1108,7 +1140,7 @@ def _parse_groups_txt(path: Path) -> list[dict]:
     return out
 
 
-def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path) -> Path:
+def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path, wire_load: bool = False) -> Path:
     """Write a copy of the recipe with `{D}` replaced by `-D <d_ps>`.
 
     Yosys only substitutes {D} in inline (`-script +...`) scripts; a script
@@ -1120,7 +1152,11 @@ def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path) -> Pa
     text = src.read_text()
     d_ps = int(d_ps or 0)
     text = text.replace('{D}', f'-D {d_ps}' if d_ps > 0 else '')
+    if wire_load:
+        text = re.sub(r'\b(buffer|upsize|dnsize|stime)\b(?! -c)', r'\1 -c', text)
     out = out_dir / (f'{src.stem}.D{d_ps}.abc' if d_ps > 0 else f'{src.stem}.noD.abc')
+    if wire_load:
+        out = out.with_suffix('.wl.abc')
     out.write_text(text)
     return out
 
@@ -1167,7 +1203,7 @@ def run_recipe(args: dict) -> RecipeResult:
     groups_spec = args.get('groups')
     groups_txt = workdir / f'{recipe}.groups.txt'
     d_ps = int(cfg.get('abc_d_ps', cfg['period_ps']))
-    recipe_path = str(_materialize_recipe(recipe_path, d_ps, workdir))
+    recipe_path = str(_materialize_recipe(recipe_path, d_ps, workdir, bool(cfg.get('abc_wire_load'))))
     if dep_netlists:
         template = YOSYS_DRIVER_HIER
     elif cfg.get('abc_sequential', False):
@@ -1418,6 +1454,21 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
     finally:
         os.unlink(tcl)
 
+def _quick_sta_job(args: dict) -> tuple[str, Optional[float], Optional[float]]:
+    """Pool worker: one quick STA. Returns (recipe, wns_ns, tns_ns)."""
+    cfg = args['cfg']
+    corner = 'slow' if cfg.get('lib_slow') else 'typ'
+    wns, tns = _quick_sta(
+        cfg['opensta'], cfg.get('lib_slow') or cfg['lib_typ'], args['netlist'], args['module'],
+        cfg['period_ps'], cfg['clock_port'], Path(args['log']),
+        clock_port_2=cfg.get('clock_port_2'), period_ps_2=cfg.get('period_ps_2'),
+        macro_libs=(cfg.get('macro_libs') or {}).get(corner, []),
+        sdc=cfg.get('sdc'), driving_cell=cfg['driving_cell'], load_ff=cfg['load_ff'],
+        unc_setup_ps=cfg['clock_uncertainty_setup_ps'], unc_hold_ps=cfg['clock_uncertainty_hold_ps'],
+        wire_load_model=cfg['wire_load_model'], io_delay_frac=cfg['io_delay_frac'])
+    return args['recipe'], wns, tns
+
+
 # ============================================================================
 # Winner selection
 # ============================================================================
@@ -1463,83 +1514,69 @@ def _pareto_front(cands: list[Candidate]) -> list[str]:
             front.append(c.recipe)
     return front
 
-def select_winner(cands: list[Candidate], objective: str) -> Selection:
+def _pareto_knee(cands: list[Candidate], clip_ns: Optional[float] = None) -> Optional[Candidate]:
+    """Knee of the WNS/area Pareto front: the front point closest to the utopia
+    (best WNS, least area) after normalizing both axes over the front.
+    Candidates more than `clip_ns` below the best WNS are ignored so a few
+    hopeless points do not compress the WNS axis. None if the front has fewer
+    than three points (nothing to trade off)."""
     valid = [c for c in cands if c.wns_ns is not None]
+    if not valid:
+        return None
+    best_w = max(c.wns_ns for c in valid)
+    if clip_ns is not None and clip_ns > 0:
+        valid = [c for c in valid if c.wns_ns >= best_w - clip_ns]
+    front = [c for c in valid if not any(
+        (o.area <= c.area and o.wns_ns >= c.wns_ns) and (o.area < c.area or o.wns_ns > c.wns_ns)
+        for o in valid if o is not c)]
+    if len(front) < 3:
+        return None
+    w_lo, w_hi = min(c.wns_ns for c in front), max(c.wns_ns for c in front)
+    a_lo, a_hi = min(c.area for c in front), max(c.area for c in front)
+    if w_hi - w_lo <= 1e-9 or a_hi - a_lo <= 1e-9:
+        return None
+    def dist(c):
+        wn = (w_hi - c.wns_ns) / (w_hi - w_lo)      # 0 = fastest
+        an = (c.area - a_lo) / (a_hi - a_lo)        # 0 = smallest
+        return (wn * wn + an * an) ** 0.5
+    return min(front, key=lambda c: (dist(c), -c.wns_ns, _stability_idx(c.recipe)))
+
+
+def select_winner(cands: list[Candidate], objective: str = 'balanced',
+                  margin_ns: float = 0.0, fallback: str = 'knee',
+                  period_ns: Optional[float] = None) -> Selection:
+    """One rule for every objective: the candidate that meets timing
+    (WNS >= margin) with the least area; if none meets, the knee of the
+    WNS/area Pareto front (`fallback='knee'`) or the best WNS (`'best_wns'`).
+    `objective` only labels the selection; it chose the recipe set upstream.
+    Ties break on RECIPE_PRIORITY."""
+    valid = [c for c in cands if c.wns_ns is not None]
+    front = _pareto_front(cands) if valid else []
     if not valid:
         succeeded = [c for c in cands if c.netlist]
         if succeeded:
             winner = min(succeeded, key=lambda c: (c.area, _stability_idx(c.recipe)))
-            return Selection(
-                module='',
-                objective=objective,
-                winner=winner.recipe,
-                candidates=cands,
-                rationale=f'no WNS data; fallback to min area ({winner.area:.1f} um²)',
-            )
-        return Selection(
-            module='',  # filled by caller
-            objective=objective,
-            winner=None,
-            candidates=cands,
-            rationale='no valid candidates (all failed synthesis or STA)',
-        )
-
-    front = _pareto_front(cands)
-
-    if objective == 'delay':
-        # max wns -> min area -> stability
-        winner = max(valid, key=lambda c: (c.wns_ns, -c.area, -_stability_idx(c.recipe)))
-        rationale = f'max WNS ({winner.wns_ns:.3f} ns)'
-
-    elif objective == 'area':
-        meeting = [c for c in valid if c.wns_ns >= 0]
-        if meeting:
-            winner = min(meeting, key=lambda c: (c.area, -c.wns_ns, _stability_idx(c.recipe)))
-            rationale = f'min area among timing-meeting ({winner.area:.1f} um²)'
-        else:
-            # fallback: nothing meets timing, pick best WNS
-            winner = max(valid, key=lambda c: (c.wns_ns, -c.area))
-            rationale = f'no recipe meets timing; fallback to max WNS ({winner.wns_ns:.3f} ns)'
-
-    elif objective == 'fastest':
-        meeting = [c for c in valid if c.wns_ns >= 0]
-        if meeting:
-            winner = max(meeting, key=lambda c: (c.wns_ns, -c.area, -_stability_idx(c.recipe)))
-            rationale = f'min delay among timing-meeting (WNS={winner.wns_ns:.3f} ns)'
-        else:
-            winner = max(valid, key=lambda c: (c.wns_ns, -c.area))
-            rationale = f'no recipe meets timing; fallback to max WNS ({winner.wns_ns:.3f} ns)'
-
-    elif objective == 'balanced':
-        # 50/50 normalized score: WNS rank + (1/area) rank, both descending
-        wns_sorted = sorted(valid, key=lambda c: c.wns_ns, reverse=True)
-        area_sorted = sorted(valid, key=lambda c: c.area)
-        score = {}
-        for i, c in enumerate(wns_sorted):
-            score.setdefault(c.recipe, 0)
-            score[c.recipe] += i  # lower = better
-        for i, c in enumerate(area_sorted):
-            score[c.recipe] += i
-        winner = min(valid, key=lambda c: (score[c.recipe], _stability_idx(c.recipe)))
-        rationale = f'balanced rank: score={score[winner.recipe]}'
-
-    elif objective == 'pareto':
-        # report front, but pick a representative: highest-WNS on the front
-        front_cands = [c for c in valid if c.recipe in front]
-        winner = max(front_cands or valid, key=lambda c: c.wns_ns)
-        rationale = f'pareto front: {", ".join(front)} (representative: max-WNS)'
-
+            return Selection(module='', objective=objective, winner=winner.recipe, candidates=cands,
+                             rationale=f'no WNS data; fallback to min area ({winner.area:.1f} um²)')
+        return Selection(module='', objective=objective, winner=None, candidates=cands,
+                         rationale='no valid candidates (all failed synthesis or STA)')
+    meeting = [c for c in valid if c.wns_ns >= margin_ns]
+    if meeting:
+        winner = min(meeting, key=lambda c: (c.area, -c.wns_ns, _stability_idx(c.recipe)))
+        rationale = (f'min area among {len(meeting)}/{len(valid)} candidates meeting timing '
+                     f'(WNS={winner.wns_ns:+.3f} ns, margin {margin_ns} ns): {winner.area:.1f} um²')
     else:
-        raise ValueError(f"unknown objective {objective}")
+        best = max(valid, key=lambda c: (c.wns_ns, -c.area, -_stability_idx(c.recipe)))
+        winner, how = best, 'best WNS'
+        if fallback == 'knee':
+            knee = _pareto_knee(valid, clip_ns=period_ns)
+            if knee is not None:
+                winner, how = knee, 'knee of the WNS/area front'
+        rationale = (f'no candidate meets timing; {how} ({winner.wns_ns:+.3f} ns, {winner.area:.1f} um²); '
+                     f'fastest was {best.wns_ns:+.3f} ns at {best.area:.1f} um²')
+    return Selection(module='', objective=objective, winner=winner.recipe, candidates=cands,
+                     pareto_front=front, rationale=rationale)
 
-    return Selection(
-        module='',
-        objective=objective,
-        winner=winner.recipe,
-        candidates=cands,
-        pareto_front=front,
-        rationale=rationale,
-    )
 
 # ============================================================================
 # Corner STA on winner
@@ -1773,6 +1810,9 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
             'top': cfg.top,
             'period_ps': cfg.period_ps,
             'objective': cfg.objective,
+            'full_sweep': cfg.full_sweep,
+            'select_margin_ps': cfg.select_margin_ps,
+            'fallback': cfg.fallback,
             'recipes': cfg.recipes,
             'modules': list(selections.keys()),
             'abc_sequential': cfg.abc_sequential,
@@ -2104,7 +2144,12 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
     p.add_argument('--yosys-opts', nargs='+', help='front-end options: booth, adder=kogge-stone|han-carlson|sklansky, noshare, hieropt')
     p.add_argument('--dont-use', nargs='+', help='liberty cell patterns excluded from abc and dfflibmap')
-    p.add_argument('--objective', choices=['delay', 'area', 'fastest', 'pareto', 'balanced'])
+    p.add_argument('--abc-wire-load', action='store_true', help="ABC sizing with the liberty wire-load model (-c on buffer/upsize/dnsize/stime) in every recipe")
+    p.add_argument('--objective', choices=['delay', 'area', 'balanced', 'fastest', 'pareto'],
+                   help='recipe subset to run (delay|area|balanced); selection is always min-area-meeting-timing')
+    p.add_argument('--full-sweep', action='store_true', help='run every recipe (ignore the objective subset)')
+    p.add_argument('--select-margin-ps', type=int, help='WNS a candidate needs to count as meeting timing (default 0)')
+    p.add_argument('--fallback', choices=['knee', 'best_wns'], help="when nothing meets timing: knee of the WNS/area front (default) or fastest")
     p.add_argument('--modules', nargs='+', help='modules to synthesize')
     p.add_argument('--recipes', nargs='+', help='recipes to sweep')
     p.add_argument('--driving-cell')
@@ -2158,6 +2203,14 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.yosys_opts = list(args.yosys_opts)
     if getattr(args, 'dont_use', None):
         cfg.dont_use = list(args.dont_use)
+    if getattr(args, 'abc_wire_load', False):
+        cfg.abc_wire_load = True
+    if getattr(args, 'full_sweep', False):
+        cfg.full_sweep = True
+    if getattr(args, 'select_margin_ps', None) is not None:
+        cfg.select_margin_ps = args.select_margin_ps
+    if getattr(args, 'fallback', None):
+        cfg.fallback = args.fallback
     if args.abc_sequential:
         cfg.abc_sequential = True
     if args.hierarchical:
@@ -2282,8 +2335,20 @@ def main() -> int:
 
     # ----- discover recipes -----
     recipes_dir = Path(cfg.recipes_dir)
+    aliases = {'fastest': 'delay', 'pareto': 'balanced'}
+    if cfg.objective in aliases:
+        log.info(f"objective '{cfg.objective}' is an alias of '{aliases[cfg.objective]}'")
+        cfg.objective = aliases[cfg.objective]
+    requested = list(cfg.recipes)
+    if not requested and not cfg.full_sweep:
+        available = {p.stem for p in recipes_dir.glob('*.abc')}
+        requested = [r for r in RECIPE_SETS.get(cfg.objective, []) if r in available]
+        if requested:
+            log.info(f"objective '{cfg.objective}': recipe set {requested} (--full-sweep runs all)")
+        else:
+            log.info(f"objective '{cfg.objective}': no preset matches recipes in {recipes_dir}; running all")
     try:
-        recipe_pairs = discover_recipes(recipes_dir, cfg.recipes)
+        recipe_pairs = discover_recipes(recipes_dir, requested)
     except FileNotFoundError as e:
         log.error(str(e))
         return EXIT_CONFIG_ERR
@@ -2381,6 +2446,8 @@ def main() -> int:
     def _pick_winner(module: str):
         nonlocal any_synth_failed
         cands: list[Candidate] = []
+        sta_jobs: list[dict] = []
+        results_by_recipe: dict[str, RecipeResult] = {}
         for r in by_module[module]:
             if not r.success:
                 any_synth_failed = True
@@ -2391,30 +2458,35 @@ def main() -> int:
                     runtime_s=r.runtime_s,
                 ))
                 continue
-            qsta_log = work / module / f'{r.recipe}.qsta.log'
-            qsta_lib = cfg.lib_slow if cfg.lib_slow else cfg.lib_typ
-            qsta_corner = 'slow' if cfg.lib_slow else 'typ'
-            wns, tns = _quick_sta(
-                cfg.opensta, qsta_lib, r.netlist, module,
-                cfg.period_ps, cfg.clock_port, qsta_log,
-                clock_port_2=cfg.clock_port_2,
-                period_ps_2=cfg.period_ps_2,
-                macro_libs=cfg.macro_libs.get(qsta_corner, []) if cfg.macro_libs else [],
-                sdc=cfg.sdc,
-                driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
-                unc_setup_ps=cfg.clock_uncertainty_setup_ps,
-                unc_hold_ps=cfg.clock_uncertainty_hold_ps,
-                wire_load_model=cfg.wire_load_model,
-                io_delay_frac=cfg.io_delay_frac,
-            )
+            results_by_recipe[r.recipe] = r
+            sta_jobs.append({'cfg': cfg_dict, 'module': module, 'recipe': r.recipe,
+                             'netlist': r.netlist, 'log': str(work / module / f'{r.recipe}.qsta.log')})
+        # Quick STA per candidate: independent OpenSTA processes, run in the
+        # same pool as synthesis (this was the largest serial part of a run).
+        timing: dict[str, tuple[Optional[float], Optional[float]]] = {}
+        if sta_jobs and cfg.run_sta:
+            t0 = time.time()
+            if cfg.effective_parallel() == 1 or len(sta_jobs) == 1:
+                for job in sta_jobs:
+                    rec, wns, tns = _quick_sta_job(job)
+                    timing[rec] = (wns, tns)
+            else:
+                with mp.Pool(min(cfg.effective_parallel(), len(sta_jobs))) as pool:
+                    for rec, wns, tns in pool.imap_unordered(_quick_sta_job, sta_jobs):
+                        timing[rec] = (wns, tns)
+            log.info(f"  quick STA: {len(sta_jobs)} candidates in {time.time() - t0:.1f}s "
+                     f"on {min(cfg.effective_parallel(), len(sta_jobs))} workers")
+        for rec, r in results_by_recipe.items():
+            wns, tns = timing.get(rec, (None, None))
             cands.append(Candidate(
-                recipe=r.recipe, netlist=r.netlist,
+                recipe=rec, netlist=r.netlist,
                 wns_ns=wns, tns_ns=tns,
                 cells=r.cells, area=r.area,
                 runtime_s=r.runtime_s,
             ))
 
-        sel = select_winner(cands, cfg.objective)
+        sel = select_winner(cands, cfg.objective, cfg.select_margin_ps / 1000.0, cfg.fallback,
+                            period_ns=cfg.period_ps / 1000.0)
         sel.module = module
         selections[module] = sel
 

@@ -110,6 +110,7 @@ These are required only when `run_gls: true` (the default). Set
 |---|---|---|---|
 | `abc_target` | string | `none` | ABC `-D` substituted for `{D}` in recipes. `none` removes it (minimum-delay mapping; measured best, docs/architecture.md §2.6); `period` = full clock period; `reg2reg` = `period − t_cq − t_su − clock_uncertainty_setup_ps`; or an integer in ps. Also `--abc-target`. |
 | `min_budget_frac` | float | `0.25` | Floor for any derived target, as a fraction of the period. |
+| `abc_wire_load` | bool | `false` | Add `-c` (liberty wire-load model) to ABC's `buffer`/`upsize`/`dnsize`/`stime` in every recipe. Already baked into `delay_map*`; neutral for `&nf` recipes (docs/architecture.md §2.9). Also `--abc-wire-load`. |
 | `path_groups` | bool | `false` | EXPERIMENTAL: one `abc` call per path group with its own budget. Measured worse than flat mapping (docs/architecture.md §2.5); off by default. |
 | `relaxed_factor` | float | `3.0` | `-D` multiplier for false-path cones when `path_groups` is on. |
 
@@ -189,28 +190,19 @@ uppercase (e.g. `YOSYS=/opt/yosys/bin/yosys`).
 
 ## Objectives
 
-`objective:` controls how the winning recipe is picked from the sweep.
+`objective` selects the recipe subset (see README → Objectives); it no longer
+changes how the winner is picked. Selection rule for every run: the candidate
+that meets timing (slow-corner WNS ≥ `select_margin_ps`) with the least area;
+if none meets, the `fallback` rule (knee of the WNS/area front by default);
+ties by `RECIPE_PRIORITY`.
 
-### `delay`
-Maximum WNS wins. Tiebreaks: smaller area, then recipe stability priority.
-
-### `fastest`
-Among recipes with `wns >= 0` (meeting timing), the one with maximum WNS wins — this corresponds to the minimum actual critical path delay. Tiebreaks: smaller area, then stability. **Fallback:** if no recipe meets timing, falls back to max-WNS (so the netlist isn't empty).
-
-### `area`
-Among recipes with `wns >= 0` (meeting timing), the smallest area wins.
-Tiebreaks: larger WNS, then stability. **Fallback:** if no recipe meets
-timing, falls back to max-WNS (so the netlist isn't empty).
-
-### `pareto`
-Computes the Pareto front on (WNS↑, area↓) and reports it. The "winner"
-is the max-WNS point on the front (representative; not a strict pick).
-Use this when you want to see the full trade-off space; the
-`pareto_front` field in `summary.json` lists all front members.
-
-### `balanced`
-50/50 weighted: WNS rank + area rank, lowest sum wins. No bias toward
-either dimension. Useful when you don't want to choose.
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `objective` | string | `delay` | `delay` \| `area` \| `balanced`. `fastest` → `delay`, `pareto` → `balanced` (aliases). |
+| `full_sweep` | bool | `false` | Run every recipe in `recipes/` (also `--full-sweep`). |
+| `select_margin_ps` | int | `0` | Slack a candidate needs to count as meeting timing. The multi-corner report is ~30 ps more pessimistic than the ranking STA, so 50 is a reasonable safety margin for marginal designs. |
+| `fallback` | string | `knee` | When no candidate meets timing: `knee` picks the knee of the WNS/area Pareto front among the failing candidates (closest to best-WNS-and-least-area after normalizing both axes over the front, WNS clipped to one period below the best); `best_wns` picks the fastest regardless of area. mul32_mac: knee −2.10 ns at 39 873 µm² vs fastest −0.57 ns at 60 888 µm². Also `--fallback`. |
+| `recipes` | list | — | Explicit recipes; overrides the objective subset. |
 
 ## Recipes
 

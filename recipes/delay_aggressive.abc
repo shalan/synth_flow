@@ -1,8 +1,8 @@
-# delay_aggressive — DELAY: full cleanup + 4-pass mapping + aggressive sizing
+# delay_aggressive — DELAY: full cleanup + 4-pass mapping + aggressive sizing (sequential cmds removed: no-ops on the combinational network ABC sees)
 strash; ifraig;
 balance; rewrite; refactor; balance; rewrite;
 rewrite -z; balance; refactor -z; rewrite -z; balance;
-scorr; dc2;
+dc2;
 balance; rewrite; refactor; balance; rewrite;
 rewrite -z; balance; refactor -z; rewrite -z; balance;
 strash;
