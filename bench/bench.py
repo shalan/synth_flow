@@ -64,7 +64,9 @@ QUICK_RECIPES = ['orfs_speed', 'balanced_resyn', 'area_classic', 'delay_choice_d
 LIBS = {'tt': LIB_TT, 'ss': LIB_SS, 'ff': LIB_FF}
 
 COLUMNS = ['design', 'category', 'top', 'recipe', 'is_winner', 'cells', 'area_um2',
-           'wns_ns', 'tns_ns', 'abc_delay_ps', 'runtime_s', 'status', 'error']
+           'wns_ns', 'tns_ns', 'abc_delay_ps', 'runtime_s', 'status', 'error',
+           # winner-only, after post-passes (resize) and the multi-corner STA:
+           'final_wns_slow', 'final_tns_slow', 'final_area_um2']
 
 
 # --------------------------------------------------------------------------
@@ -219,6 +221,14 @@ def run_design(d: dict, args, run_sta: bool) -> list[dict]:
     if not mod:
         return [dict(base, recipe='', status='failed', error='top module missing from summary')]
 
+    corner = mod.get('corner') or {}
+    final_area = ''
+    rj = work / 'results' / d['top'] / 'resize.json'
+    if rj.exists():
+        try:
+            final_area = f"{json.loads(rj.read_text())['end']['area']:.2f}"
+        except Exception:
+            final_area = ''
     rows = []
     for c in mod['candidates']:
         recipe = c['recipe']
@@ -236,6 +246,9 @@ def run_design(d: dict, args, run_sta: bool) -> list[dict]:
             runtime_s=f"{c.get('runtime_s', 0):.1f}",
             status='ok' if ok else 'recipe_failed',
             error='' if ok else 'no netlist',
+            final_wns_slow=(f"{corner['wns_setup_slow']:.3f}" if recipe == mod.get('winner') and corner.get('wns_setup_slow') is not None else ''),
+            final_tns_slow=(f"{corner['tns_setup_slow']:.3f}" if recipe == mod.get('winner') and corner.get('tns_setup_slow') is not None else ''),
+            final_area_um2=(final_area if recipe == mod.get('winner') else ''),
         ))
     return rows
 
