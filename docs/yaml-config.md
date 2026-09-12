@@ -190,28 +190,17 @@ uppercase (e.g. `YOSYS=/opt/yosys/bin/yosys`).
 
 ## Objectives
 
-`objective:` controls how the winning recipe is picked from the sweep.
+`objective` selects the recipe subset (see README → Objectives); it no longer
+changes how the winner is picked. Selection rule for every run: the candidate
+that meets timing (slow-corner WNS ≥ `select_margin_ps`) with the least area;
+if none meets, the best WNS, then least area; ties by `RECIPE_PRIORITY`.
 
-### `delay`
-Maximum WNS wins. Tiebreaks: smaller area, then recipe stability priority.
-
-### `fastest`
-Among recipes with `wns >= 0` (meeting timing), the one with maximum WNS wins — this corresponds to the minimum actual critical path delay. Tiebreaks: smaller area, then stability. **Fallback:** if no recipe meets timing, falls back to max-WNS (so the netlist isn't empty).
-
-### `area`
-Among recipes with `wns >= 0` (meeting timing), the smallest area wins.
-Tiebreaks: larger WNS, then stability. **Fallback:** if no recipe meets
-timing, falls back to max-WNS (so the netlist isn't empty).
-
-### `pareto`
-Computes the Pareto front on (WNS↑, area↓) and reports it. The "winner"
-is the max-WNS point on the front (representative; not a strict pick).
-Use this when you want to see the full trade-off space; the
-`pareto_front` field in `summary.json` lists all front members.
-
-### `balanced`
-50/50 weighted: WNS rank + area rank, lowest sum wins. No bias toward
-either dimension. Useful when you don't want to choose.
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `objective` | string | `balanced` | `delay` \| `area` \| `balanced`. `fastest` → `delay`, `pareto` → `balanced` (aliases). |
+| `full_sweep` | bool | `false` | Run every recipe in `recipes/` (also `--full-sweep`). |
+| `select_margin_ps` | int | `0` | Slack a candidate needs to count as meeting timing. The multi-corner report is ~30 ps more pessimistic than the ranking STA, so 50 is a reasonable safety margin for marginal designs. |
+| `recipes` | list | — | Explicit recipes; overrides the objective subset. |
 
 ## Recipes
 

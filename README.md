@@ -105,9 +105,11 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--abc-target T` | ABC `-D`: `none` (default), `period`, `reg2reg`, or ps. Measured: `none` is best (docs/architecture.md §2.6) |
 | `--resize` | OpenSTA-guided drive-strength sizing of each winner (`winner.presize.v` keeps the input) |
 | `--yosys-opts T...` | Front-end options: `booth`, `adder=kogge-stone\|han-carlson\|sklansky`, `noshare`, `hieropt`. Sweep several with `yosys_opts_sweep` in YAML |
-| `--objective OBJ` | `delay`, `area`, `fastest`, `pareto`, `balanced` |
+| `--objective OBJ` | Recipe subset to run: `delay`, `area`, `balanced` (default). Selection is always min-area-meeting-timing |
+| `--full-sweep` | Run every recipe instead of the objective subset |
+| `--select-margin-ps N` | WNS a candidate needs to count as meeting timing (default 0) |
 | `--modules M1 M2` | Modules to synthesize (default: auto-detect) |
-| `--recipes R1 R2` | Recipes to sweep (default: all) |
+| `--recipes R1 R2` | Recipes to sweep (default: the objective's subset) |
 | `--driving-cell CELL` | ABC driving cell |
 | `--load-ff LOAD` | ABC load in fF |
 | `--parallel N` | Worker count (0 = auto) |
@@ -204,17 +206,22 @@ retired after benchmarking live in `recipes/retired/` with the reasons.
 
 ## Objectives
 
-| Objective | Selection Strategy |
-|-----------|-------------------|
-| `delay` | Maximize WNS (SS corner), then minimize area |
-| `area` | Minimize area among timing-meeting recipes, fallback to max WNS |
-| `fastest` | Max WNS among timing-meeting |
-| `balanced` | Equal-weight rank score on WNS and area |
-| `pareto` | Reports Pareto front, picks max-WNS representative |
+`objective` chooses **which recipes run**; the winner is always chosen the
+same way: the candidate that meets timing (slow-corner WNS ≥
+`select_margin_ps`) with the least area, falling back to the best WNS when
+nothing meets. The subsets are the top-5 of each leaderboard on the
+16-design bench (`docs/benchmarks.md`).
 
-**Note:** WNS ranking uses `lib_slow` (SS corner) by default so the winner
-meets timing at worst-case conditions. Set `objective: pareto` to see the
-full trade-off space.
+| Objective | Recipes run | When to use |
+|-----------|-------------|-------------|
+| `delay` | `delay_map_resyn`, `delay_map`, `orfs_area`, `delay_choice_deep_v3`, `delay_syn2` | closing a hard clock period |
+| `area` | `delay_aggressive`, `area_lut6`, `area_max`, `yosys_default`, `area_classic` | relaxed period, smallest netlist |
+| `balanced` (default) | `balanced_resyn`, `balanced_resyn2x`, `delay_triple`, `delay_iter_heavy`, `delay_map_resyn` | general use |
+| `--full-sweep` | all 18 | final characterization |
+
+`--recipes R1 R2` overrides the subset. `fastest` and `pareto` are accepted
+as aliases of `delay` and `balanced` for old configs. With `yosys_opts_sweep`
+each recipe also runs once per front-end variant.
 
 ## Hierarchical Mode
 

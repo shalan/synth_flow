@@ -11,7 +11,7 @@ as an alias for `synth_flow run`.
 
 ```
 synth_flow run      synth.yaml [--sdc top.sdc] [--stage map|search|refine|all]
-                               [--objective delay|area|fastest|pareto|balanced]
+                               [--objective delay|area|balanced] [--full-sweep] [--select-margin-ps N]
                                [--recipes R ...] [--modules M ...] [--hierarchical]
                                [--parallel N] [--work-dir D] [--results-dir D] [--json]
 synth_flow sdc      check top.sdc --top NAME [--rtl ...]   # what synthesis uses / STA-only / ignored

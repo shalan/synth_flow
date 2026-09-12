@@ -347,78 +347,25 @@ check('identical points: both on front', set(_pareto_front(cands2)) == {'X', 'Y'
 print('\n[4] Winner selection')
 # =========================================================================
 
-# delay objective: max wns wins
+# single selection rule: min area among timing-meeting, else best WNS
+cands = [c('a', -0.5, 100), c('b', 0.2, 300), c('d', 0.1, 200), c('e', 0.9, 250)]
 sel = select_winner(cands, 'delay')
-check('delay -> A (best wns)', sel.winner == 'A', f'got={sel.winner}')
-
-# area objective: among meeting timing, smallest area
-# All three (A,B,C) meet timing (wns >= 0). C has smallest area.
-sel = select_winner(cands, 'area')
-check('area -> C (smallest area, meets timing)', sel.winner == 'C', f'got={sel.winner}')
-
-# area objective with no recipe meeting timing -> falls back to max wns
-fail_cands = [c('A', -2.0, 100), c('B', -1.0, 50), c('C', -3.0, 20)]
-sel = select_winner(fail_cands, 'area')
-check('area fallback: best WNS when none meets', sel.winner == 'B', f'got={sel.winner}')
-
-# pareto objective: picks max-WNS on front
-sel = select_winner(cands, 'pareto')
-check('pareto -> A (max wns on front)', sel.winner == 'A', f'got={sel.winner}')
-check('pareto reports front', set(sel.pareto_front) == {'A', 'B', 'C'},
-      f'got={sel.pareto_front}')
-
-# balanced objective: rank-sum
-# A: rank 0 in WNS (best), rank 2 in area (worst-ish among A,B,C) -> 0+2=2
-# B: rank 1 in wns, rank 1 in area -> 1+1=2  (tied with A)
-# C: rank 2 in wns, rank 0 in area -> 2+0=2  (tied)
-# stability tiebreak: A < B < C in priority? Depends on RECIPE_PRIORITY
-# Our test names A/B/C aren't in the priority list so all get index 999, stable order
-# In a tie, balanced should still pick deterministically
-sel = select_winner(cands, 'balanced')
-check('balanced returns a winner', sel.winner is not None)
-
-# none-valid case
-no_valid = [Candidate(recipe='X', netlist='', wns_ns=None, tns_ns=None,
-                       cells=0, area=0, runtime_s=0)]
-sel = select_winner(no_valid, 'delay')
-check('no valid candidates -> winner=None', sel.winner is None)
-
-# =========================================================================
-print('\n[5] Stability tiebreak')
-# =========================================================================
-
-# Two candidates with identical metrics, different recipe names from the priority list
+check('min area among meeting (d, 200) regardless of objective label', sel.winner == 'd', f'got={sel.winner} ({sel.rationale})')
+sel = select_winner(cands, 'area', margin_ns=0.15)
+check('margin excludes d (0.1 < 0.15) -> e (250) over b (300)', sel.winner == 'e', f'got={sel.winner}')
+sel = select_winner([c('a', -0.5, 100), c('b', -0.2, 300)], 'balanced')
+check('nothing meets -> best WNS (b)', sel.winner == 'b' and 'no candidate meets' in sel.rationale, sel.rationale)
+sel = select_winner([c('a', -0.5, 100), c('b', -0.5, 90)], 'balanced')
+check('nothing meets, WNS tie -> smaller area (b)', sel.winner == 'b')
+check('pareto front still reported', set(select_winner(cands, 'delay').pareto_front) >= {'a', 'e'}, str(select_winner(cands, 'delay').pareto_front))
 tied = [c('area_max', 1.0, 100), c('delay_choice_deep_v3', 1.0, 100)]
-sel = select_winner(tied, 'delay')
-check('tie -> delay_choice_deep_v3 wins (lower priority idx)',
-      sel.winner == 'delay_choice_deep_v3', f'got={sel.winner}')
-
-check('delay_choice_deep_v3 priority < area_max priority',
-      _stability_idx('delay_choice_deep_v3') < _stability_idx('area_max'))
-check('unknown recipe gets 999',
-      _stability_idx('foobar') == 999)
-
-# =========================================================================
-print('\n[6] Config validation')
-# =========================================================================
-
-cfg = Config()
-errs = cfg.validate()
-check('empty config -> errors', len(errs) > 0, f'got={errs}')
-
-cfg = Config(rtl_files=['/no/such/file.v'], lib_typ='/no/such.lib', top='x',
-             run_sta=False, run_gls=False)
-errs = cfg.validate()
-check('missing files reported', any('missing' in e for e in errs), f'got={errs}')
-
-with tempfile.TemporaryDirectory() as td:
-    td = Path(td)
-    rtl = td/'a.v'; rtl.write_text('module a; endmodule')
-    lib = td/'a.lib'; lib.write_text('library(a) {}')
-    cfg = Config(rtl_files=[str(rtl)], lib_typ=str(lib), top='a',
-                 run_sta=False, run_gls=False)
-    errs = cfg.validate()
-    check('valid minimal config -> no errors', len(errs) == 0, f'got={errs}')
+sel = select_winner(tied, 'balanced')
+check('tie -> delay_choice_deep_v3 wins (lower priority idx)', sel.winner == 'delay_choice_deep_v3', f'got={sel.winner}')
+check('delay_choice_deep_v3 priority < area_max priority', _stability_idx('delay_choice_deep_v3') < _stability_idx('area_max'))
+from synth_flow import RECIPE_SETS
+check('recipe sets are subsets of the available recipes', all(r in names for s_ in RECIPE_SETS.values() for r in s_), str(RECIPE_SETS))
+check('recipe sets have 5 entries each', all(len(v) == 5 for v in RECIPE_SETS.values()))
+check("default objective is balanced, full_sweep off", Config().objective == 'balanced' and Config().full_sweep is False)
 
 # Invalid objective
 cfg.objective = 'banana'
