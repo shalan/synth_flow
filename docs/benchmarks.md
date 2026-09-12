@@ -314,6 +314,39 @@ almost no area. The curated subset stays the default; the full liberty
 remains available through `--lib-dir` / `dont_use` for designs that need
 cells the subset lacks.
 
+## Repairs on the default flow — `obj-delay-repair.csv`
+
+`objective: delay` with `resize_winner`, `repair_design` and `repair_hold`
+all on, compared with `obj-delay3.csv` (sizing only). Every winner already
+meets setup, so `repair_design` inserted no buffers here; its effect shows on
+failing netlists (apb_timer reference: −0.079 → +0.013 ns, +1.7 % area, see
+[architecture.md §2.10](architecture.md#210-repairs-after-measurement-buffering-and-hold)).
+Hold at the fast corner:
+
+| design | setup WNS (resize only) | setup WNS (+repairs) | hold WNS @FF before → after | delay cells | Δarea |
+|---|---|---|---|---|---|
+| alu32 | +0.470 | +0.470 | -0.057 → +0.051 | 2 | +0.1 % |
+| mul16_pipe | +0.920 | +0.920 | -0.065 → +0.043 | 66 | +2.1 % |
+| mul32_mac | +0.020 | +0.020 | +0.115 → +0.115 | 0 | +0.0 % |
+| fir8 | +0.210 | +0.210 | -0.057 → +0.003 | 2 | +0.1 % |
+| aes_round | +1.360 | +1.360 | +0.072 → +0.072 | 0 | +0.0 % |
+| sha256_core | -0.000 | -0.000 | -0.002 → +0.019 | 123 | +0.7 % |
+| crc32_8 | +0.180 | +0.180 | +0.037 → +0.037 | 0 | +0.0 % |
+| rr_arbiter16 | +0.010 | +0.010 | +0.157 → +0.157 | 0 | +0.0 % |
+| uart | +0.010 | +0.010 | -0.083 → +0.023 | 2 | +0.2 % |
+| spi_master | +0.120 | +0.120 | +0.003 → +0.003 | 0 | +0.0 % |
+| apb_timer | +0.110 | +0.110 | +0.001 → +0.001 | 0 | +0.0 % |
+| fifo_sync | +0.030 | +0.030 | +0.077 → +0.077 | 0 | +0.0 % |
+| zx16_core_ahb | +0.110 | +0.110 | -0.046 → +0.004 | 7 | +0.1 % |
+| zxip | +0.060 | +0.060 | +0.001 → +0.001 | 0 | +0.0 % |
+| ms_psram_ahb | +0.470 | +0.470 | +0.082 → +0.082 | 0 | +0.0 % |
+| uart_apb_sys | +3.450 | +3.450 | -0.083 → +0.024 | 2 | +0.0 % |
+| **designs with hold violations** | | | **7 → 0** | | mean +0.2 % |
+
+Setup WNS is unchanged on every design by construction of the acceptance
+rule. The hold violations were all short input-to-register or feed-through
+paths against zero minimum input delay and 0.10 ns hold uncertainty.
+
 ## Post-passes on winners — `postpass.py`
 
 `./postpass.py --passes resize [--designs ...]` runs `resize.py` (and/or

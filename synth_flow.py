@@ -247,6 +247,15 @@ class Config:
     # already excludes them.
     dont_use: list[str] = field(default_factory=list)
     resize_winner: bool = False
+    # Post-pass repairs on the winner (resize.py), all judged by OpenSTA:
+    #   repair_design  split high-fanout nets on failing setup paths with
+    #                  buffer trees (groups of <= max_fanout sinks)
+    #   repair_hold    delay cells in front of failing hold endpoints at the
+    #                  fast corner, kept only while slow-corner setup holds
+    # Any of resize_winner / repair_design / repair_hold enables the pass.
+    repair_design: bool = False
+    repair_hold: bool = False
+    max_fanout: int = 8                # SDC set_max_fanout overrides
     resize_iters: int = 25
     resize_wns_tol_ps: int = 150       # WNS regression tolerated for a TNS gain ('tns' policy)
     resize_final: str = 'tns'          # tns | wns (never regress WNS)
@@ -1820,6 +1829,9 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
             'yosys_opts_sweep': cfg.yosys_opts_sweep,
             'abc_target': cfg.abc_target,
             'resize_winner': cfg.resize_winner,
+            'repair_design': cfg.repair_design,
+            'repair_hold': cfg.repair_hold,
+            'max_fanout': cfg.max_fanout,
             'dont_use': cfg.dont_use,
         },
         'modules': {
@@ -2015,6 +2027,9 @@ def apply_sdc_overrides(cfg: Config, c, log=None) -> list[str]:
         if cell != cfg.driving_cell:
             msgs.append(f"driving_cell {cfg.driving_cell} -> {cell} (SDC set_driving_cell)")
             cfg.driving_cell = cell
+    if c.max_fanout and int(c.max_fanout) != cfg.max_fanout:
+        msgs.append(f"max_fanout {cfg.max_fanout} -> {int(c.max_fanout)} (SDC set_max_fanout)")
+        cfg.max_fanout = int(c.max_fanout)
     if c.dont_use:
         added = [x for x in c.dont_use if x not in cfg.dont_use]
         if added:
@@ -2108,6 +2123,8 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
             wire_load_model=cfg.wire_load_model, io_delay_frac=cfg.io_delay_frac,
             clock_port_2=cfg.clock_port_2, period_ps_2=cfg.period_ps_2,
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
+            repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
+            repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
             log=lambda *x: log.debug('[resize] ' + ' '.join(str(v) for v in x)))
     except Exception as e:
         log.warning(f'[resize] {module}: failed ({e}); winner left unsized')
@@ -2115,9 +2132,15 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
     shutil.copy(res['output'], winner)
     (mod_results / 'resize.json').write_text(json.dumps(res, indent=2))
     s0, s1 = res['start'], res['end']
+    extra = ''
+    if res.get('buffers_inserted'):
+        extra += f", {res['buffers_inserted']} buffers"
+    if res.get('hold_before') and res.get('hold_after'):
+        hb, ha = res['hold_before'], res['hold_after']
+        extra += f", hold@fast {hb[0]:+.3f} -> {ha[0]:+.3f} ({res.get('delay_cells_inserted', 0)} delay cells)"
     log.info(f"[resize] {module}: WNS {s0['wns_ns']:+.3f} -> {s1['wns_ns']:+.3f}  "
              f"TNS {s0['tns_ns']:+.2f} -> {s1['tns_ns']:+.2f}  area {s0['area']:.0f} -> {s1['area']:.0f}  "
-             f"({len(res['moves'])} upsizes)")
+             f"({len(res['moves'])} moves{extra})")
 
 
 def parse_cli() -> argparse.Namespace:
@@ -2142,6 +2165,9 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--path-groups', action='store_true', help='EXPERIMENTAL: per-path-group ABC delay targets (see docs/architecture.md §2.5)')
     p.add_argument('--abc-target', help="ABC -D: 'none' (default, min-delay mapping), 'period', 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
+    p.add_argument('--repair-design', action='store_true', help='buffer trees on high-fanout nets of failing paths (needs OpenSTA)')
+    p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
+    p.add_argument('--max-fanout', type=int, help='sink group size for repair_design (default 8; SDC set_max_fanout overrides)')
     p.add_argument('--yosys-opts', nargs='+', help='front-end options: booth, adder=kogge-stone|han-carlson|sklansky, noshare, hieropt')
     p.add_argument('--dont-use', nargs='+', help='liberty cell patterns excluded from abc and dfflibmap')
     p.add_argument('--abc-wire-load', action='store_true', help="ABC sizing with the liberty wire-load model (-c on buffer/upsize/dnsize/stime) in every recipe")
@@ -2199,6 +2225,12 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.abc_target = args.abc_target
     if getattr(args, 'resize', False):
         cfg.resize_winner = True
+    if getattr(args, 'repair_design', False):
+        cfg.repair_design = True
+    if getattr(args, 'repair_hold', False):
+        cfg.repair_hold = True
+    if getattr(args, 'max_fanout', None):
+        cfg.max_fanout = args.max_fanout
     if getattr(args, 'yosys_opts', None):
         cfg.yosys_opts = list(args.yosys_opts)
     if getattr(args, 'dont_use', None):
@@ -2500,7 +2532,7 @@ def main() -> int:
             if win.netlist:
                 shutil.copy(win.netlist, mod_results / 'winner.v')
                 winner_netlists[module] = str(mod_results / 'winner.v')
-                if cfg.resize_winner and cfg.run_sta:
+                if (cfg.resize_winner or cfg.repair_design or cfg.repair_hold) and cfg.run_sta:
                     _resize_winner(cfg, module, mod_results, work / module / 'resize', log)
             write_derived_sdc(cfg, sdc_constraints, mod_results / 'synth.sdc', sdc_overrides,
                               groups=module_groups.get(module))
