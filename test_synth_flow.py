@@ -353,8 +353,22 @@ sel = select_winner(cands, 'delay')
 check('min area among meeting (d, 200) regardless of objective label', sel.winner == 'd', f'got={sel.winner} ({sel.rationale})')
 sel = select_winner(cands, 'area', margin_ns=0.15)
 check('margin excludes d (0.1 < 0.15) -> e (250) over b (300)', sel.winner == 'e', f'got={sel.winner}')
+sel = select_winner([c('a', -0.5, 100), c('b', -0.2, 300)], 'balanced', fallback='best_wns')
+check('nothing meets, best_wns -> b', sel.winner == 'b' and 'best WNS' in sel.rationale, sel.rationale)
 sel = select_winner([c('a', -0.5, 100), c('b', -0.2, 300)], 'balanced')
-check('nothing meets -> best WNS (b)', sel.winner == 'b' and 'no candidate meets' in sel.rationale, sel.rationale)
+check('knee needs >= 3 front points; with 2 falls back to best WNS (b)', sel.winner == 'b', sel.rationale)
+mul = [c('fast', -0.5, 100), c('mid', -1.8, 68), c('slow', -4.0, 58), c('hopeless', -12.0, 54)]
+sel = select_winner(mul, 'delay', period_ns=5.0)
+check('knee with clip (period 5 ns) -> mid', sel.winner == 'mid', sel.rationale)
+sel = select_winner(mul, 'delay', period_ns=None)
+check('knee without clip is dragged by the hopeless point -> slow', sel.winner == 'slow', sel.rationale)
+check('dominated points never win the knee', select_winner(mul + [c('dom', -1.9, 80)], 'delay', period_ns=5.0).winner == 'mid')
+check('default fallback is knee', Config().fallback == 'knee')
+cfg_bad = Config(); cfg_bad.fallback = 'cheapest'
+check('invalid fallback rejected', any('fallback' in e for e in cfg_bad.validate()))
+from synth_flow import _quick_sta_job
+import inspect as _inspect
+check('quick STA job is a module-level (picklable) function', _inspect.isfunction(_quick_sta_job) and _quick_sta_job.__module__ == 'synth_flow')
 sel = select_winner([c('a', -0.5, 100), c('b', -0.5, 90)], 'balanced')
 check('nothing meets, WNS tie -> smaller area (b)', sel.winner == 'b')
 check('pareto front still reported', set(select_winner(cands, 'delay').pareto_front) >= {'a', 'e'}, str(select_winner(cands, 'delay').pareto_front))

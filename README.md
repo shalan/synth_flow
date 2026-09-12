@@ -108,11 +108,12 @@ experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 | `--objective OBJ` | Recipe subset to run: `delay`, `area`, `balanced` (default). Selection is always min-area-meeting-timing |
 | `--full-sweep` | Run every recipe instead of the objective subset |
 | `--select-margin-ps N` | WNS a candidate needs to count as meeting timing (default 0) |
+| `--fallback knee\|best_wns` | Pick when nothing meets timing: knee of the WNS/area front (default) or the fastest netlist |
+| `--parallel N` | Workers for synthesis and quick STA (0 = all cores) |
 | `--modules M1 M2` | Modules to synthesize (default: auto-detect) |
 | `--recipes R1 R2` | Recipes to sweep (default: the objective's subset) |
 | `--driving-cell CELL` | ABC driving cell |
 | `--load-ff LOAD` | ABC load in fF |
-| `--parallel N` | Worker count (0 = auto) |
 | `--no-sta` | Skip multi-corner STA |
 | `--no-gls` | Skip gate-level simulation |
 | `--abc-sequential` | Enable ABC `-dff` (experimental) |
@@ -208,8 +209,9 @@ retired after benchmarking live in `recipes/retired/` with the reasons.
 
 `objective` chooses **which recipes run**; the winner is always chosen the
 same way: the candidate that meets timing (slow-corner WNS ≥
-`select_margin_ps`) with the least area, falling back to the best WNS when
-nothing meets. The subsets are the top-5 of each leaderboard on the
+`select_margin_ps`) with the least area. When nothing meets, the knee of the
+WNS/area front is returned (`fallback: knee`; `best_wns` returns the fastest
+netlist regardless of area). The subsets are the top-5 of each leaderboard on the
 16-design bench (`docs/benchmarks.md`).
 
 | Objective | Recipes run | When to use |

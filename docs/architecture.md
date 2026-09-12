@@ -64,9 +64,13 @@ depth estimate, no mapping).
 
 ### Winner selection
 
-Each netlist gets a quick OpenSTA run at the slow corner (`QSTA_TCL`). The
-objective (`delay`, `area`, `fastest`, `balanced`, `pareto`) picks a winner
-from `(wns, tns, area, cells)`. The user SDC, if configured, is sourced into
+Each netlist gets a quick OpenSTA run at the slow corner (`QSTA_TCL`); the
+runs are independent processes and go through the same worker pool as
+synthesis (108 candidates: 0.5 to 3 s on 18 workers versus 6 s serial). One
+rule for every objective: the candidate that meets timing (WNS ≥
+`select_margin_ps`) with the least area; if none meets, the knee of the
+WNS/area Pareto front (`fallback: knee`) or the fastest (`best_wns`). The
+objective only chose which recipes ran. The user SDC, if configured, is sourced into
 both STA scripts after the tool's own `create_clock`.
 
 Known inconsistencies, fixed in Phase 0 of the roadmap:

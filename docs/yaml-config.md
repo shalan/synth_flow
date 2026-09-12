@@ -193,13 +193,15 @@ uppercase (e.g. `YOSYS=/opt/yosys/bin/yosys`).
 `objective` selects the recipe subset (see README → Objectives); it no longer
 changes how the winner is picked. Selection rule for every run: the candidate
 that meets timing (slow-corner WNS ≥ `select_margin_ps`) with the least area;
-if none meets, the best WNS, then least area; ties by `RECIPE_PRIORITY`.
+if none meets, the `fallback` rule (knee of the WNS/area front by default);
+ties by `RECIPE_PRIORITY`.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `objective` | string | `delay` | `delay` \| `area` \| `balanced`. `fastest` → `delay`, `pareto` → `balanced` (aliases). |
 | `full_sweep` | bool | `false` | Run every recipe in `recipes/` (also `--full-sweep`). |
 | `select_margin_ps` | int | `0` | Slack a candidate needs to count as meeting timing. The multi-corner report is ~30 ps more pessimistic than the ranking STA, so 50 is a reasonable safety margin for marginal designs. |
+| `fallback` | string | `knee` | When no candidate meets timing: `knee` picks the knee of the WNS/area Pareto front among the failing candidates (closest to best-WNS-and-least-area after normalizing both axes over the front, WNS clipped to one period below the best); `best_wns` picks the fastest regardless of area. mul32_mac: knee −2.10 ns at 39 873 µm² vs fastest −0.57 ns at 60 888 µm². Also `--fallback`. |
 | `recipes` | list | — | Explicit recipes; overrides the objective subset. |
 
 ## Recipes
