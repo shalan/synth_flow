@@ -425,6 +425,12 @@ class LibCells:
         input, function == !input), else a mid-drive buffer."""
         if preferred and preferred in self.cells:
             return preferred
+        if preferred:
+            # same cell in another library variant: sky130_fd_sc_hd__inv_1 -> sky130_fd_sc_hs__inv_1
+            short = preferred.split('__')[-1]
+            same = [c.name for c in self.cells.values() if c.name.split('__')[-1] == short and not c.dont_use]
+            if same:
+                return sorted(same)[0]
         invs = []
         for c in self.cells.values():
             if c.is_ff or c.dont_use or len(c.inputs) != 1 or len(c.outputs) != 1:

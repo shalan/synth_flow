@@ -2018,6 +2018,30 @@ def load_sdc_constraints(cfg: Config, log=None):
         return None
 
 
+_LIB_CELL_RE = re.compile(r'(-lib_cell\s+)(\S+)')
+
+
+def _adapt_sdc_lib_cells(sdc: Path, lc, out_dir: Path, log) -> Optional[Path]:
+    """Copy `sdc` with every `-lib_cell <name>` that is not in the synthesis
+    liberty replaced by the liberty's default driving cell. Returns the copy's
+    path, or None when nothing needed changing."""
+    text = sdc.read_text()
+    code = re.sub(r'#.*', '', text)                     # ignore comments (incl. our own header)
+    missing = sorted({m.group(2).strip('{}"') for m in _LIB_CELL_RE.finditer(code)
+                      if m.group(2).strip('{}"') not in lc})
+    if not missing:
+        return None
+    subst = {cell: lc.default_driving_cell(cell) for cell in missing}
+    for cell, rep in subst.items():
+        text = re.sub(r'(-lib_cell\s+)\{?"?' + re.escape(cell) + r'"?\}?', r'\g<1>' + rep, text)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f'{sdc.stem}.libadapted.sdc'
+    note = ', '.join(f'{c} -> {r}' for c, r in subst.items())
+    out.write_text(f'# {sdc.name} with -lib_cell {note} (not in the synthesis liberty)\n' + text)
+    log.warning(f"SDC {sdc.name}: -lib_cell {note}; sourcing {out}")
+    return out
+
+
 def apply_sdc_overrides(cfg: Config, c, log=None) -> list[str]:
     """SDC wins over YAML for clocks and boundary conditions (docs/sdc-support.md).
     Returns the list of override messages (also logged)."""
@@ -2456,11 +2480,19 @@ def main() -> int:
         try:
             _lc = liberty_timing.LibCells([_synth_lib(cfg_dict)])
             if cfg.driving_cell not in _lc:
-                fallback = _lc.default_driving_cell()
+                fallback = _lc.default_driving_cell(cfg.driving_cell)
                 log.warning(f"driving_cell '{cfg.driving_cell}' is not in {Path(_synth_lib(cfg_dict)).name}; "
                             f"using {fallback}")
                 cfg.driving_cell = fallback
                 cfg_dict['driving_cell'] = fallback
+            # The user SDC is sourced verbatim by every STA run; a `-lib_cell`
+            # from another library (an HD SDC run against HS/MS/LS/LP) would
+            # abort OpenSTA, so source a copy with those cells substituted.
+            if cfg.sdc and Path(cfg.sdc).exists():
+                adapted = _adapt_sdc_lib_cells(Path(cfg.sdc), _lc, Path(cfg.results_dir) / cfg.top, log)
+                if adapted:
+                    cfg.sdc = str(adapted)
+                    cfg_dict['sdc'] = str(adapted)
         except Exception as e:  # never fatal
             log.debug(f'driving cell check skipped: {e}')
 

@@ -63,7 +63,8 @@ Full matrix (all recipes) is `./bench.py --tag <name>`. `--lib-dir DIR` runs
 against a full PDK liberty directory instead of the bundled 120-cell subset:
 it picks the `*__ss_*`, `*__tt_*` and `*__ff_*` files in DIR (preferring the
 `100C_1v60` / `025C_1v80` / `n40C_1v95` characterisations), so any
-`libs.ref/sky130_fd_sc_<hd|hs|ms|ls|lp>/lib` from ciel/volare works. Subsets:
+`libs.ref/sky130_fd_sc_<hd|hs|ms|ls|lp>/lib` from ciel/volare works; `--work-dir DIR`
+gives concurrent benches (one per library) separate work trees. Subsets:
 `--designs alu32 uart`, `--category datapath crypto`, `--recipes orfs_speed
 area_classic`. Add `--use-sdc` to pass each design's SDC to OpenSTA.
 

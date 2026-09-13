@@ -101,7 +101,7 @@ These are required only when `run_gls: true` (the default). Set
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driving_cell` | string | `sky130_fd_sc_hd__inv_2` | Cell used in `set_driving_cell` for ABC's input boundary model and the STA preamble. If it is not in the synthesis liberty (another library, e.g. `sky130_fd_sc_hs`), the flow substitutes the liberty's second-weakest plain inverter and logs a warning, so the default works unchanged with any library. |
+| `driving_cell` | string | `sky130_fd_sc_hd__inv_2` | Cell used in `set_driving_cell` for ABC's input boundary model and the STA preamble. If it is not in the synthesis liberty (another library, e.g. `sky130_fd_sc_hs`), the flow substitutes the same-named cell of that library (`sky130_fd_sc_hs__inv_2`), else its second-weakest plain inverter, and logs a warning, so the default works unchanged with any library. `-lib_cell` names in the user SDC are adapted the same way (docs/sdc-support.md → Precedence). |
 | `load_ff` | float | `17.65` | Output load in **femtofarads** for ABC's `set_load`. The OpenLane Sky130 HD default. |
 
 ### ABC delay target

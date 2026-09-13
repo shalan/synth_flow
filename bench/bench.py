@@ -184,7 +184,7 @@ def abc_delay_from_log(log_path: Path) -> str:
 
 def run_design(d: dict, args, run_sta: bool) -> list[dict]:
     name = d['name']
-    work = BENCH_DIR / 'work' / name
+    work = Path(args.work_dir) / name
     files = resolve_files(d)
     base = {'design': name, 'category': d.get('category', ''), 'top': d['top']}
     if not files:
@@ -373,6 +373,8 @@ def main() -> int:
     p.add_argument('--set', action='append', metavar='KEY=VALUE', help='extra synth_flow config (repeatable), e.g. --set path_groups=true')
     p.add_argument('--lib-dir', help='directory with the full sky130_fd_sc_hd liberty files (tt/ss/ff corners) instead of the bundled hd_120 subset')
     p.add_argument('--tag', help='results file stem (default: timestamp)')
+    p.add_argument('--work-dir', default=str(BENCH_DIR / 'work'),
+                   help='per-design work root (default bench/work); give each concurrent bench its own')
     p.add_argument('--compare', nargs=2, metavar=('A.csv', 'B.csv'), help='diff two result files and exit')
     args = p.parse_args()
 

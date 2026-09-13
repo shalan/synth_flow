@@ -254,6 +254,16 @@ with tempfile.TemporaryDirectory() as td:
     _br = _bn.render()
     check('buffer tree on a macro-driven bit and a delay cell into a macro bus bit render as concatenations',
           '.din0({ \\a[3] , _rdn_5_ , \\a[1] , \\a[0] })' in _br and _br.count('sky130_fd_sc_hd__buf_2 _rd_') == 2 and '.A(\\a[2] )' in _br, _br)
+with tempfile.TemporaryDirectory() as td:
+    from synth_flow import _adapt_sdc_lib_cells
+    import logging as _logging
+    _sdc = Path(td) / 'c.sdc'
+    _sdc.write_text('create_clock -name clk -period 10 [get_ports clk]\nset_driving_cell -lib_cell sky130_fd_sc_hs__inv_1 [all_inputs]\nset_driving_cell -lib_cell sky130_fd_sc_hd__inv_2 [get_ports a]\n')
+    _out = _adapt_sdc_lib_cells(_sdc, _lc, Path(td) / 'res', _logging.getLogger('t'))
+    _txt = _out.read_text() if _out else ''
+    check('SDC -lib_cell from another library is mapped to the same-named cell', _out is not None and '-lib_cell sky130_fd_sc_hd__inv_1 [all_inputs]' in _txt and '-lib_cell sky130_fd_sc_hd__inv_2 [get_ports a]' in _txt, _txt)
+    check('SDC with only known cells is left alone', _adapt_sdc_lib_cells(_out, _lc, Path(td) / 'res2', _logging.getLogger('t')) is None)
+check('same-named cell of another library variant is preferred as driving cell', _lc.default_driving_cell('sky130_fd_sc_hs__inv_1') == 'sky130_fd_sc_hd__inv_1' and _lc.default_driving_cell('sky130_fd_sc_hs__nosuch_3') == 'sky130_fd_sc_hd__inv_2')
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

@@ -67,7 +67,8 @@ Notes:
   inputs, `set_load 0.033` (pF) on outputs, matching the flow's defaults for
   the Sky130 HD library. When the bench runs against another library
   (`--lib-dir .../sky130_fd_sc_hs/lib`), the flow substitutes that
-  library's equivalent inverter and logs it.
+  library's `inv_1` (same-named cell) and logs it; STA sources the adapted
+  copy `results/<top>/constraints.libadapted.sdc`.
 - The tool derives async-reset false paths from register async pins, so the
   `set_false_path -from` lines above are confirmations, not requirements.
 - `ms_psram_ahb`'s SDC also sets `set_input_transition` and min loads; those
