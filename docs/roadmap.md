@@ -160,3 +160,15 @@ Measure before optimizing (0). Budgets need parsed constraints (1 before 2).
 Search and refine need consistent STA (0 before 3, 4); Phase 2's budgets feed Phase 3's starting point.
 Front-end and library sweeps are independent and can be interleaved once the
 bench exists.
+
+## Backlog from user reviews (2026-09)
+
+- Resumable, content-addressed sweeps (skip recipes whose inputs did not
+  change) and a final-netlist frequency check (`Fmax` from the sign-off STA).
+- Named constraint scenarios and an optional post-mapping constraint
+  generation hook, used consistently by ranking, repair and final STA; reset
+  states, CDC declarations and clock modes stay project-owned inputs.
+- Hold uncertainty tied to the clock budget and analysis stage (today:
+  `clock_uncertainty_hold_ps`, independent of setup).
+- Regressions still to add: generated-clock endpoints in hold repair,
+  rejected-repair rollback end to end.

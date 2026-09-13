@@ -41,6 +41,14 @@ _BUS_RE = re.compile(r'\bbus\s*\(\s*"?([^")\s]+)"?\s*\)\s*\{')
 _TYPE_RE = re.compile(r'^\s*type\s*\(\s*"?([^")\s]+)"?\s*\)\s*\{', re.M)
 
 
+def _check_kind(timing_type: str):
+    t = timing_type.lower()
+    for k in ('setup', 'hold', 'recovery', 'removal', 'min_pulse_width', 'minimum_period', 'nochange', 'skew'):
+        if t.startswith(k):
+            return k
+    return None
+
+
 def _strip_groups(body: str, group_re) -> str:
     """Blank out every `<group>(...) { ... }` block so nested pins are not rescanned."""
     out, pos = [], 0
@@ -308,11 +316,15 @@ class LibCells:
                 cap = re.search(r'\bcapacitance\s*:\s*([0-9.eE+-]+)', pbody)
                 mc = re.search(r'\bmax_capacitance\s*:\s*([0-9.eE+-]+)', pbody)
                 fn = re.search(r'\bfunction\s*:\s*"([^"]*)"', pbody)
+                # timing role of an input pin: which checks constrain it
+                checks = sorted({_check_kind(t) for t in re.findall(r'\btiming_type\s*:\s*"?(\w+)"?', pbody)} - {None})
                 ci.pins[pm.group(1)] = {
                     'dir': d.group(1).lower() if d else 'input',
                     'cap': float(cap.group(1)) * cu if cap else None,
                     'max_cap': float(mc.group(1)) * cu if mc else None,
                     'function': fn.group(1) if fn else None,
+                    'clock': bool(re.search(r'\bclock\s*:\s*true', pbody, re.I)),
+                    'checks': checks,
                 }
                 if d and d.group(1).lower() == 'output':
                     for tm in _TIMING_RE.finditer(pbody):
@@ -324,6 +336,16 @@ class LibCells:
                                     delays.append(v * tu)
             if delays:
                 ci.delay_ps = statistics.median(delays)
+            # a pin that setup/hold/recovery/removal arcs are related to is a clock,
+            # whether or not the liberty carries `clock : true` (stripped subsets may not)
+            for pm in _PIN_RE.finditer(body):
+                pbody, _ = _block(body, pm.end() - 1)
+                for tm in _TIMING_RE.finditer(pbody):
+                    tbody, _ = _block(pbody, tm.end() - 1)
+                    tt = re.search(r'\btiming_type\s*:\s*"?(\w+)"?', tbody)
+                    rp = re.search(r'\brelated_pin\s*:\s*"?([\w\[\]]+)"?', tbody)
+                    if tt and rp and _check_kind(tt.group(1)) in ('setup', 'hold', 'recovery', 'removal') and rp.group(1) in ci.pins:
+                        ci.pins[rp.group(1)]['clock'] = True
             self.cells[ci.name] = ci
 
     # ---- queries -----------------------------------------------------------
@@ -333,6 +355,28 @@ class LibCells:
     def output_pins(self, cell: str) -> Optional[set]:
         c = self.cells.get(cell)
         return set(c.outputs) if c else None
+
+    def pin_kind(self, cell: str, pin: str) -> str:
+        """Role of `cell/pin` from the liberty: 'output'; 'clock' (clock : true);
+        'async' (recovery/removal checked: RESET_B, SET_B); 'data' (setup/hold
+        checked: D, DE, SCD, SCE, macro data/address pins); 'input' (plain
+        combinational input); 'unknown' (cell or pin not in the liberty).
+        Hold repair inserts delay only on 'data' and 'input' pins."""
+        c = self.cells.get(cell)
+        base = pin.split('[')[0]
+        if not c or base not in c.pins:
+            return 'unknown'
+        i = c.pins[base]
+        if i['dir'] == 'output':
+            return 'output'
+        if i.get('clock'):
+            return 'clock'
+        ch = set(i.get('checks') or [])
+        if ch & {'recovery', 'removal'}:
+            return 'async'
+        if ch & {'setup', 'hold'}:
+            return 'data'
+        return 'input'
 
     # ---- several standard-cell libraries at once (HS + LS, ...) ----------
     @staticmethod
