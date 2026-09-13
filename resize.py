@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -82,6 +83,37 @@ def instance_types(netlist_text: str) -> dict[str, str]:
         if typ in ('module', 'input', 'output', 'inout', 'wire', 'reg', 'assign', 'always', 'initial'):
             continue
         out[inst] = typ
+    return out
+
+
+def sta_name(name: str) -> str:
+    """OpenSTA's spelling of a Verilog identifier: escaped names lose the
+    leading backslash and trailing space (`\\u_cg.lat[1] ` -> `u_cg.lat[1]`)."""
+    n = name.strip()
+    return n[1:] if n.startswith('\\') else n
+
+
+def name_alias(netlist_text: str) -> dict[str, str]:
+    """{OpenSTA name: Verilog name} for every instance, wire and port whose
+    spelling differs (escaped identifiers). Used to map STA report names back
+    onto the netlist so escaped instances are found, not mistaken for ports."""
+    names = {m.group(3) for m in _INST_RE.finditer(netlist_text)
+             if m.group(2) not in _NOT_INSTANCES and not m.group(2).startswith('$')}
+    names |= set(re.findall(r'\b(?:wire|input|output|inout)\s+(?:(?:wire|reg)\s+)?(?:\[[^\]]+\]\s*)?(\\?[\w$\.\[\]]+)\s*;', netlist_text))
+    return {sta_name(n): n for n in names if sta_name(n) != n}
+
+
+def output_ports(netlist_text: str) -> set[str]:
+    """Verilog names of the module's output ports, vector bits included
+    (`output [3:0] y` -> y, y[0..3]); an STA endpoint that is not an instance
+    must be one of these to be treated as a port."""
+    out: set[str] = set()
+    for m in re.finditer(r'\boutput\s+(?:(?:wire|reg)\s+)?(?:\[(\d+):(\d+)\]\s*)?(\\?[\w$\.\[\]]+)\s*;', netlist_text):
+        name = m.group(3)
+        out.add(name)
+        if m.group(1) is not None:
+            hi, lo = int(m.group(1)), int(m.group(2))
+            out |= {f'{name}[{i}]' for i in range(min(hi, lo), max(hi, lo) + 1)}
     return out
 
 
@@ -130,6 +162,7 @@ class Netlist:
             self.inst[m.group(3)] = {'type': m.group(2), 'pins': pins, 'span': m.span(), 'indent': m.group(1), 'new': False}
         self._first_inst = min((i['span'][0] for i in self.inst.values() if i['span']), default=text.rfind('endmodule'))
         self.new_wires: list[str] = []
+        self.out_ports = output_ports(text)
         self.names = set(self.inst) | set(re.findall(r'^\s*(?:wire|input|output|inout)\s+(?:\[[^\]]+\]\s*)?(\\?[\w$\.]+)', text, re.M))
         # `assign lhs = rhs;` feed-throughs (input -> output with no cell)
         self.assigns: dict[str, str] = {m.group(1).strip(): m.group(2).strip()
@@ -474,7 +507,7 @@ class StaOut:
 
 
 def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, tag, k=200, slack_max=0.0,
-            mode='max', extra_libs=()) -> StaOut:
+            mode='max', extra_libs=(), alias=None) -> StaOut:
     tcl = out_dir / f'{tag}.tcl'
     tcl.write_text(PATHS_TCL.format(liberty=liberty, netlist=netlist, top=top, constraints=constraints,
                                     k=k, slack_max=slack_max, mode=mode,
@@ -482,11 +515,23 @@ def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, ta
     r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
     text = r.stdout + r.stderr
     (out_dir / f'{tag}.log').write_text(text)
-    res = StaOut(ok=(r.returncode == 0), log=str(out_dir / f'{tag}.log'))
+    if alias is None:
+        alias = name_alias(Path(netlist).read_text())
+    res = parse_sta_report(text, alias, ok=(r.returncode == 0), slack_max=slack_max)
+    res.log = str(out_dir / f'{tag}.log')
+    return res
+
+
+def parse_sta_report(text: str, alias: Optional[dict] = None, ok: bool = True, slack_max: float = 0.0) -> StaOut:
+    """Paths, stages, worst slack and TNS from a report_checks log. Instance
+    and endpoint names are mapped back to their Verilog spelling with `alias`."""
+    alias = alias or {}
+    res = StaOut(ok=ok)
     cur: Optional[PathInfo] = None
     for ln in text.splitlines():
         if ln.startswith('Endpoint:'):
-            cur = PathInfo(endpoint=ln.split()[1], slack=0.0)
+            ep = ln.split()[1]
+            cur = PathInfo(endpoint=alias.get(ep, ep), slack=0.0)
             res.paths.append(cur)
             continue
         m = re.match(r'\s*([-0-9.]+)\s+slack', ln)
@@ -496,6 +541,7 @@ def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, ta
         m = _STAGE_RE.match(ln)
         if m and cur is not None and '/' in m.group(7):
             inst, pin = m.group(7).rsplit('/', 1)
+            inst = alias.get(inst, inst)
             cur.stages.append(Stage(inst=inst, pin=pin, cell=m.group(8), delay=float(m.group(4)),
                                     fanout=int(m.group(1)) if m.group(1) else None,
                                     cap=float(m.group(2)), slew=float(m.group(3))))
@@ -627,7 +673,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     tried: set[str] = set()
     total_moves: dict[str, str] = {}
     start_wns, start_tns = sta.wns, sta.tns
-    states: list[tuple[Path, float, float, dict]] = [(cur, sta.wns, sta.tns, {})]   # accepted (netlist, wns, tns, moves so far)
+    delay_cells = 0
+    states: list[tuple] = [(cur, sta.wns, sta.tns, {}, {'buffers': 0, 'delay': 0})]   # accepted (netlist, wns, tns, moves, counters)
     out_pins = liberty_output_pins(fam)
     bus_ranges = fam.bus_ranges()
     buffers_inserted = 0
@@ -711,7 +758,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                         buffers_inserted += nb
                         for net in batch:
                             total_moves[net] = f'buffer_tree({buf_cell}) x{max_fanout}'
-                        states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+                        states.append((cur, sta.wns, sta.tns, dict(total_moves), {'buffers': buffers_inserted, 'delay': delay_cells}))
                         accepted = True
                         break
                     if len(batch) == 1:
@@ -769,7 +816,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                 cur, text, sta = new, new_text, sta_new
                 types.update(sub)
                 total_moves.update(sub)
-                states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+                states.append((cur, sta.wns, sta.tns, dict(total_moves), {'buffers': buffers_inserted, 'delay': delay_cells}))
                 accepted = True
                 break
             if len(batch) == 1:
@@ -809,7 +856,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             cur, text, sta = new, new_text, sta_new
             types.update(moves)
             total_moves.update(moves)
-            states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+            states.append((cur, sta.wns, sta.tns, dict(total_moves), {'buffers': buffers_inserted, 'delay': delay_cells}))
     # Phase 3 (optional): area recovery. Downsize cells that are not on any
     # path within `guard` of the margin, in batches bisected on rejection.
     # Accepted only while WNS stays >= min(start WNS, margin) and TNS does not
@@ -845,7 +892,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                         cur, text, sta = new, new_text, sta_new
                         types.update(sub)
                         total_moves.update(sub)
-                        states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+                        states.append((cur, sta.wns, sta.tns, dict(total_moves), {'buffers': buffers_inserted, 'delay': delay_cells}))
                         done_round = True
                         break
                     if len(batch) == 1:
@@ -865,7 +912,6 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     # only if hold TNS improves and setup WNS at the slow corner stays where
     # it was (or above the margin). Repeats until hold is clean or the cap.
     hold_before = hold_after = None
-    delay_cells = 0
     if repair_hold:
       try:
         hold_lib = lib_fast or sta_liberty
@@ -887,9 +933,9 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         # Endpoints on setup paths within `guard` of the floor are setup-sensitive
         # (synchronizers, CDC bounds): a delay cell there is likely to be rejected,
         # so they are tried apart, after the feasible ones, one at a time.
-        guard = 0.3
+        sens_band = 0.3          # ns; not `guard`: that name is the scenario-guard callable
         near = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'hold_near', k=2000,
-                       slack_max=margin + guard, extra_libs=extra_libs)
+                       slack_max=margin + sens_band, extra_libs=extra_libs)
         sta_calls += 1
         sensitive = {p.endpoint for p in near.paths} | {st.inst for p in near.paths for st in p.stages[-1:]}
         tried_hold: set[tuple] = set()
@@ -904,10 +950,13 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                     inst, pin = ep, (last.pin if (last and last.inst == ep) else 'D')
                 elif '/' in ep and ep.rsplit('/', 1)[0] in nl0.inst:
                     inst, pin = ep.rsplit('/', 1)
-                else:
+                elif ep in nl0.out_ports:
                     key = ('port', ep)
                     if key not in tried_hold and key not in out:
                         out.append(key)
+                    continue
+                else:
+                    skipped[f'unknown endpoint {ep}'] = skipped.get(f'unknown endpoint {ep}', 0) + 1
                     continue
                 kind = fam.pin_kind(nl0.inst[inst]['type'], pin)
                 if kind not in ('data', 'input'):
@@ -955,7 +1004,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                 types = instance_types(text)
                 delay_cells += n
                 total_moves[f'hold_round_{rnd}_{it}'] = f'{n} x {dcell} on {len(batch)} endpoints'
-                states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+                states.append((cur, sta.wns, sta.tns, dict(total_moves), {'buffers': buffers_inserted, 'delay': delay_cells}))
             return ok
 
         budget_hit = False
@@ -1004,6 +1053,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
       except Exception as e:          # setup gains stay; report the hold failure explicitly
         phase_status['repair_hold'] = f'failed: {e}'
         log(f'repair_hold: phase aborted ({e}); continuing with the last accepted netlist')
+        log(traceback.format_exc())
 
     # Final state: best TNS among accepted states that did not regress WNS;
     # if every improvement moved the worst path, best TNS overall (reported).
@@ -1016,7 +1066,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     # Rank: TNS first; then, among states that meet timing (WNS >= margin), the
     # latest state (area recovery only ever removes area); otherwise best WNS.
     def rank(i):
-        _, w, t, _ = pool[i]
+        w, t = pool[i][1], pool[i][2]
         met = w >= margin - 1e-6
         return (round(t, 4), 1 if met else 0, i if met else round(w, 4))
     best = pool[max(range(len(pool)), key=rank)]
@@ -1025,6 +1075,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     if rolled_back:
         cur = best[0]
         total_moves = best[3]
+        buffers_inserted, delay_cells = best[4]['buffers'], best[4]['delay']   # counters describe the delivered netlist
         text = cur.read_text()
         types = instance_types(text)
         sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'final', k=max_paths, slack_max=margin, extra_libs=extra_libs)

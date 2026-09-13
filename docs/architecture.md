@@ -542,6 +542,17 @@ STA-call and path-count budgets; the report describes the delivered netlist
 parallel with content-keyed checkpoints (a rerun with unchanged inputs takes
 seconds).
 
+Third round: OpenSTA prints escaped Verilog identifiers without the
+backslash (`\\u_cg.lat[1] ` → `u_cg.lat[1]`), so two clock-gate latches
+were taken for output ports and a valid latch-D repair was skipped. Every
+STA report name is now mapped back to its Verilog spelling
+(`resize.name_alias`), an endpoint that is not an instance must be a declared
+output port (vector bits included) or it is reported as unknown, and the
+rollback restores the inserted-buffer / delay-cell counters together with
+the netlist so the report describes what is delivered. The hold phase also
+no longer shadows the scenario-guard callable with its sensitivity band, a
+bug that made every accepted hold batch fail the phase since §2.15.
+
 ### 2.15 Named scenarios: rank on one, accept on all
 
 One SDC cannot describe a functional mode, a scan mode and a sleep mode at
