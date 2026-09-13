@@ -38,6 +38,7 @@ _AREA_RE = re.compile(r'\barea\s*:\s*([0-9.eE+-]+)')
 _FF_RE = re.compile(r'\bff\s*\(')
 _PIN_RE = re.compile(r'\bpin\s*\(\s*"?([^")\s]+)"?\s*\)\s*\{')
 _BUS_RE = re.compile(r'\bbus\s*\(\s*"?([^")\s]+)"?\s*\)\s*\{')
+_TYPE_RE = re.compile(r'^\s*type\s*\(\s*"?([^")\s]+)"?\s*\)\s*\{', re.M)
 
 
 def _strip_groups(body: str, group_re) -> str:
@@ -243,6 +244,16 @@ class LibCells:
         tu = 1.0 if (m and m.group(1).lower() == 'ps') else 1000.0
         um = re.search(r'capacitive_load_unit\s*\(\s*([0-9.]+)\s*,\s*"?(pf|ff)"?\s*\)', text, re.I)
         cu = (1000.0 if um and um.group(2).lower() == 'pf' else 1.0) * (float(um.group(1)) if um else 1.0)
+        # library-level bus types: `type (data) { bit_from : 0; bit_to : 31; }`.
+        # bit_from is the first (leftmost) bit of a Verilog connection, which is
+        # how OpenSTA numbers the bits; OpenRAM liberties are [0:N-1].
+        bus_types: dict[str, tuple[int, int]] = {}
+        for tm in _TYPE_RE.finditer(text):
+            tbody, _ = _block(text, tm.end() - 1)
+            bf = re.search(r'\bbit_from\s*:\s*(\d+)', tbody)
+            bt = re.search(r'\bbit_to\s*:\s*(\d+)', tbody)
+            if bf and bt:
+                bus_types[tm.group(1)] = (int(bf.group(1)), int(bt.group(1)))
         for cm in _CELL_RE.finditer(text):
             body, _ = _block(text, cm.end() - 1)
             ci = CellInfo(name=cm.group(1))
@@ -259,13 +270,17 @@ class LibCells:
                 d = re.search(r'\bdirection\s*:\s*"?(\w+)"?', bbody)
                 cap = re.search(r'\bcapacitance\s*:\s*([0-9.eE+-]+)', bbody)
                 mc = re.search(r'\bmax_capacitance\s*:\s*([0-9.eE+-]+)', bbody)
+                bt = re.search(r'\bbus_type\s*:\s*"?(\w+)"?', bbody)
                 rng = re.search(r'\bpin\s*\(\s*"?[^"()\[\s]+\[(\d+):(\d+)\]"?\s*\)', bbody)
+                brange = bus_types.get(bt.group(1)) if bt else None
+                if brange is None and rng:
+                    brange = (int(rng.group(1)), int(rng.group(2)))
                 ci.pins[bm.group(1)] = {
                     'dir': d.group(1).lower() if d else 'input',
                     'cap': float(cap.group(1)) * cu if cap else None,
                     'max_cap': float(mc.group(1)) * cu if mc else None,
                     'function': None, 'bus': True,
-                    'range': (int(rng.group(1)), int(rng.group(2))) if rng else None,
+                    'range': brange,          # (first bit, last bit) of a Verilog connection
                 }
             body = _strip_groups(body, _BUS_RE)
             for pm in _PIN_RE.finditer(body):

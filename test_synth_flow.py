@@ -230,6 +230,7 @@ with tempfile.TemporaryDirectory() as td:
     bus = Path(td) / 'bus_sram.lib'
     bus.write_text('''library (bus_sram) {
   time_unit : "1ns"; capacitive_load_unit (1,pf);
+  type (data) { base_type : array; data_type : bit; bit_width : 4; bit_from : 0; bit_to : 3; }
   cell (BSRAM) {
     area : 9000;
     pin (clk0) { direction : input; capacitance : 0.02; clock : true; }
@@ -240,18 +241,19 @@ with tempfile.TemporaryDirectory() as td:
   }
 }''')
     _bl = LibCells([str(LIB_SS), str(bus)])
-    check('bus() groups become one pin per bus with the bus direction', _bl.output_pins('BSRAM') == {'dout0'} and _bl.cells['BSRAM'].pins['din0']['dir'] == 'input' and _bl.bus_ranges() == {'BSRAM': {'din0': (3, 0), 'dout0': (3, 0)}}, str(_bl.cells['BSRAM'].pins))
+    check('bus() groups become one pin per bus with the bus direction and the type bit order', _bl.output_pins('BSRAM') == {'dout0'} and _bl.cells['BSRAM'].pins['din0']['dir'] == 'input' and _bl.bus_ranges() == {'BSRAM': {'din0': (0, 3), 'dout0': (0, 3)}}, str(_bl.cells['BSRAM'].pins))
     _bt = ("module top(clk, a, y);\n  input clk; input [3:0] a; output [3:0] y;\n  wire \\q[3] ; wire \\q[2] ; wire \\q[1] ; wire \\q[0] ; wire n1;\n"
            "  BSRAM u_m (\n    .clk0(clk),\n    .din0({ \\a[3] , \\a[2] , \\a[1] , \\a[0]  }),\n    .dout0({ \\q[3] , \\q[2] , \\q[1] , \\q[0]  })\n  );\n"
            + ''.join(f"  sky130_fd_sc_hd__inv_1 i{k} (\n    .A(\\q[0] ),\n    .Y({'n1' if k == 1 else chr(92) + 'y[' + str(k - 2) + '] '})\n  );\n" for k in (1, 2, 3))
            + "endmodule\n")
     _bn = Netlist(_bt, liberty_output_pins(_bl), _bl.bus_ranges())
     check('macro bus bit is found as driver and its std-cell sinks are listed', _bn.driver('\\q[0]') == ('u_m', 'dout0') and len(_bn.sinks('\\q[0]')) == 3, str((_bn.driver('\\q[0]'), _bn.sinks('\\q[0]'))))
-    check('STA bus pin names map to the concatenation bit', _bn.pin_net('u_m', 'din0[1]') == '\\a[1]' and _bn.pin_net('u_m', 'dout0[3]') == '\\q[3]', str((_bn.pin_net('u_m', 'din0[1]'), _bn.pin_net('u_m', 'dout0[3]'))))
+    # bit_from 0 means the first concatenation item is bit 0 (OpenRAM / OpenSTA numbering)
+    check('STA bus pin names map to the concatenation bit in liberty order', _bn.pin_net('u_m', 'din0[1]') == '\\a[2]' and _bn.pin_net('u_m', 'dout0[3]') == '\\q[0]', str((_bn.pin_net('u_m', 'din0[1]'), _bn.pin_net('u_m', 'dout0[3]'))))
     _bn.buffer_tree('\\q[0]', 'sky130_fd_sc_hd__buf_2', 2); _bn.delay_pin('u_m', 'din0[1]', 'sky130_fd_sc_hd__buf_1', 1)
     _br = _bn.render()
     check('buffer tree on a macro-driven bit and a delay cell into a macro bus bit render as concatenations',
-          '.din0({ \\a[3] , \\a[2] , _rdn_5_ , \\a[0] })' in _br and _br.count('sky130_fd_sc_hd__buf_2 _rd_') == 2 and '.A(\\a[1] )' in _br, _br)
+          '.din0({ \\a[3] , _rdn_5_ , \\a[1] , \\a[0] })' in _br and _br.count('sky130_fd_sc_hd__buf_2 _rd_') == 2 and '.A(\\a[2] )' in _br, _br)
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
