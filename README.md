@@ -98,6 +98,81 @@ Synthesis still targets `clock_port` / `period_ps` for ABC (conservative
 for the second domain). Set `dual_clock_synthesis: true` to enable
 experimental clock-domain-partitioned ABC (`abc -dff` per domain).
 
+## SDC support
+
+One SDC file does two jobs. OpenSTA sources it verbatim (after the tool's
+defaults) for the ranking STA, every repair decision and the sign-off
+corners, so anything OpenSTA accepts is honored where timing is judged.
+Synthesis reads the same file and uses the subset below to drive Yosys/ABC;
+`results/<module>/synth.sdc` records what it understood.
+
+| SDC command | Used by synthesis for | Also in STA |
+|---|---|---|
+| `create_clock -period T [get_ports P]` | Period and clock port of the fastest primary clock (ranking STA, ABC budgets when `abc_target` is set). A second `create_clock` defines the second domain. | ✅ |
+| `create_generated_clock` | Parsed; the domain is timed by OpenSTA. No separate mapping budget. | ✅ |
+| `set_clock_uncertainty -setup` / `-hold` | Uncertainty values for STA and budgets | ✅ |
+| `set_clock_groups -asynchronous` / `-exclusive` | Timed as declared by OpenSTA (no logic partitioning for mapping) | ✅ |
+| `set_input_delay` / `set_output_delay` (`-max`, `-min`) | Boundary timing for ranking and repairs | ✅ |
+| `set_false_path`, `set_multicycle_path`, `set_max_delay`, `set_min_delay` | Exceptions applied in STA; they decide winners and repairs, not the mapping | ✅ |
+| `set_driving_cell -lib_cell X [ports]` | ABC boundary model (`-constr`). A cell from another library is mapped to the same-named cell of the synthesis library | ✅ |
+| `set_load L [ports]` | ABC boundary load (`-max` value) | ✅ |
+| `set_max_fanout N` | Sink group size of `--repair-design` buffer trees | — |
+| `set_dont_use [cells]` | Cells removed from what `abc` / `dfflibmap` may pick (globs allowed) | — |
+| `set_dont_touch [instances]` | Module instances kept through `synth -flatten` | — |
+| `set_case_analysis`, `set_disable_timing`, `set_input_transition`, `set_max_transition`, `set_max_capacitance`, `set_clock_latency`, `set_propagated_clock`, `set_timing_derate`, `group_path`, … | STA only, listed in the log | ✅ |
+
+Object queries run in a real Tcl interpreter: variables, `expr`, `foreach`,
+wildcards, `get_ports`, `get_clocks`, `all_inputs -no_clocks`,
+`all_outputs`, `all_registers`, and `get_pins` / `get_cells` on registers
+(register names survive synthesis; internal combinational names do not).
+Async-reset false paths are derived automatically from register async pins;
+your own `set_false_path` lines are applied as well.
+
+### Examples
+
+A single-clock block with boundary conditions (the bench designs use this form):
+
+```tcl
+set T 5.0
+create_clock -name PCLK -period $T [get_ports PCLK]
+set_clock_uncertainty -setup 0.25 [get_clocks PCLK]
+set_clock_uncertainty -hold  0.10 [get_clocks PCLK]
+set_false_path -from [get_ports PRESETn]
+set_input_delay  -clock PCLK -max [expr 0.25 * $T] [all_inputs -no_clocks]
+set_input_delay  -clock PCLK -min [expr 0.10 * $T] [all_inputs -no_clocks]
+set_output_delay -clock PCLK -max [expr 0.25 * $T] [all_outputs]
+set_output_delay -clock PCLK -min [expr 0.10 * $T] [all_outputs]
+set_driving_cell -lib_cell sky130_fd_sc_hd__inv_1 [all_inputs -no_clocks]
+set_load 0.033 [all_outputs]
+```
+
+Two asynchronous clocks, a divided clock and a CDC exception:
+
+```tcl
+create_clock -name sysclk -period 10.0 [get_ports sysclk]
+create_clock -name spiclk -period 40.0 [get_ports sck]
+create_generated_clock -name clk_div2 -source [get_ports sysclk] -divide_by 2 [get_pins u_div/q_reg/Q]
+set_clock_groups -asynchronous -group {sysclk clk_div2} -group {spiclk}
+set_max_delay 8.0 -from [get_cells sync_*/meta_reg] -to [get_cells sync_*/sync_reg]
+set_multicycle_path -setup 2 -to [get_cells acc_reg*]
+set_multicycle_path -hold  1 -to [get_cells acc_reg*]
+set_input_delay  -clock spiclk -max 5.0 [get_ports {mosi cs_n}]
+set_output_delay -clock spiclk -max 5.0 [get_ports miso]
+```
+
+Steering the mapper and the repairs:
+
+```tcl
+set_dont_use [get_lib_cells sky130_fd_sc_hd__lpflow_*]
+set_dont_use [get_lib_cells {sky130_fd_sc_hd__probe* sky130_fd_sc_hd__sdlclkp*}]
+set_max_fanout 6 [current_design]
+set_dont_touch [get_cells u_dffram]
+set_driving_cell -lib_cell sky130_fd_sc_hd__buf_4 [get_ports clk]
+set_case_analysis 0 [get_ports scan_en]
+```
+
+Precedence and the full list: [docs/sdc-support.md](docs/sdc-support.md).
+
 ## CLI Reference
 
 | Flag | Description |

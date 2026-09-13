@@ -34,9 +34,16 @@ One SDC file is the single source of timing constraints. It has two readers:
   `rst_n`, ...) remains as a fallback. Your SDC's own `set_false_path`
   lines are applied as well (it is sourced last).
 
-## Target (Phase 1 and later)
+## Command reference
 
-### Commands used by synthesis
+The README's *SDC support* section lists what the default (flat) flow does
+with each command. The table below adds the per-cone budgeting effects that
+apply only with `path_groups: true`, the experimental partitioned mapping
+(off by default; measured worse than flat mapping, architecture.md §2.5).
+With `path_groups` off, the exception commands are honored by OpenSTA for
+ranking, repairs and sign-off, but do not change the mapping.
+
+### Commands used by synthesis (flat flow, and with `path_groups`)
 
 | Command | Synthesis effect |
 |---|---|
