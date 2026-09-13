@@ -69,6 +69,7 @@ These are required only when `run_sta: true` (the default). Set
 
 | Field | Type | Description |
 |---|---|---|
+| `mixed_map` | string | `fastest` | With several libraries: `fastest` maps with the fastest library only, `all` offers every cell to ABC (see below). |
 | `lib_synth` | string or list | Explicit liberty for synthesis (Yosys / dfflibmap / ABC / stat). Bypasses the default `lib_slow → lib_typ` resolution. Use `lib_synth: <lib_typ_path>` to fall back to the older optimistic-synth-at-TT flow. |
 
 #### Several libraries at once
@@ -82,17 +83,28 @@ resize_recover_area: true
 ```
 
 The first file of each list is the primary library (wire-load model, flop
-timing for budgets); the others are kept in `lib_extra` per corner and are
-passed to `dfflibmap`, `abc` and `stat` (`-liberty` repeated), read into every
-OpenSTA session and loaded into the post-pass. ABC then maps with the union of
-the cells. The post-pass ranks the libraries by the delay of their inverters
-and buffers and adds two moves that need no equivalence check (same pins,
-same function): on failing paths the same cell in the next **faster** library
-is tried before a bigger drive; with `resize_recover_area` off-critical cells
-are moved to the next **slower** (lower-leakage) library before being
-downsized, while WNS holds. `resize.json` reports leakage (from the liberty)
-and the instance count per library before and after. On the CLI,
-`--lib a.lib,b.lib` (also `--lib-slow`, `--lib-fast`) does the same.
+timing for budgets); the others are kept in `lib_extra` per corner, read into
+every OpenSTA session and loaded into the post-pass. The flow ranks the
+libraries by the delay of their inverters and buffers (from the liberty, so
+HS < MS < LP < LS on Sky130) and applies one rule: **critical paths use fast
+cells only, slow cells go where there is slack.**
+
+- **Mapping** (`mixed_map: fastest`, default): Yosys/ABC map with the fastest
+  library alone, so ABC never trades a critical-path cell for an equal-area
+  slow one. `mixed_map: all` passes every library to `dfflibmap`, `abc` and
+  `stat` (`-liberty` repeated) and lets ABC pick from the union.
+- **Timing repair**: on a failing path the slowest stage is first replaced by
+  the same cell in the *fastest* library (same pins, same function, no area
+  change), then upsized.
+- **Recovery** (`resize_recover_area`): cells farther than 300 ps from the
+  worst slack move to the next *slower* library before being downsized, in
+  batches kept only while WNS holds and TNS does not drop.
+
+`resize.json` reports leakage and the instance count per library before and
+after. Leakage is what the liberty states (`cell_leakage_power`, else the mean
+of the `leakage_power` groups); the Sky130 LS/LP SS liberties report zero for
+most combinational cells, so compare leakage across libraries with care. On
+the CLI, `--lib a.lib,b.lib` (also `--lib-slow`, `--lib-fast`) does the same.
 
 Only libraries that share a placement site and rail geometry can be mixed
 in one design: on Sky130 that is `hs`, `ms`, `ls` and `lp` (0.48 × 3.33 µm

@@ -516,9 +516,10 @@ def pick_moves(paths: list[PathInfo], types: dict[str, str], fam: LibCells,
             cur = types.get(s.inst, s.cell)
             if not flops_too and cur in fam and fam.cells[cur].is_ff:
                 continue
-            # with several standard-cell libraries loaded, the same cell in a
-            # faster library (a Vt swap, no area change) comes before a bigger drive
-            nxt = fam.faster_variant(cur) or next_size(cur, fam)
+            # with several standard-cell libraries loaded, critical paths use fast
+            # cells only: the same cell in the fastest library (a Vt swap, no area
+            # change) comes before a bigger drive
+            nxt = fam.fastest_variant(cur) or next_size(cur, fam)
             if nxt is None:
                 continue
             moves[s.inst] = nxt

@@ -286,6 +286,7 @@ with tempfile.TemporaryDirectory() as td:
     _ml = LibCells([str(fast), str(slow)])
     check('two libraries are ranked by the delay of their single-input cells', _ml.is_multi_lib() and _ml.lib_speed[str(fast)] < _ml.lib_speed[str(slow)], str(_ml.lib_speed))
     check('faster_variant is the same cell in the faster library; none from the fastest', _ml.faster_variant('slowlib__nand2_1') == 'fastlib__nand2_1' and _ml.faster_variant('fastlib__nand2_1') is None)
+    check('fastest_variant jumps straight to the fastest library', _ml.fastest_variant('slowlib__nand2_1') == 'fastlib__nand2_1' and _ml.fastest_variant('fastlib__nand2_1') is None and _ml.fastest_lib() == str(fast))
     check('slower_variant is the reverse', _ml.slower_variant('fastlib__inv_2') == 'slowlib__inv_2' and _ml.slower_variant('slowlib__inv_2') is None)
     check('next_size stays inside one library', _ml.next_size('slowlib__inv_1') == 'slowlib__inv_2' and _ml.next_size('fastlib__inv_1') == 'fastlib__inv_2')
     check('leakage is read per cell and summed over instance types', _ml.cells['fastlib__inv_2'].leakage_nw == 200.0 and _ml.leakage_total({'a': 'fastlib__inv_1', 'b': 'slowlib__inv_1'}) == 110.0)
@@ -297,6 +298,9 @@ with tempfile.TemporaryDirectory() as td:
     check('list-valued lib fields split into primary + lib_extra per corner', _d['lib_typ'] == str(fast) and _d['lib_extra'] == {'typ': [str(slow)], 'slow': [str(slow)], 'fast': []} and _d['lib_slow'] == str(fast), str(_d))
     check('_synth_libs / _liberty_arg use the slow corner and its extras', _synth_libs(_d) == [str(fast), str(slow)] and _liberty_arg(_d) == f'{fast} -liberty {slow}')
     check('_extra_libs = extra std libs + macro libs of the corner', _extra_libs(_d, 'slow') == [str(slow), 'm.lib'] and _extra_libs(_d, 'fast') == [])
+    from synth_flow import _postpass_libs
+    _d2 = dict(_d, lib_synth=str(slow), lib_synth_extra=[])       # mapping library is not the primary slow lib
+    check('post-pass gets the mapping liberty plus every other library of the corner', _postpass_libs(_d2) == (str(slow), [str(fast), 'm.lib'], []), str(_postpass_libs(_d2)))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

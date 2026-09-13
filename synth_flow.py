@@ -141,6 +141,10 @@ class Config:
     # faster or slower library.
     lib_extra: dict = field(default_factory=lambda: {'typ': [], 'slow': [], 'fast': []})
     lib_synth_extra: list = field(default_factory=list)
+    # With several libraries: 'fastest' maps with the fastest library only
+    # (critical paths come out of ABC with fast cells; slower cells enter through
+    # the post-pass recovery where slack allows); 'all' offers every cell to ABC.
+    mixed_map: str = 'fastest'
 
     # --- user-supplied SDC (optional) ---
     # Path to an SDC file sourced by OpenSTA after create_clock and before
@@ -389,6 +393,8 @@ class Config:
             for f in self.tb_files:
                 if not Path(f).exists():
                     errs.append(f"tb file missing: {f}")
+        if self.mixed_map not in ('fastest', 'all'):
+            errs.append(f"mixed_map must be fastest|all, got {self.mixed_map}")
         if self.objective not in ('delay', 'area', 'balanced', 'fastest', 'pareto'):
             errs.append(f"objective must be delay|area|balanced, got {self.objective}")
         if self.fallback not in ('knee', 'best_wns'):
@@ -853,6 +859,20 @@ def _liberty_arg(cfg) -> str:
     """Value for `-liberty {liberty}` in the Yosys templates; several files
     become `a.lib -liberty b.lib` (dfflibmap, abc and stat accept repeats)."""
     return ' -liberty '.join(_synth_libs(cfg))
+
+
+def _postpass_libs(cfg) -> tuple[str, list[str], list[str]]:
+    """(primary, extras at the setup corner, extras at the fast corner) for the
+    post-pass: the mapping liberty first, then every other standard-cell
+    library of the corner and the hard macros, without duplicates."""
+    primary = _synth_lib(cfg)
+    corner = 'slow' if _cfg_get(cfg, 'lib_slow') else 'typ'
+    std = [_cfg_get(cfg, 'lib_slow') or _cfg_get(cfg, 'lib_typ')] + list((_cfg_get(cfg, 'lib_extra') or {}).get(corner, []))
+    macro = _cfg_get(cfg, 'macro_libs') or {}
+    setup = [l for l in dict.fromkeys(std + list(macro.get(corner, []))) if l and l != primary]
+    fast = [l for l in dict.fromkeys([_cfg_get(cfg, 'lib_fast')] + list((_cfg_get(cfg, 'lib_extra') or {}).get('fast', []))
+                                     + list(macro.get('fast', []))) if l and l != _cfg_get(cfg, 'lib_fast')]
+    return primary, setup, fast
 
 
 def _extra_libs(cfg, corner: str) -> list[str]:
@@ -2251,8 +2271,8 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
-            extra_libs=_extra_libs(cfg, 'slow' if cfg.lib_slow else 'typ'),
-            extra_libs_fast=_extra_libs(cfg, 'fast'),
+            extra_libs=_postpass_libs(cfg)[1],
+            extra_libs_fast=_postpass_libs(cfg)[2],
             recover_area=cfg.resize_recover_area,
             dont_use=cfg.dont_use, buffer_cell=cfg.repair_buffer_cell, delay_cell=cfg.repair_delay_cell,
             log=lambda *x: log.debug('[resize] ' + ' '.join(str(v) for v in x)))
@@ -2560,6 +2580,14 @@ def main() -> int:
                             f"using {fallback}")
                 cfg.driving_cell = fallback
                 cfg_dict['driving_cell'] = fallback
+            # Several libraries: map with the fastest one only (mixed_map: fastest)
+            if cfg.mixed_map == 'fastest' and len(_synth_libs(cfg_dict)) > 1 and _lc.fastest_lib():
+                fastest = _lc.fastest_lib()
+                others = [Path(l).name for l in _synth_libs(cfg_dict) if l != fastest]
+                log.info(f"mixed libraries: mapping with the fastest, {Path(fastest).name}; "
+                         f"{', '.join(others)} enter through the post-pass (mixed_map: all to offer every cell to ABC)")
+                cfg.lib_synth, cfg.lib_synth_extra = fastest, []
+                cfg_dict['lib_synth'], cfg_dict['lib_synth_extra'] = fastest, []
             # The user SDC is sourced verbatim by every STA run; a `-lib_cell`
             # from another library (an HD SDC run against HS/MS/LS/LP) would
             # abort OpenSTA, so source a copy with those cells substituted.

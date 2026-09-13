@@ -364,6 +364,19 @@ class LibCells:
         # one step at a time: the slowest of the faster libraries / fastest of the slower ones
         return (max(cands) if faster else min(cands))[1]
 
+    def fastest_variant(self, cell: str) -> Optional[str]:
+        """Same cell in the fastest library that has it (None if already there):
+        timing repair uses fast cells only, no intermediate steps."""
+        c = self.cells.get(cell)
+        if not c or c.lib not in self.lib_speed:
+            return None
+        cands = [(self.lib_speed[self.cells[n].lib], n) for n in self.variants(cell)
+                 if self.cells[n].lib in self.lib_speed and self.lib_speed[self.cells[n].lib] < self.lib_speed[c.lib]]
+        return min(cands)[1] if cands else None
+
+    def fastest_lib(self) -> Optional[str]:
+        return min(self.lib_speed, key=self.lib_speed.get) if self.lib_speed else None
+
     def faster_variant(self, cell: str) -> Optional[str]:
         """Same cell in the next faster library (a Vt swap), or None."""
         return self._variant(cell, True)
