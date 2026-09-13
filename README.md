@@ -199,6 +199,7 @@ Precedence and the full list: [docs/sdc-support.md](docs/sdc-support.md).
 | `--repair-hold` | Delay cells on failing hold endpoints at the fast corner, kept only while slow-corner setup holds |
 | `--recover-area` | After the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies `--resize`) |
 | `--resize-candidates N` | Post-pass on the N best candidates (selected, fastest, Pareto front), then select again (implies `--resize`) |
+| `--strict` | Exit 6 when a module is NOT CLOSED under its required scenarios or misses setup (a post-pass phase failure always exits 5) |
 | `--yosys-opts T...` | Front-end options: `booth`, `adder=kogge-stone\|han-carlson\|sklansky`, `noshare`, `hieropt`, `opt_dff_sat`, `opt_full`. Sweep several, globally or per module, with `yosys_opts_sweep` in YAML |
 | `--objective OBJ` | Recipe subset to run: `delay`, `area`, `balanced` (default). Selection is always min-area-meeting-timing |
 | `--full-sweep` | Run every recipe instead of the objective subset |

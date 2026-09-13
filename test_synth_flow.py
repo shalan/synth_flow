@@ -497,6 +497,46 @@ with tempfile.TemporaryDirectory() as td:
           _res['timing']['rolled_back'] and '_rd_' not in _out and _res['delay_cells_inserted'] == 0
           and _res['cells_end'] == 3 and _res['end']['tns_ns'] == 0.0 and _res['status']['repair_hold'] == 'ok',
           str((_res['timing'], _res['delay_cells_inserted'], _res['cells_end'], _res['end'], _res['status'])))
+# --- scenario guard is consulted by area recovery and hold repair -----------------
+with tempfile.TemporaryDirectory() as td:
+    import resize as _rz
+    from resize import StaOut as _SO, PathInfo as _PI, Stage as _ST
+    _nlt = ("module top(clk, a, y);\n  input clk; input a; output y;\n  wire n1; wire n2;\n"
+            "  sky130_fd_sc_hd__inv_2 i1 (\n    .A(a),\n    .Y(n1)\n  );\n"
+            "  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(n2)\n  );\n"
+            "  sky130_fd_sc_hd__dfxtp_1 f1 (\n    .CLK(clk),\n    .D(n2),\n    .Q(y)\n  );\nendmodule\n")
+    _in = Path(td) / 'in.v'; _in.write_text(_nlt)
+    def _fake_sta3(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode='max', extra_libs=(), alias=None):
+        txt = Path(netlist).read_text(); has_delay = '_rd_' in txt
+        if mode == 'min':
+            return _SO(ok=True, wns=0.1 if has_delay else -0.2, tns=0.0 if has_delay else -0.2,
+                       paths=[] if has_delay else [_PI(endpoint='f1', slack=-0.2, stages=[_ST('f1', 'D', 'sky130_fd_sc_hd__dfxtp_1', 0.1, 1, 0.01, 0.1)])])
+        if 'buf_1 b1' in txt and not has_delay:        # b1 must be buf_2: otherwise the path fails
+            return _SO(ok=True, wns=-0.10, tns=-0.10, paths=[_PI(endpoint='f1', slack=-0.10, stages=[_ST('b1', 'X', 'sky130_fd_sc_hd__buf_1', 0.30, 1, 0.01, 0.1)])])
+        return _SO(ok=True, wns=0.05, tns=0.0, paths=[])   # buf_2 b1, i1 any size, delay cells fine
+    _calls = []
+    def _guard_yes(path):
+        _calls.append(Path(path).name); return True, ''
+    def _guard_no(path):
+        _calls.append(Path(path).name); return False, 'cdc@slow: setup -0.100'
+    _orig = (_rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section)
+    _rz.run_sta = _fake_sta3; _rz.area_of = lambda *a, **k: 100.0
+    _rz.sf._sta_constraints = lambda **k: ''; _rz.sf._wire_load_section = lambda *a, **k: ''
+    try:
+        _ok = _rz.resize(_in, 'top', str(LIB_SS), str(LIB_SS), 1000, 'clk', Path(td) / 'ok', iters=3, recover_area=True,
+                         repair_hold=True, lib_fast=str(LIB_SS), guard=_guard_yes, log=lambda *x: None)
+        _n_yes = len(_calls); _calls.clear()
+        _no = _rz.resize(_in, 'top', str(LIB_SS), str(LIB_SS), 1000, 'clk', Path(td) / 'no', iters=3, recover_area=True,
+                         repair_hold=True, lib_fast=str(LIB_SS), guard=_guard_no, log=lambda *x: None)
+    finally:
+        _rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section = _orig
+    _ok_txt = Path(_ok['output']).read_text(); _no_txt = Path(_no['output']).read_text()
+    check('guard callable is consulted by sizing, area recovery and hold repair (no phase failure)',
+          _ok['status'] == {'repair_design': 'skipped', 'recover_area': 'ok', 'repair_hold': 'ok', 'sizing': 'ok'} and _n_yes >= 3
+          and 'inv_1 i1' in _ok_txt and '_rd_' in _ok_txt, str((_ok['status'], _n_yes, 'inv_1 i1' in _ok_txt, '_rd_' in _ok_txt)))
+    check('a refusing guard rejects recovery and hold moves and keeps the phases healthy',
+          _no['status']['recover_area'] == 'ok' and _no['status']['repair_hold'] == 'ok' and 'inv_2 i1' in _no_txt
+          and '_rd_' not in _no_txt and _no['delay_cells_inserted'] == 0, str((_no['status'], _no['delay_cells_inserted'])))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
