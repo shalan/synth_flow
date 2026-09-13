@@ -90,6 +90,12 @@ on one of those is honored by STA only, and the tool lists those lines.
 - If the SDC sets a driving cell or load, it wins over `driving_cell` /
   `load_ff`.
 - YAML values remain as defaults for anything the SDC does not define.
+- A `-lib_cell` that is not in the synthesis liberty (an HD SDC run against
+  `sky130_fd_sc_hs/ms/ls/lp`) is replaced by the same-named cell of that
+  library (`sky130_fd_sc_hd__inv_1` → `sky130_fd_sc_hs__inv_1`), else by the
+  library's default inverter. STA sources the adapted copy,
+  `results/<top>/<name>.libadapted.sdc`, and the substitution is logged.
+  The same rule applies to the YAML `driving_cell`.
 
 ### Derived constraints file
 

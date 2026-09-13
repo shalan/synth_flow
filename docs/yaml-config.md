@@ -101,7 +101,7 @@ These are required only when `run_gls: true` (the default). Set
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driving_cell` | string | `sky130_fd_sc_hd__inv_2` | Cell used in `set_driving_cell` for ABC's input boundary model. Must exist in `lib_typ`. |
+| `driving_cell` | string | `sky130_fd_sc_hd__inv_2` | Cell used in `set_driving_cell` for ABC's input boundary model and the STA preamble. If it is not in the synthesis liberty (another library, e.g. `sky130_fd_sc_hs`), the flow substitutes the same-named cell of that library (`sky130_fd_sc_hs__inv_2`), else its second-weakest plain inverter, and logs a warning, so the default works unchanged with any library. `-lib_cell` names in the user SDC are adapted the same way (docs/sdc-support.md → Precedence). |
 | `load_ff` | float | `17.65` | Output load in **femtofarads** for ABC's `set_load`. The OpenLane Sky130 HD default. |
 
 ### ABC delay target
@@ -142,10 +142,19 @@ These are required only when `run_gls: true` (the default). Set
 |---|---|---|---|
 | `repair_design` | bool | `false` | Buffer trees on high-fanout nets of failing setup paths (`resize.py`): sinks split into groups of ≤ `max_fanout`, one net per failing path per round, batch accepted on TNS like the upsizes, bisected on rejection. Also `--repair-design`. ABC's own `buffer` runs before any measurement and without the real boundary loads; this is the repair step after OpenSTA has measured. |
 | `max_fanout` | int | `8` | Sink group size for `repair_design`. SDC `set_max_fanout` overrides. |
-| `repair_hold` | bool | `false` | Min-delay STA at the fast corner (`lib_fast`) lists failing hold endpoints; each gets one delay element (a `dlygate` if the liberty has one, else `buf_1`) in front of its data pin per round. A round is kept only if hold TNS improves and slow-corner setup WNS stays at its floor. Also `--repair-hold`. Function-preserving by construction. |
+| `repair_hold` | bool | `false` | Min-delay STA at the fast corner (`lib_fast`) lists failing hold endpoints; each gets one delay element (`repair_delay_cell`) in front of its data pin per round. A round is kept only if hold TNS improves and slow-corner setup WNS stays at its floor. Also `--repair-hold`. Function-preserving by construction. |
+| `repair_buffer_cell` | string | liberty-chosen | Buffer used for `repair_design` trees. Default: the second-weakest cell of the liberty's largest plain buffer family (`buf_2` on Sky130 HD/HS/MS/LS, `buf_1` on LP). Buffers are recognised by function (output = input), not by name. |
+| `repair_delay_cell` | string | liberty-chosen | Delay element for `repair_hold`. Default: the slowest explicit delay cell (`dly*` name) among the weak-drive buffers, else the weakest plain buffer (`dlygate4sd3_1` on the full Sky130 libraries, `buf_1` on the bundled `hd_120` subset). |
 
 Any of `resize_winner`, `repair_design`, `repair_hold` enables the post-pass on
 each module's winner; the input netlist is kept as `winner.presize.v`.
+The post-pass reads the same `macro_libs` as the corner STA (slow corner for
+setup, fast corner for hold), so SRAM/PLL pins have real arcs during sizing
+and their instances are recognised as drivers and sinks by the repairs.
+Drive families, buffers, delay and driving cells all come from the liberty
+(`liberty_timing.LibCells`), so every Sky130 variant (`hd`, `hs`, `ms`, `ls`,
+`lp`) and other technologies work without name tables; `dont_use` patterns
+are honoured by the sizing candidates too.
 
 ### STA modelling
 

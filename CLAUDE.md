@@ -30,3 +30,12 @@ The synthesis library is resolved in this order:
 `lib_synth → lib_slow → lib_typ`. SS-corner synthesis is the default
 when `lib_slow` is set. To get the older TT-corner-synthesis behavior,
 explicitly set `lib_synth: <path-to-tt.lib>`.
+
+## Full Sky130 PDK on this machine
+
+Installed with `ciel` (`python3 -m pip install --user --break-system-packages
+ciel`; `~/Library/Python/3.14/bin` on PATH). Library directories:
+`~/.ciel/ciel/sky130/versions/8afc8346a57fe1ab7934ba5a6056ea8b43078e71/sky130A/libs.ref/`
+with `sky130_fd_sc_{hd,hs,ms,ls,lp}`, `sky130_fd_sc_hvl`, `sky130_sram_macros`.
+`./bench.py --lib-dir <that>/sky130_fd_sc_hs/lib --set "dont_use=[sky130_fd_sc_hs__lpflow_*, sky130_fd_sc_hs__probe*]"`
+runs the bench on another library. Results are in `bench/results/lib-<v>.csv`.

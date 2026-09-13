@@ -184,7 +184,7 @@ def abc_delay_from_log(log_path: Path) -> str:
 
 def run_design(d: dict, args, run_sta: bool) -> list[dict]:
     name = d['name']
-    work = BENCH_DIR / 'work' / name
+    work = Path(args.work_dir) / name
     files = resolve_files(d)
     base = {'design': name, 'category': d.get('category', ''), 'top': d['top']}
     if not files:
@@ -373,6 +373,8 @@ def main() -> int:
     p.add_argument('--set', action='append', metavar='KEY=VALUE', help='extra synth_flow config (repeatable), e.g. --set path_groups=true')
     p.add_argument('--lib-dir', help='directory with the full sky130_fd_sc_hd liberty files (tt/ss/ff corners) instead of the bundled hd_120 subset')
     p.add_argument('--tag', help='results file stem (default: timestamp)')
+    p.add_argument('--work-dir', default=str(BENCH_DIR / 'work'),
+                   help='per-design work root (default bench/work); give each concurrent bench its own')
     p.add_argument('--compare', nargs=2, metavar=('A.csv', 'B.csv'), help='diff two result files and exit')
     args = p.parse_args()
 
@@ -383,10 +385,23 @@ def main() -> int:
     LIBS = {'tt': LIB_TT, 'ss': LIB_SS, 'ff': LIB_FF}
     if args.lib_dir:
         d = Path(args.lib_dir).expanduser()
-        LIBS = {k: d / v for k, v in FULL_LIB_NAMES.items()}
+        # any sky130-style library directory: pick the ss/tt/ff files by their corner tag
+        def pick(tag):
+            hits = sorted(d.glob(f'*__{tag}_*.lib'))
+            pref = [h for h in hits if tag == 'ss' and '100C_1v60' in h.name] or \
+                   [h for h in hits if tag == 'tt' and '025C_1v80' in h.name] or \
+                   [h for h in hits if tag == 'ff' and 'n40C_1v95' in h.name]
+            return (pref or hits or [d / FULL_LIB_NAMES[tag]])[0]
+        LIBS = {k: pick(k) for k in ('tt', 'ss', 'ff')}
+        if not LIBS['tt'].exists() and LIBS['ss'].exists():
+            # sky130_fd_sc_lp ships no tt characterisation: the slow corner
+            # stands in for typical (synthesis already uses ss).
+            print(f"--lib-dir: no tt liberty in {d.parent.name}/{d.name}; using {LIBS['ss'].name} for the typical corner")
+            LIBS['tt'] = LIBS['ss']
         missing = [str(v) for v in LIBS.values() if not v.exists()]
         if missing:
             sys.exit(f'--lib-dir: missing {missing}')
+        print(f"libraries: {', '.join(v.name for v in LIBS.values())}")
 
     if args.quick and not args.recipes:
         args.recipes = QUICK_RECIPES

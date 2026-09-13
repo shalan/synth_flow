@@ -46,6 +46,7 @@ from liberty_timing import read_liberty_timing  # noqa: E402
 
 ENDPOINT_TCL = """\
 read_liberty {liberty}
+{extra_libs}
 read_verilog {netlist}
 link_design {top}
 {constraints}
@@ -71,11 +72,12 @@ class StaResult:
 
 
 def run_sta(opensta: str, liberty: str, netlist: Path, top: str, constraints: str,
-            slack_max_ns: float, out_dir: Path, tag: str, max_paths: int = 2000) -> StaResult:
+            slack_max_ns: float, out_dir: Path, tag: str, max_paths: int = 2000, extra_libs=()) -> StaResult:
     tcl = out_dir / f'{tag}.sta.tcl'
     log = out_dir / f'{tag}.sta.log'
     tcl.write_text(ENDPOINT_TCL.format(liberty=liberty, netlist=netlist, top=top, constraints=constraints,
-                                       slack_max=slack_max_ns, max_paths=max_paths))
+                                       slack_max=slack_max_ns, max_paths=max_paths,
+                                       extra_libs='\n'.join(f'read_liberty {l}' for l in (extra_libs or []))))
     r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
     out = r.stdout + r.stderr
     log.write_text(out)

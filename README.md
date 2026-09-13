@@ -23,6 +23,11 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
 - **STA-guided repairs** — `--resize` (drive strengths), `--repair-design`
   (buffer trees on high-fanout nets) and `--repair-hold` (delay cells on hold
   violations) with OpenSTA as the judge and function preserved by construction
+- **Any liberty, any Sky130 variant** — cell choices for sizing and repairs
+  (drive families, buffers, delay and driving cells) come from the liberty,
+  not from name tables; `sky130_fd_sc_hd`, `hs`, `ms`, `ls`, `lp` and hard
+  macro liberties (OpenRAM `bus()` pins) work out of the box, and an HD SDC
+  is adapted to the target library
 - **Multi-corner STA** — SS (setup), TT (setup+hold), FF (hold) via OpenSTA
 - **Hierarchical (bottom-up) synthesis** — leaf modules first, winning
   netlists reused by parents
@@ -136,6 +141,10 @@ standard cell library so that:
 2. OpenSTA gets timing arcs for paths that touch the macro — without
    this the SRAM input setup, clock-to-Q, and output transition are all
    silently zero, producing optimistic WNS and missed setup violations.
+3. The post-pass (`resize_winner`, `repair_design`, `repair_hold`) sees the
+   same arcs and treats macro instances as drivers and sinks, so a
+   high-fanout SRAM output can be buffered and a path into an SRAM data
+   pin sized like any other.
 
 Configure via the `macro_libs` YAML field. Two formats:
 
@@ -256,6 +265,8 @@ results/
 ```
 synth_flow/
   synth_flow.py       # Main orchestrator
+  liberty_timing.py   # Liberty reader: flop timing + LibCells cell catalogue
+  resize.py           # OpenSTA-guided sizing, buffer trees, hold repair
   area_report.py      # Cell count + area report utility
   test_synth_flow.py  # Unit tests (no EDA tools needed)
   recipes/            # 18 ABC recipe scripts (+ retired/)

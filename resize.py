@@ -22,8 +22,14 @@ depth. This pass closes that gap without touching logic:
   until nothing fails, the iteration cap, or no candidates remain.
   apb_timer winner: TNS -3.27 -> -0.09 ns, failing endpoints 61 -> 1, area +1.6 %.
 
-Sizing preserves function by construction (same cell function, same pin
-names across Sky130 drive variants), so no equivalence check is needed.
+Sizing preserves function by construction: a drive family is the set of
+liberty cells with identical pin names, directions and functions
+(`liberty_timing.LibCells`), so swaps never change logic and no equivalence
+check is needed. Buffers, the delay cell and the default driving cell are
+also taken from the liberty (by function, not by name), and hard-macro
+liberties passed with --extra-lib are loaded into STA and the netlist
+model, so the pass works on any Sky130 variant (hd/hs/ms/ls/lp) or other
+technology, with or without SRAM macros.
 
     python3 resize.py --netlist results/top/winner.v --top top \\
         --lib sky130/hd_120_ss.lib --period-ps 8000 --clock-port clk [--sdc top.sdc]
@@ -42,57 +48,38 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import synth_flow as sf  # noqa: E402
+from liberty_timing import LibCells  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Liberty: drive variants per function
 # --------------------------------------------------------------------------
 
-_DRIVE_RE = re.compile(r'^(.*)_(\d+)$')
+def drive_families(liberty, dont_use=()) -> LibCells:
+    """Cell catalogue over one or more liberty files (kept name for callers)."""
+    libs = [liberty] if isinstance(liberty, (str, Path)) else list(liberty)
+    return LibCells(libs, dont_use=dont_use)
 
 
-def drive_families(liberty: str) -> dict[str, list[int]]:
-    """base name -> sorted list of available drive strengths, e.g.
-    'sky130_fd_sc_hd__nand2' -> [1, 2, 4, 8]."""
-    text = Path(liberty).read_text(errors='ignore')
-    fam: dict[str, set[int]] = {}
-    for m in re.finditer(r'\bcell\s*\(\s*"?([^")\s]+)"?\s*\)', text):
-        dm = _DRIVE_RE.match(m.group(1))
-        if dm:
-            fam.setdefault(dm.group(1), set()).add(int(dm.group(2)))
-    return {k: sorted(v) for k, v in fam.items()}
+def prev_size(cell: str, fam: LibCells) -> Optional[str]:
+    return fam.prev_size(cell)
 
 
-def prev_size(cell: str, fam: dict[str, list[int]]) -> Optional[str]:
-    dm = _DRIVE_RE.match(cell)
-    if not dm:
-        return None
-    base, n = dm.group(1), int(dm.group(2))
-    smaller = [s for s in fam.get(base, []) if s < n]
-    return f'{base}_{smaller[-1]}' if smaller else None
-
-
-def next_size(cell: str, fam: dict[str, list[int]]) -> Optional[str]:
-    dm = _DRIVE_RE.match(cell)
-    if not dm:
-        return None
-    base, n = dm.group(1), int(dm.group(2))
-    sizes = fam.get(base, [])
-    bigger = [s for s in sizes if s > n]
-    return f'{base}_{bigger[0]}' if bigger else None
+def next_size(cell: str, fam: LibCells) -> Optional[str]:
+    return fam.next_size(cell)
 
 
 # --------------------------------------------------------------------------
 # Netlist: instance -> type, in-place retyping
 # --------------------------------------------------------------------------
 
-_INST_RE = re.compile(r'^(\s*)(sky130_fd_sc_[a-z]+__\w+|[A-Za-z_][\w$]*)\s+(\\?[\w$\[\]\.]+)\s*\(', re.M)
+_INST_RE = re.compile(r'^(\s*)(\\?[A-Za-z_$][\w$\.]*)\s+(\\?[\w$\[\]\.]+)\s*\(', re.M)
 
 
 def instance_types(netlist_text: str) -> dict[str, str]:
     out = {}
     for m in _INST_RE.finditer(netlist_text):
         typ, inst = m.group(2), m.group(3)
-        if typ in ('module', 'input', 'output', 'wire', 'reg', 'assign'):
+        if typ in ('module', 'input', 'output', 'inout', 'wire', 'reg', 'assign', 'always', 'initial'):
             continue
         out[inst] = typ
     return out
@@ -112,35 +99,16 @@ def retype(netlist_text: str, changes: dict[str, str]) -> str:
 # Netlist model: instances, pins, nets; buffer trees and delay chains
 # --------------------------------------------------------------------------
 
-_INST_BLOCK_RE = re.compile(r'^(\s*)(sky130_fd_sc_[a-z]+__\w+)\s+(\\?[\w$\[\]\.]+)\s*\((.*?)\);', re.M | re.S)
+_INST_BLOCK_RE = re.compile(r'^(\s*)(\\?[A-Za-z_$][\w$\.]*)\s+(\\?[\w$\[\]\.]+)\s*\((.*?)\);', re.M | re.S)
+_NOT_INSTANCES = {'module', 'input', 'output', 'inout', 'wire', 'reg', 'assign', 'always', 'initial', 'function', 'task'}
 _PIN_CONN_RE = re.compile(r'\.(\w+)\s*\(\s*(.*?)\s*\)\s*(?:,|$)', re.S)
 _OUT_PINS = {'X', 'Y', 'Q', 'Q_N', 'COUT', 'SUM', 'COUT_N', 'SUM_N', 'Z', 'HI', 'LO'}
 
 
-def liberty_output_pins(liberty: str) -> dict[str, set[str]]:
-    """cell -> set of output pin names, from the liberty (direction : output)."""
-    text = re.sub(r'/\*.*?\*/', '', Path(liberty).read_text(errors='ignore'), flags=re.S)
-    out: dict[str, set[str]] = {}
-    for cm in re.finditer(r'\bcell\s*\(\s*"?([^")\s]+)"?\s*\)\s*\{', text):
-        depth, i, start = 0, cm.end() - 1, cm.end()
-        for j in range(i, len(text)):
-            if text[j] == '{': depth += 1
-            elif text[j] == '}':
-                depth -= 1
-                if depth == 0: break
-        body = text[start:j]
-        pins = set()
-        for pm in re.finditer(r'\bpin\s*\(\s*"?(\w+)"?\s*\)\s*\{', body):
-            d2, k = 0, pm.end() - 1
-            for q in range(k, len(body)):
-                if body[q] == '{': d2 += 1
-                elif body[q] == '}':
-                    d2 -= 1
-                    if d2 == 0: break
-            if re.search(r'direction\s*:\s*"?output"?', body[pm.end():q]):
-                pins.add(pm.group(1))
-        out[cm.group(1)] = pins
-    return out
+def liberty_output_pins(liberty, dont_use=()) -> dict[str, set[str]]:
+    """cell -> output pins, over one or more liberty files (standard cells + macros)."""
+    lc = liberty if isinstance(liberty, LibCells) else drive_families(liberty, dont_use)
+    return {name: set(c.outputs) for name, c in lc.cells.items()}
 
 
 class Netlist:
@@ -148,15 +116,19 @@ class Netlist:
     Instances are edited in place in the text; new wires are declared before
     the first instance and new instances appended before `endmodule`."""
 
-    def __init__(self, text: str, out_pins: dict[str, set[str]]):
+    def __init__(self, text: str, out_pins: dict[str, set[str]],
+                 bus_ranges: Optional[dict[str, dict[str, tuple[int, int]]]] = None):
         self.text = text
         self.out_pins = out_pins
+        self.bus_ranges = bus_ranges or {}       # cell -> {bus pin: (msb, lsb)} from the liberty
         self.inst: dict[str, dict] = {}        # name -> {'type', 'pins': {pin: conn}, 'span': (a, b), 'indent'}
         self.counter = 0
         for m in _INST_BLOCK_RE.finditer(text):
+            if m.group(2) in _NOT_INSTANCES or m.group(2).startswith('$'):
+                continue
             pins = {pm.group(1): pm.group(2).strip() for pm in _PIN_CONN_RE.finditer(m.group(4))}
             self.inst[m.group(3)] = {'type': m.group(2), 'pins': pins, 'span': m.span(), 'indent': m.group(1), 'new': False}
-        self._first_inst = min((i['span'][0] for i in self.inst.values()), default=text.rfind('endmodule'))
+        self._first_inst = min((i['span'][0] for i in self.inst.values() if i['span']), default=text.rfind('endmodule'))
         self.new_wires: list[str] = []
         self.names = set(self.inst) | set(re.findall(r'^\s*(?:wire|input|output|inout)\s+(?:\[[^\]]+\]\s*)?(\\?[\w$\.]+)', text, re.M))
         # `assign lhs = rhs;` feed-throughs (input -> output with no cell)
@@ -199,22 +171,98 @@ class Netlist:
                 return lhs, pairs[bit], pairs
         return None
 
+    # ---- bus connections (hard macros): `.dout0({ \\q[31] , ... , \\q[0]  })` ----
+    @staticmethod
+    def _concat_items(conn: str) -> Optional[list[str]]:
+        """Top-level items of a `{a, b, ...}` concatenation, or None."""
+        c = conn.strip()
+        if not (c.startswith('{') and c.endswith('}')):
+            return None
+        return [x.strip() for x in c[1:-1].split(',') if x.strip()]
+
+    def _conn_bits(self, conn: str) -> list[str]:
+        """Connection expression as a list of bit expressions, MSB first
+        (constants and anything unparsable stay as single items)."""
+        items = self._concat_items(conn)
+        if items is None:
+            items = [conn.strip()]
+        out: list[str] = []
+        for it in items:
+            bits = self._bits(it) if not re.match(r"\d+'", it) else None
+            out.extend(bits if bits else [it])
+        return out
+
+    @staticmethod
+    def _pin_index(pin: str) -> tuple[str, Optional[int]]:
+        m = re.fullmatch(r'(\\?[\w$\.]+)\[(\d+)\]', pin)
+        return (m.group(1), int(m.group(2))) if m else (pin, None)
+
+    def _bit_pos(self, inst: str, base: str, k: int, n_items: int) -> Optional[int]:
+        """Position of bus bit `k` in the MSB-first item list of `inst/base`."""
+        hi, lo = self.bus_ranges.get(self.inst[inst]['type'], {}).get(base, (n_items - 1, 0))
+        pos = hi - k if hi >= lo else k - hi
+        return pos if 0 <= pos < n_items else None
+
+    def pin_net(self, inst: str, pin: str) -> Optional[str]:
+        """Net connected to `inst/pin`; `pin` may be a bus bit (`din0[3]`) of a
+        macro whose connection is a concatenation."""
+        pins = self.inst[inst]['pins']
+        if pin in pins:
+            c = pins[pin]
+            return None if self._concat_items(c) is not None else c
+        base, k = self._pin_index(pin)
+        if k is None or base not in pins:
+            return None
+        bits = self._conn_bits(pins[base])
+        pos = self._bit_pos(inst, base, k, len(bits))
+        return bits[pos] if pos is not None else None
+
+    def set_pin_net(self, inst: str, pin: str, new: str, old: Optional[str] = None) -> bool:
+        """Connect `inst/pin` to `new`. For a bus pin the connection is a
+        concatenation: with a bit index in `pin` that bit is replaced, else every
+        item equal to `old` is."""
+        pins = self.inst[inst]['pins']
+        if pin in pins and self._concat_items(pins[pin]) is None:
+            pins[pin] = new
+            return True
+        base, k = self._pin_index(pin)
+        if base not in pins:
+            return False
+        bits = self._conn_bits(pins[base])
+        if k is not None:
+            pos = self._bit_pos(inst, base, k, len(bits))
+            if pos is None:
+                return False
+            bits[pos] = new
+        elif old is not None and old in bits:
+            bits = [new if b == old else b for b in bits]
+        else:
+            return False
+        pins[base] = '{ ' + ' , '.join(bits) + ' }'
+        return True
+
     def out_pin_name(self, cell: str) -> str:
         pins = self.out_pins.get(cell) or {'X'}
         return sorted(pins)[0]
 
     def is_output_pin(self, cell: str, pin: str) -> bool:
         pins = self.out_pins.get(cell)
-        return pin in pins if pins else pin in _OUT_PINS
+        base = self._pin_index(pin)[0]
+        return base in pins if pins else base in _OUT_PINS
+
+    def _pin_has(self, conn: str, net: str) -> bool:
+        return conn == net or (conn.startswith('{') and net in self._conn_bits(conn))
 
     def sinks(self, net: str) -> list[tuple[str, str]]:
+        """(inst, pin) pairs whose input connection is `net` (a bus pin counts
+        when one of its bits is `net`)."""
         return [(n, p) for n, i in self.inst.items() for p, c in i['pins'].items()
-                if c == net and not self.is_output_pin(i['type'], p)]
+                if self._pin_has(c, net) and not self.is_output_pin(i['type'], p)]
 
     def driver(self, net: str) -> Optional[tuple[str, str]]:
         for n, i in self.inst.items():
             for p, c in i['pins'].items():
-                if c == net and self.is_output_pin(i['type'], p):
+                if self._pin_has(c, net) and self.is_output_pin(i['type'], p):
                     return n, p
         return None
 
@@ -236,7 +284,8 @@ class Netlist:
         self.new_wires.append(w)
         return w
 
-    def buffer_tree(self, net: str, buf_cell: str, group: int, keep_ports: bool = True) -> int:
+    def buffer_tree(self, net: str, buf_cell: str, group: int, keep_ports: bool = True,
+                    in_pin: str = 'A', out_pin: str = 'X') -> int:
         """Split `net`'s sinks into groups of <= `group`, each fed by a new
         buffer; output ports (bare names not driven by an instance input) stay
         on the original net. Returns the number of buffers inserted."""
@@ -248,21 +297,23 @@ class Netlist:
         n = 0
         for g in groups:
             w = self.add_wire()
-            self.add_inst(buf_cell, {'A': net, 'X': w})
+            self.add_inst(buf_cell, {in_pin: net, out_pin: w})
             for inst, pin in g:
-                self.inst[inst]['pins'][pin] = w
+                self.set_pin_net(inst, pin, w, old=net)
             n += 1
         return n
 
     def delay_pin(self, inst: str, pin: str, delay_cell: str, count: int, in_pin='A', out_pin='X') -> int:
         """Feed input `inst/pin` through `count` delay cells."""
-        net = self.inst[inst]['pins'][pin]
+        net = self.pin_net(inst, pin)
+        if net is None or re.match(r"\d+'", net):        # unknown pin or a constant
+            return 0
         cur = net
         for _ in range(count):
             w = self.add_wire()
             self.add_inst(delay_cell, {in_pin: cur, out_pin: w})
             cur = w
-        self.inst[inst]['pins'][pin] = cur
+        self.set_pin_net(inst, pin, cur, old=net)
         return count
 
     def delay_port(self, port: str, delay_cell: str, count: int, in_pin='A', out_pin='X') -> int:
@@ -284,7 +335,7 @@ class Netlist:
                 cur = w
             return count
         w0 = self.add_wire()
-        self.inst[drv[0]]['pins'][drv[1]] = w0
+        self.set_pin_net(drv[0], drv[1], w0, old=port)
         cur = w0
         for k in range(count):
             w = port if k == count - 1 else self.add_wire()
@@ -303,6 +354,8 @@ class Netlist:
         pos = 0
         for m in _INST_BLOCK_RE.finditer(self.text):
             name = m.group(3)
+            if name not in self.inst:
+                continue
             out.append(self.text[pos:m.start()])
             out.append(block(name, self.inst[name]))
             pos = m.end()
@@ -319,9 +372,15 @@ class Netlist:
             text = text[:k] + ''.join(f'  assign {lb} = {rb};\n' for lb, rb in keep) + text[k:]
         if self.new_wires:
             decl = ''.join(f'  wire {w};\n' for w in self.new_wires)
-            # declare before the first instance (Yosys puts all declarations first)
-            m = _INST_BLOCK_RE.search(text)
-            k = m.start() if m else text.rfind('endmodule')
+            # declare before the first real instance (Yosys puts all declarations
+            # first); the regex also matches the module header, so skip non-instances
+            k = None
+            for m in _INST_BLOCK_RE.finditer(text):
+                if m.group(3) in self.inst:
+                    k = m.start()
+                    break
+            if k is None:
+                k = text.rfind('endmodule')
             text = text[:k] + decl + text[k:]
         news = [n for n, i in self.inst.items() if i['new']]
         if news:
@@ -330,14 +389,9 @@ class Netlist:
         return text
 
 
-def pick_delay_cell(liberty: str, fam: dict[str, list[int]]) -> tuple[str, str, str]:
-    """(cell, in_pin, out_pin): a dlygate if the library has one, else buf_1."""
-    for base in ('sky130_fd_sc_hd__dlygate4sd3', 'sky130_fd_sc_hd__dlygate4sd2', 'sky130_fd_sc_hd__dlygate4sd1'):
-        if base in fam:
-            return f'{base}_{fam[base][0]}', 'A', 'X'
-    if 'sky130_fd_sc_hd__buf' in fam:
-        return f'sky130_fd_sc_hd__buf_{fam["sky130_fd_sc_hd__buf"][0]}', 'A', 'X'
-    raise RuntimeError('no delay/buffer cell found in liberty')
+def pick_delay_cell(liberty, fam: LibCells) -> tuple[str, str, str]:
+    """(cell, in_pin, out_pin): the slowest usable buffer in the catalogue."""
+    return fam.delay_cell()
 
 
 # --------------------------------------------------------------------------
@@ -346,6 +400,7 @@ def pick_delay_cell(liberty: str, fam: dict[str, list[int]]) -> tuple[str, str, 
 
 PATHS_TCL = """\
 read_liberty {liberty}
+{extra_libs}
 read_verilog {netlist}
 link_design {top}
 {constraints}
@@ -387,10 +442,11 @@ class StaOut:
 
 
 def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, tag, k=200, slack_max=0.0,
-            mode='max') -> StaOut:
+            mode='max', extra_libs=()) -> StaOut:
     tcl = out_dir / f'{tag}.tcl'
     tcl.write_text(PATHS_TCL.format(liberty=liberty, netlist=netlist, top=top, constraints=constraints,
-                                    k=k, slack_max=slack_max, mode=mode))
+                                    k=k, slack_max=slack_max, mode=mode,
+                                    extra_libs='\n'.join(f'read_liberty {l}' for l in (extra_libs or []))))
     r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
     text = r.stdout + r.stderr
     (out_dir / f'{tag}.log').write_text(text)
@@ -437,14 +493,15 @@ class Step:
     accepted: bool
 
 
-def area_of(yosys: str, liberty: str, netlist: Path, top: str) -> float:
-    r = subprocess.run([yosys, '-p', f'read_liberty -lib {liberty}; read_verilog {netlist}; '
-                        f'hierarchy -top {top}; stat -liberty {liberty}'], capture_output=True, text=True)
+def area_of(yosys: str, liberty: str, netlist: Path, top: str, extra_libs=()) -> float:
+    libs = ' '.join(f'read_liberty -lib {l};' for l in [liberty, *extra_libs])
+    r = subprocess.run([yosys, '-p', f'{libs} read_verilog {netlist}; hierarchy -top {top}; stat -liberty {liberty}'],
+                       capture_output=True, text=True)
     m = re.search(r'Chip area for (?:top )?module.*?:\s*([0-9.]+)', r.stdout)
     return float(m.group(1)) if m else 0.0
 
 
-def pick_moves(paths: list[PathInfo], types: dict[str, str], fam: dict[str, list[int]],
+def pick_moves(paths: list[PathInfo], types: dict[str, str], fam: LibCells,
                tried: set[str], per_path: int = 1, flops_too: bool = True) -> dict[str, str]:
     """One (or per_path) upsizes per failing path: the stages with the largest
     delay whose cell has a bigger drive variant and was not tried before."""
@@ -456,7 +513,7 @@ def pick_moves(paths: list[PathInfo], types: dict[str, str], fam: dict[str, list
             if s.inst in moves or s.inst in tried:
                 continue
             cur = types.get(s.inst, s.cell)
-            if not flops_too and re.search(r'__(df|dl|sd)', cur):
+            if not flops_too and cur in fam and fam.cells[cur].is_ff:
                 continue
             nxt = next_size(cur, fam)
             if nxt is None:
@@ -470,12 +527,14 @@ def pick_moves(paths: list[PathInfo], types: dict[str, str], fam: dict[str, list
 
 def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: int, clock_port: str,
            out_dir: Path, *, sdc=None, iters=10, margin_ps=0, yosys='yosys', opensta='sta',
-           driving_cell='sky130_fd_sc_hd__inv_2', load_ff=17.65, unc_setup_ps=250, unc_hold_ps=100,
+           driving_cell=None, load_ff=17.65, unc_setup_ps=250, unc_hold_ps=100,
            wire_load_model='auto', io_delay_frac=0.2, io_delay_min_frac=0.4, clock_port_2=None, period_ps_2=None,
            per_path=1, max_paths=200, wns_tol=0.15, wns_repair_iters=8, final='tns',
            recover_area=False, recover_rounds=6,
            repair_design=False, max_fanout=8, buffer_iters=6,
-           repair_hold=False, lib_fast=None, hold_iters=10, log=print) -> dict:
+           repair_hold=False, lib_fast=None, hold_iters=10,
+           extra_libs=(), extra_libs_fast=None, dont_use=(), buffer_cell=None, delay_cell=None,
+           log=print) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     constraints = sf._sta_constraints(
         clock_port=clock_port, period_ns=period_ps / 1000.0, clock_port_2=clock_port_2,
@@ -484,7 +543,12 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         driving_cell=driving_cell, load_pf=load_ff / 1000.0,
         wire_load_section=sf._wire_load_section(wire_load_model, sta_liberty), io_delay_frac=io_delay_frac,
         io_delay_min_frac=io_delay_min_frac)
-    fam = drive_families(liberty)
+    # Catalogue over the synthesis liberty plus hard-macro libraries, so macro
+    # pins get directions (netlist model) and STA gets their timing arcs.
+    fam = drive_families([liberty, *extra_libs], dont_use)
+    driving_cell = driving_cell or fam.default_driving_cell()
+    extra_libs = list(extra_libs or [])
+    extra_libs_fast = list(extra_libs_fast if extra_libs_fast is not None else extra_libs)
     margin = margin_ps / 1000.0
 
     cur = out_dir / 'it0.v'
@@ -492,10 +556,10 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     sf._strip_signed_decls(cur)
     text = cur.read_text()
     types = instance_types(text)
-    sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'it0', k=max_paths, slack_max=margin)
+    sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'it0', k=max_paths, slack_max=margin, extra_libs=extra_libs)
     if not sta.ok:
         raise RuntimeError(f'OpenSTA failed, see {sta.log}')
-    area0 = area_of(yosys, liberty, cur, top)
+    area0 = area_of(yosys, liberty, cur, top, extra_libs)
     log(f'start: WNS={sta.wns:+.3f} TNS={sta.tns:+.2f} area={area0:.1f} failing paths={len(sta.paths)} '
         f'(margin {margin} ns)')
     steps: list[Step] = []
@@ -503,14 +567,15 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     total_moves: dict[str, str] = {}
     start_wns = sta.wns
     states: list[tuple[Path, float, float, dict]] = [(cur, sta.wns, sta.tns, {})]   # accepted (netlist, wns, tns, moves so far)
-    out_pins = liberty_output_pins(liberty)
+    out_pins = liberty_output_pins(fam)
+    bus_ranges = fam.bus_ranges()
     buffers_inserted = 0
     it = 0
 
     def evaluate_text(new_text: str, tag: str):
         new = out_dir / f'{tag}.v'
         new.write_text(new_text)
-        r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin)
+        r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin, extra_libs=extra_libs)
         return new, r
 
     def accept_tns(old: StaOut, new: StaOut) -> bool:
@@ -524,21 +589,24 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     # with buffer trees (groups of <= max_fanout sinks), one net per failing
     # path per round, batch accepted on TNS, bisected on rejection.
     if repair_design and sta.paths:
-        buf_sizes = fam.get('sky130_fd_sc_hd__buf', [])
-        buf_cell = f"sky130_fd_sc_hd__buf_{2 if 2 in buf_sizes else (buf_sizes[0] if buf_sizes else 1)}"
+        if buffer_cell and buffer_cell in fam:
+            c = fam.cells[buffer_cell]
+            buf_cell, buf_in, buf_out = buffer_cell, c.inputs[0], c.outputs[0]
+        else:
+            buf_cell, buf_in, buf_out = fam.buffer_cell()
         buffered: set[str] = set()
         for rnd in range(buffer_iters):
             if not sta.paths:
                 break
-            nl = Netlist(text, out_pins)
+            nl = Netlist(text, out_pins, bus_ranges)
             cands: list[tuple[float, str]] = []
             for pth in sta.paths:
                 best = None
                 for st in pth.stages:
-                    if st.fanout is None or st.fanout < max_fanout or st.inst not in nl.inst:
+                    if st.fanout is None or st.fanout <= max_fanout or st.inst not in nl.inst:   # split only nets with > max_fanout sinks
                         continue
-                    net = nl.inst[st.inst]['pins'].get(st.pin)
-                    if not net or net in buffered or net in [c[1] for c in cands]:
+                    net = nl.pin_net(st.inst, st.pin)
+                    if not net or re.match(r"\d+'", net) or net in buffered or net in [c[1] for c in cands]:
                         continue
                     if best is None or st.delay > best[0]:
                         best = (st.delay, net)
@@ -551,8 +619,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             batch = [net for _, net in cands]
             accepted = False
             while batch:
-                nl = Netlist(text, out_pins)
-                nb = sum(nl.buffer_tree(net, buf_cell, max_fanout) for net in batch)
+                nl = Netlist(text, out_pins, bus_ranges)
+                nb = sum(nl.buffer_tree(net, buf_cell, max_fanout, in_pin=buf_in, out_pin=buf_out) for net in batch)
                 if nb == 0:                       # STA fanout counted pins we do not split (ports etc.)
                     buffered |= set(batch)
                     break
@@ -584,7 +652,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         new_text = retype(text, moves)
         new = out_dir / f'{tag}.v'
         new.write_text(new_text)
-        r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin)
+        r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin, extra_libs=extra_libs)
         return new, new_text, r
 
     def accept(old: StaOut, new: StaOut) -> bool:
@@ -715,15 +783,19 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     delay_cells = 0
     if repair_hold:
         hold_lib = lib_fast or sta_liberty
-        dcell, dpin_in, dpin_out = pick_delay_cell(liberty, fam)
-        hold = run_sta(opensta, hold_lib, cur, top, constraints, out_dir, 'hold0', k=max_paths, slack_max=0.0, mode='min')
+        if delay_cell and delay_cell in fam:
+            c = fam.cells[delay_cell]
+            dcell, dpin_in, dpin_out = delay_cell, c.inputs[0], c.outputs[0]
+        else:
+            dcell, dpin_in, dpin_out = fam.delay_cell()
+        hold = run_sta(opensta, hold_lib, cur, top, constraints, out_dir, 'hold0', k=max_paths, slack_max=0.0, mode='min', extra_libs=extra_libs_fast)
         hold_before = (hold.wns, hold.tns)
         log(f'hold @fast: WNS={hold.wns:+.3f} TNS={hold.tns:+.2f} failing={len(hold.paths)}; delay cell {dcell}')
         setup_floor = min(sta.wns, margin)
         for rnd in range(hold_iters):
             if not hold.paths or not hold.ok:
                 break
-            nl = Netlist(text, out_pins)
+            nl = Netlist(text, out_pins, bus_ranges)
             n = 0
             for pth in hold.paths:
                 # report_checks names a register endpoint by instance; the data
@@ -743,8 +815,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             it += 1
             new = out_dir / f'it{it}.v'
             new.write_text(nl.render())
-            hold_new = run_sta(opensta, hold_lib, new, top, constraints, out_dir, f'hold{rnd + 1}', k=max_paths, slack_max=0.0, mode='min')
-            setup_new = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, f'it{it}', k=max_paths, slack_max=margin)
+            hold_new = run_sta(opensta, hold_lib, new, top, constraints, out_dir, f'hold{rnd + 1}', k=max_paths, slack_max=0.0, mode='min', extra_libs=extra_libs_fast)
+            setup_new = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, f'it{it}', k=max_paths, slack_max=margin, extra_libs=extra_libs)
             ok = (hold_new.ok and setup_new.ok and hold_new.tns > hold.tns + 1e-6
                   and setup_new.wns >= setup_floor - 1e-6 and setup_new.tns >= sta.tns - 0.05)
             steps.append(Step(it=it, moves={f'hold:{p.endpoint}': dcell for p in hold.paths}, wns_before=hold.wns,
@@ -779,13 +851,13 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     if best[0] != cur:
         cur = best[0]
         total_moves = best[3]
-        sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'final', k=max_paths, slack_max=margin)
+        sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'final', k=max_paths, slack_max=margin, extra_libs=extra_libs)
         log(f'final state rolled back to {cur.name}: WNS={sta.wns:+.3f} TNS={sta.tns:+.2f}')
     if wns_regressed:
         log(f'note: WNS regressed {start_wns:+.3f} -> {sta.wns:+.3f} for a TNS gain; --final wns forbids this')
     final = out_dir / 'resized.v'
     shutil.copy(cur, final)
-    area = area_of(yosys, liberty, final, top)
+    area = area_of(yosys, liberty, final, top, extra_libs)
     log(f'end:   WNS={sta.wns:+.3f} TNS={sta.tns:+.2f} area={area:.1f} ({(area / area0 - 1) * 100:+.2f}%) '
         f'failing={len(sta.paths)} moves={len(total_moves)} -> {final}')
     res = {'input': str(netlist), 'output': str(final), 'top': top,
@@ -813,23 +885,29 @@ def main() -> int:
     ap.add_argument('--max-fanout', type=int, default=8)
     ap.add_argument('--repair-hold', action='store_true', help='insert delay cells on failing hold endpoints (fast corner) while setup holds')
     ap.add_argument('--lib-fast', help='fast-corner liberty for hold analysis (default: --lib-sta)')
+    ap.add_argument('--extra-lib', action='append', default=[], help='hard-macro liberty (SRAM, PLL...), repeatable; read by STA and the netlist model')
+    ap.add_argument('--dont-use', nargs='+', default=[], help='cell patterns never used by repairs')
+    ap.add_argument('--buffer-cell', help='buffer cell for repair_design (default: second-weakest buffer in the liberty)')
+    ap.add_argument('--delay-cell', help='delay cell for repair_hold (default: slowest buffer in the liberty)')
     ap.add_argument('--recover-rounds', type=int, default=6)
     ap.add_argument('--final', choices=['tns', 'wns'], default='tns',
                     help="final state: best TNS within --wns-tol of the start WNS (tns), or never regress WNS (wns)")
-    ap.add_argument('--driving-cell', default='sky130_fd_sc_hd__inv_2'); ap.add_argument('--load-ff', type=float, default=17.65)
+    ap.add_argument('--driving-cell', default=None, help='default: a mid-drive inverter from the liberty'); ap.add_argument('--load-ff', type=float, default=17.65)
     ap.add_argument('--wire-load-model', default='auto')
     ap.add_argument('--yosys', default='yosys'); ap.add_argument('--opensta', default='sta')
     ap.add_argument('--work-dir', default='work_resize'); ap.add_argument('--json', action='store_true')
     a = ap.parse_args()
     log = (lambda *x: None) if a.json else print
+    drv = a.driving_cell or LibCells([a.lib, *a.extra_lib], dont_use=a.dont_use).default_driving_cell()
     res = resize(Path(a.netlist), a.top, a.lib, a.lib_sta or a.lib, a.period_ps, a.clock_port, Path(a.work_dir),
                  sdc=a.sdc, iters=a.iters, margin_ps=a.margin_ps, yosys=a.yosys, opensta=a.opensta,
-                 driving_cell=a.driving_cell, load_ff=a.load_ff, wire_load_model=a.wire_load_model,
+                 driving_cell=drv, load_ff=a.load_ff, wire_load_model=a.wire_load_model,
                  clock_port_2=a.clock_port_2, period_ps_2=a.period_ps_2, per_path=a.per_path,
                  max_paths=a.max_paths, wns_tol=a.wns_tol, final=a.final,
                  recover_area=a.recover_area, recover_rounds=a.recover_rounds,
                  repair_design=a.repair_design, max_fanout=a.max_fanout,
-                 repair_hold=a.repair_hold, lib_fast=a.lib_fast, log=log)
+                 repair_hold=a.repair_hold, lib_fast=a.lib_fast,
+                 extra_libs=a.extra_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
     if a.json:
         print(json.dumps(res, indent=2))
     return 0
