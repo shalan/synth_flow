@@ -459,6 +459,51 @@ sizes, …). Per design:
 | ms_psram_ahb | +0.467 | +1.047 | +0.672 | +0.117 | +0.295 | 24714 | +43.9 % | +43.7 % | +43.9 % | +40.4 % |
 | uart_apb_sys | +3.457 | +5.082 | +4.691 | +4.150 | +2.756 | 16241 | +31.2 % | +30.9 % | +31.1 % | +33.3 % |
 
+### 2.13 Several libraries at once: fast cells on critical paths, slow cells where there is slack
+
+Sky130's `hs`, `ms`, `ls` and `lp` libraries share one placement site
+(0.48 × 3.33 µm) and rail geometry, so a design can mix them; `hd` (2.72 µm)
+and `hvl` (4.07 µm, 3.3 V) stand alone. `lib_typ/lib_slow/lib_fast` accept
+lists, the extra libraries reach every Yosys and OpenSTA step, and the
+catalogue ranks libraries by the median delay of their inverters and buffers
+(HS 171 ps, MS 173, LP 279, LS 294 for `inv_1` at SS). Two designs were tried:
+
+- **Union mapping** (`mixed_map: all`): every cell offered to ABC. HS and LS
+  variants have identical area, so ABC's ties land arbitrarily and critical
+  paths come out with slow cells (`rr_arbiter16` −0.97 ns after mapping,
+  `mul32_mac` +40 % area after repair).
+- **Fastest-library mapping** (`mixed_map: fastest`, default): ABC maps with
+  the fastest library only; the post-pass then moves off-critical cells to
+  the slower library (`resize_recover_area`) and, on failing paths, swaps a
+  cell straight to its fastest variant before upsizing. Swaps keep pins and
+  function, so no equivalence check is needed (both mixed netlists of the
+  smoke designs were also simulated against their inputs: no mismatch).
+
+HS alone (with recovery) against HS+LS, 16 designs, HD periods
+(`bench/results/lib-hs-recover.csv`, `mix-hs-ls.csv`, `mix-hs-ls-allmap.csv`):
+
+| | HS alone + recovery | HS+LS, fastest mapping | HS+LS, union mapping |
+|---|---|---|---|
+| designs meeting timing | 16 / 16 | 16 / 16 | 16 / 16 |
+| mean WNS (ns) | +0.702 | +0.299 | +0.280 |
+| mean area vs HS alone | — | +2.1 % | +8.3 % |
+| cells in the slow library | 0 % | 38 % | 55 % |
+
+Designs with slack end up almost entirely in LS (`uart` 305 of 323 cells,
+`ms_psram_ahb` and `uart_apb_sys` 100 %), tight ones stay in HS
+(`rr_arbiter16` 2 cells, `mul32_mac` 64 of 4990). Union mapping puts more
+cells in LS but pays 8 % area to repair what ABC mapped slow; the fastest
+mapping is the default.
+
+Leakage is reported from the liberty (`cell_leakage_power`, else the mean of
+the `leakage_power` groups). Only the HS liberties are populated; MS, LS and
+LP state zero for most combinational cells at every corner, so the leakage
+column is a lower bound for mixed netlists and the library mix is the
+honest metric. `sky130_fd_sc_hvl` runs as a single library (57 cells,
+`tt_025C_3v30` / `ss_100C_3v00` / `ff_n40C_4v40`); at the HD periods it
+closes 1 of 16 designs at 2.4× the area, as expected for a 3.3 V
+thick-oxide library (`lib-hvl.csv`).
+
 ## 3. Target architecture (revised after §2.5)
 
 ```
