@@ -495,7 +495,8 @@ class Step:
 
 def area_of(yosys: str, liberty: str, netlist: Path, top: str, extra_libs=()) -> float:
     libs = ' '.join(f'read_liberty -lib {l};' for l in [liberty, *extra_libs])
-    r = subprocess.run([yosys, '-p', f'{libs} read_verilog {netlist}; hierarchy -top {top}; stat -liberty {liberty}'],
+    stat_libs = ' '.join(f'-liberty {l}' for l in [liberty, *extra_libs])
+    r = subprocess.run([yosys, '-p', f'{libs} read_verilog {netlist}; hierarchy -top {top}; stat {stat_libs}'],
                        capture_output=True, text=True)
     m = re.search(r'Chip area for (?:top )?module.*?:\s*([0-9.]+)', r.stdout)
     return float(m.group(1)) if m else 0.0
@@ -515,7 +516,9 @@ def pick_moves(paths: list[PathInfo], types: dict[str, str], fam: LibCells,
             cur = types.get(s.inst, s.cell)
             if not flops_too and cur in fam and fam.cells[cur].is_ff:
                 continue
-            nxt = next_size(cur, fam)
+            # with several standard-cell libraries loaded, the same cell in a
+            # faster library (a Vt swap, no area change) comes before a bigger drive
+            nxt = fam.faster_variant(cur) or next_size(cur, fam)
             if nxt is None:
                 continue
             moves[s.inst] = nxt
@@ -560,6 +563,10 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     if not sta.ok:
         raise RuntimeError(f'OpenSTA failed, see {sta.log}')
     area0 = area_of(yosys, liberty, cur, top, extra_libs)
+    leak0, mix0 = fam.leakage_total(types), fam.lib_mix(types)
+    if fam.is_multi_lib():
+        log(f'libraries by speed: ' + ', '.join(Path(l).stem for l, _ in sorted(fam.lib_speed.items(), key=lambda x: x[1]))
+            + f'; start mix {mix0}')
     log(f'start: WNS={sta.wns:+.3f} TNS={sta.tns:+.2f} area={area0:.1f} failing paths={len(sta.paths)} '
         f'(margin {margin} ns)')
     steps: list[Step] = []
@@ -742,12 +749,13 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         tried3: set[str] = set()
         for rnd in range(recover_rounds):
             near = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, f'near{rnd}', k=2000,
-                           slack_max=margin + guard)
+                           slack_max=margin + guard, extra_libs=extra_libs)
             protected = {st.inst for pth in near.paths for st in pth.stages}
-            cands = {i: prev_size(t, fam) for i, t in types.items()
-                     if i not in protected and i not in tried3 and prev_size(t, fam)}
+            # off-critical cells: same cell in a slower (lower-leakage) library first, else one drive down
+            cands = {i: (fam.slower_variant(t) or prev_size(t, fam)) for i, t in types.items()
+                     if i not in protected and i not in tried3 and (fam.slower_variant(t) or prev_size(t, fam))}
             if not cands:
-                log('area recovery: no downsizing candidates; done')
+                log('area recovery: no downsizing/swap candidates; done')
                 break
             batch = sorted(cands)
             done_round = False
@@ -758,7 +766,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                 ok = (sta_new.ok and sta_new.wns >= floor_wns - 1e-6 and sta_new.tns >= sta.tns - 1e-6)
                 steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
                                   wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
-                log(f'it{it} (area): {len(sub)} downsizes -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
+                log(f'it{it} (area): {len(sub)} downsizes/swaps -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
                     f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f} {"ACCEPT" if ok else "reject"}')
                 if ok:
                     cur, text, sta = new, new_text, sta_new
@@ -860,9 +868,13 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     area = area_of(yosys, liberty, final, top, extra_libs)
     log(f'end:   WNS={sta.wns:+.3f} TNS={sta.tns:+.2f} area={area:.1f} ({(area / area0 - 1) * 100:+.2f}%) '
         f'failing={len(sta.paths)} moves={len(total_moves)} -> {final}')
+    leak1, mix1 = fam.leakage_total(types), fam.lib_mix(types)
+    if leak0 is not None and leak1 is not None and (fam.is_multi_lib() or abs(leak1 - leak0) > 1e-9):
+        log(f'leakage {leak0 / 1000:.2f} -> {leak1 / 1000:.2f} uW ({(leak1 / leak0 - 1) * 100 if leak0 else 0:+.1f}%); mix {mix1}')
     res = {'input': str(netlist), 'output': str(final), 'top': top,
-           'start': {'wns_ns': steps[0].wns_before if steps else sta.wns, 'tns_ns': steps[0].tns_before if steps else sta.tns, 'area': area0},
-           'end': {'wns_ns': sta.wns, 'tns_ns': sta.tns, 'area': area, 'failing': len(sta.paths)},
+           'start': {'wns_ns': steps[0].wns_before if steps else sta.wns, 'tns_ns': steps[0].tns_before if steps else sta.tns, 'area': area0,
+                     'leakage_nw': leak0, 'lib_mix': mix0},
+           'end': {'wns_ns': sta.wns, 'tns_ns': sta.tns, 'area': area, 'failing': len(sta.paths), 'leakage_nw': leak1, 'lib_mix': mix1},
            'moves': total_moves, 'steps': [asdict(s) for s in steps], 'wns_regressed': wns_regressed,
            'buffers_inserted': buffers_inserted, 'delay_cells_inserted': delay_cells,
            'hold_before': hold_before, 'hold_after': hold_after}

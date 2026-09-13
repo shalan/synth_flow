@@ -264,6 +264,39 @@ with tempfile.TemporaryDirectory() as td:
     check('SDC -lib_cell from another library is mapped to the same-named cell', _out is not None and '-lib_cell sky130_fd_sc_hd__inv_1 [all_inputs]' in _txt and '-lib_cell sky130_fd_sc_hd__inv_2 [get_ports a]' in _txt, _txt)
     check('SDC with only known cells is left alone', _adapt_sdc_lib_cells(_out, _lc, Path(td) / 'res2', _logging.getLogger('t')) is None)
 check('same-named cell of another library variant is preferred as driving cell', _lc.default_driving_cell('sky130_fd_sc_hs__inv_1') == 'sky130_fd_sc_hd__inv_1' and _lc.default_driving_cell('sky130_fd_sc_hs__nosuch_3') == 'sky130_fd_sc_hd__inv_2')
+# --- several standard-cell libraries at once -------------------------------
+with tempfile.TemporaryDirectory() as td:
+    def _fakelib(name, delay, leak):
+        return f'''library ({name}) {{
+  time_unit : "1ns"; capacitive_load_unit (1,pf); leakage_power_unit : "1nW";
+  cell ({name}__inv_1) {{ area : 3; cell_leakage_power : {leak};
+    pin (A) {{ direction : input; capacitance : 0.002; }}
+    pin (Y) {{ direction : output; function : "!A"; max_capacitance : 0.1;
+      timing () {{ related_pin : "A"; cell_rise (scalar) {{ values ("{delay}"); }} cell_fall (scalar) {{ values ("{delay}"); }} }} }} }}
+  cell ({name}__inv_2) {{ area : 5; cell_leakage_power : {leak * 2};
+    pin (A) {{ direction : input; capacitance : 0.004; }}
+    pin (Y) {{ direction : output; function : "!A"; max_capacitance : 0.2;
+      timing () {{ related_pin : "A"; cell_rise (scalar) {{ values ("{delay * 0.8}"); }} cell_fall (scalar) {{ values ("{delay * 0.8}"); }} }} }} }}
+  cell ({name}__nand2_1) {{ area : 4; cell_leakage_power : {leak};
+    pin (A) {{ direction : input; capacitance : 0.002; }} pin (B) {{ direction : input; capacitance : 0.002; }}
+    pin (Y) {{ direction : output; function : "!(A&B)"; max_capacitance : 0.1; }} }}
+}}'''
+    fast, slow = Path(td) / 'fast.lib', Path(td) / 'slow.lib'
+    fast.write_text(_fakelib('fastlib', 0.10, 100.0)); slow.write_text(_fakelib('slowlib', 0.25, 10.0))
+    _ml = LibCells([str(fast), str(slow)])
+    check('two libraries are ranked by the delay of their single-input cells', _ml.is_multi_lib() and _ml.lib_speed[str(fast)] < _ml.lib_speed[str(slow)], str(_ml.lib_speed))
+    check('faster_variant is the same cell in the faster library; none from the fastest', _ml.faster_variant('slowlib__nand2_1') == 'fastlib__nand2_1' and _ml.faster_variant('fastlib__nand2_1') is None)
+    check('slower_variant is the reverse', _ml.slower_variant('fastlib__inv_2') == 'slowlib__inv_2' and _ml.slower_variant('slowlib__inv_2') is None)
+    check('next_size stays inside one library', _ml.next_size('slowlib__inv_1') == 'slowlib__inv_2' and _ml.next_size('fastlib__inv_1') == 'fastlib__inv_2')
+    check('leakage is read per cell and summed over instance types', _ml.cells['fastlib__inv_2'].leakage_nw == 200.0 and _ml.leakage_total({'a': 'fastlib__inv_1', 'b': 'slowlib__inv_1'}) == 110.0)
+    check('lib_mix counts instances per library prefix', _ml.lib_mix({'a': 'fastlib__inv_1', 'b': 'slowlib__inv_1', 'c': 'slowlib__nand2_1'}) == {'fastlib': 1, 'slowlib': 2})
+    check('single library: no variants, sizing unchanged', not _lc.is_multi_lib() and _lc.faster_variant('sky130_fd_sc_hd__nand2_1') is None)
+    from synth_flow import _split_lib_lists, _synth_libs, _liberty_arg, _extra_libs
+    _d = {'lib_typ': [str(fast), str(slow)], 'lib_slow': f'{fast},{slow}', 'lib_fast': str(fast), 'macro_libs': {'slow': ['m.lib']}}
+    _split_lib_lists(_d)
+    check('list-valued lib fields split into primary + lib_extra per corner', _d['lib_typ'] == str(fast) and _d['lib_extra'] == {'typ': [str(slow)], 'slow': [str(slow)], 'fast': []} and _d['lib_slow'] == str(fast), str(_d))
+    check('_synth_libs / _liberty_arg use the slow corner and its extras', _synth_libs(_d) == [str(fast), str(slow)] and _liberty_arg(_d) == f'{fast} -liberty {slow}')
+    check('_extra_libs = extra std libs + macro libs of the corner', _extra_libs(_d, 'slow') == [str(slow), 'm.lib'] and _extra_libs(_d, 'fast') == [])
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

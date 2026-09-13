@@ -69,7 +69,7 @@ def map_at(cfg: sf.Config, module: str, recipe: str, recipe_path: Path, d_ps: in
         cfg.opensta, qsta_lib, res.netlist, module, cfg.period_ps, cfg.clock_port,
         wdir / f'{recipe}.qsta.log',
         clock_port_2=cfg.clock_port_2, period_ps_2=cfg.period_ps_2,
-        macro_libs=cfg.macro_libs.get(corner, []) if cfg.macro_libs else [],
+        macro_libs=sf._extra_libs(cfg, corner),
         sdc=cfg.sdc, driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
         unc_setup_ps=cfg.clock_uncertainty_setup_ps, unc_hold_ps=cfg.clock_uncertainty_hold_ps,
         wire_load_model=cfg.wire_load_model, io_delay_frac=cfg.io_delay_frac)

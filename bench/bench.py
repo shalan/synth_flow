@@ -66,7 +66,9 @@ LIBS = {'tt': LIB_TT, 'ss': LIB_SS, 'ff': LIB_FF}
 COLUMNS = ['design', 'category', 'top', 'recipe', 'is_winner', 'cells', 'area_um2',
            'wns_ns', 'tns_ns', 'abc_delay_ps', 'runtime_s', 'status', 'error',
            # winner-only, after post-passes (resize) and the multi-corner STA:
-           'final_wns_slow', 'final_tns_slow', 'final_area_um2']
+           'final_wns_slow', 'final_tns_slow', 'final_area_um2',
+           # post-pass extras when a resize.json exists: leakage (uW, from the liberty) and cells per library
+           'leakage_uw_before', 'leakage_uw_after', 'lib_mix_before', 'lib_mix_after']
 
 
 # --------------------------------------------------------------------------
@@ -99,7 +101,7 @@ def capture_env(yosys: str, sta: str | None) -> dict:
         'opensta': sta_v[0] if sta_v else '(not available)',
         'synth_flow_sha': sha,
         'synth_flow_dirty': dirty,
-        'lib_synth': LIBS['ss'].name if 'LIBS' in globals() else LIB_SS.name,
+        'lib_synth': ('+'.join(x.name for x in LIBS['ss']) if isinstance(LIBS['ss'], list) else LIBS['ss'].name) if 'LIBS' in globals() else LIB_SS.name,
     }
 
 
@@ -136,9 +138,9 @@ def write_config(d: dict, files: list[str], args, run_sta: bool, work: Path) -> 
         'rtl_files': files,
         'top': d['top'],
         'modules': [d['top']],
-        'lib_typ': str(LIBS['tt']),
-        'lib_slow': str(LIBS['ss']),
-        'lib_fast': str(LIBS['ff']),
+        'lib_typ': [str(x) for x in LIBS['tt']] if isinstance(LIBS['tt'], list) else str(LIBS['tt']),
+        'lib_slow': [str(x) for x in LIBS['ss']] if isinstance(LIBS['ss'], list) else str(LIBS['ss']),
+        'lib_fast': [str(x) for x in LIBS['ff']] if isinstance(LIBS['ff'], list) else str(LIBS['ff']),
         'period_ps': int(d['period_ps']),
         'clock_port': d['clock'],
         'objective': args.objective,
@@ -223,10 +225,19 @@ def run_design(d: dict, args, run_sta: bool) -> list[dict]:
 
     corner = mod.get('corner') or {}
     final_area = ''
+    extras = {}
     rj = work / 'results' / d['top'] / 'resize.json'
     if rj.exists():
         try:
-            final_area = f"{json.loads(rj.read_text())['end']['area']:.2f}"
+            r = json.loads(rj.read_text())
+            final_area = f"{r['end']['area']:.2f}"
+            fmt_mix = lambda m: ' '.join(f"{k.split('_')[-1]}:{v}" for k, v in (m or {}).items())
+            extras = {
+                'leakage_uw_before': f"{r['start']['leakage_nw'] / 1000:.2f}" if r['start'].get('leakage_nw') is not None else '',
+                'leakage_uw_after': f"{r['end']['leakage_nw'] / 1000:.2f}" if r['end'].get('leakage_nw') is not None else '',
+                'lib_mix_before': fmt_mix(r['start'].get('lib_mix')),
+                'lib_mix_after': fmt_mix(r['end'].get('lib_mix')),
+            }
         except Exception:
             final_area = ''
     rows = []
@@ -249,6 +260,7 @@ def run_design(d: dict, args, run_sta: bool) -> list[dict]:
             final_wns_slow=(f"{corner['wns_setup_slow']:.3f}" if recipe == mod.get('winner') and corner.get('wns_setup_slow') is not None else ''),
             final_tns_slow=(f"{corner['tns_setup_slow']:.3f}" if recipe == mod.get('winner') and corner.get('tns_setup_slow') is not None else ''),
             final_area_um2=(final_area if recipe == mod.get('winner') else ''),
+            **(extras if recipe == mod.get('winner') else {}),
         ))
     return rows
 
@@ -371,7 +383,7 @@ def main() -> int:
     p.add_argument('--no-sta', action='store_true')
     p.add_argument('--keep-work', action='store_true', help='do not wipe bench/work/<design>')
     p.add_argument('--set', action='append', metavar='KEY=VALUE', help='extra synth_flow config (repeatable), e.g. --set path_groups=true')
-    p.add_argument('--lib-dir', help='directory with the full sky130_fd_sc_hd liberty files (tt/ss/ff corners) instead of the bundled hd_120 subset')
+    p.add_argument('--lib-dir', action='append', help='liberty directory (ss/tt/ff corner files) instead of the bundled hd_120 subset: any sky130_fd_sc_{hd,hs,ms,ls,lp,hvl}/lib; repeat to load several libraries at once (first = primary)')
     p.add_argument('--tag', help='results file stem (default: timestamp)')
     p.add_argument('--work-dir', default=str(BENCH_DIR / 'work'),
                    help='per-design work root (default bench/work); give each concurrent bench its own')
@@ -384,24 +396,34 @@ def main() -> int:
     global LIBS
     LIBS = {'tt': LIB_TT, 'ss': LIB_SS, 'ff': LIB_FF}
     if args.lib_dir:
-        d = Path(args.lib_dir).expanduser()
-        # any sky130-style library directory: pick the ss/tt/ff files by their corner tag
-        def pick(tag):
-            hits = sorted(d.glob(f'*__{tag}_*.lib'))
-            pref = [h for h in hits if tag == 'ss' and '100C_1v60' in h.name] or \
-                   [h for h in hits if tag == 'tt' and '025C_1v80' in h.name] or \
-                   [h for h in hits if tag == 'ff' and 'n40C_1v95' in h.name]
-            return (pref or hits or [d / FULL_LIB_NAMES[tag]])[0]
-        LIBS = {k: pick(k) for k in ('tt', 'ss', 'ff')}
-        if not LIBS['tt'].exists() and LIBS['ss'].exists():
-            # sky130_fd_sc_lp ships no tt characterisation: the slow corner
-            # stands in for typical (synthesis already uses ss).
-            print(f"--lib-dir: no tt liberty in {d.parent.name}/{d.name}; using {LIBS['ss'].name} for the typical corner")
-            LIBS['tt'] = LIBS['ss']
-        missing = [str(v) for v in LIBS.values() if not v.exists()]
-        if missing:
-            sys.exit(f'--lib-dir: missing {missing}')
-        print(f"libraries: {', '.join(v.name for v in LIBS.values())}")
+        # any sky130-style library directory: pick the ss/tt/ff files by their
+        # corner tag, preferring the characterisations ORFS uses (1.8 V core
+        # libraries; 3.3 V nominal for sky130_fd_sc_hvl). Several --lib-dir
+        # load several libraries at once: the first is the primary library.
+        PREF = {'ss': ['100C_1v60', '100C_3v00'], 'tt': ['025C_1v80', '025C_3v30'], 'ff': ['n40C_1v95', 'n40C_4v40']}
+        picked = {k: [] for k in ('tt', 'ss', 'ff')}
+        for ld in args.lib_dir:
+            d = Path(ld).expanduser()
+            def pick(tag):
+                hits = [h for h in sorted(d.glob(f'*__{tag}_*.lib')) if 'ccsnoise' not in h.name and 'pwrlkg' not in h.name]
+                for want in PREF[tag]:
+                    pref = [h for h in hits if want in h.name]
+                    if pref:
+                        return pref[0]
+                return (hits or [d / FULL_LIB_NAMES[tag]])[0]
+            one = {k: pick(k) for k in ('tt', 'ss', 'ff')}
+            if not one['tt'].exists() and one['ss'].exists():
+                # sky130_fd_sc_lp ships no tt characterisation: the slow corner
+                # stands in for typical (synthesis already uses ss).
+                print(f"--lib-dir: no tt liberty in {d.parent.name}/{d.name}; using {one['ss'].name} for the typical corner")
+                one['tt'] = one['ss']
+            missing = [str(v) for v in one.values() if not v.exists()]
+            if missing:
+                sys.exit(f'--lib-dir: missing {missing}')
+            for k in picked:
+                picked[k].append(one[k])
+        LIBS = {k: (v if len(v) > 1 else v[0]) for k, v in picked.items()}
+        print('libraries: ' + ', '.join((', '.join(x.name for x in v) if isinstance(v, list) else v.name) for v in LIBS.values()))
 
     if args.quick and not args.recipes:
         args.recipes = QUICK_RECIPES
