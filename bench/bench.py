@@ -393,6 +393,11 @@ def main() -> int:
                    [h for h in hits if tag == 'ff' and 'n40C_1v95' in h.name]
             return (pref or hits or [d / FULL_LIB_NAMES[tag]])[0]
         LIBS = {k: pick(k) for k in ('tt', 'ss', 'ff')}
+        if not LIBS['tt'].exists() and LIBS['ss'].exists():
+            # sky130_fd_sc_lp ships no tt characterisation: the slow corner
+            # stands in for typical (synthesis already uses ss).
+            print(f"--lib-dir: no tt liberty in {d.parent.name}/{d.name}; using {LIBS['ss'].name} for the typical corner")
+            LIBS['tt'] = LIBS['ss']
         missing = [str(v) for v in LIBS.values() if not v.exists()]
         if missing:
             sys.exit(f'--lib-dir: missing {missing}')
