@@ -383,10 +383,18 @@ def main() -> int:
     LIBS = {'tt': LIB_TT, 'ss': LIB_SS, 'ff': LIB_FF}
     if args.lib_dir:
         d = Path(args.lib_dir).expanduser()
-        LIBS = {k: d / v for k, v in FULL_LIB_NAMES.items()}
+        # any sky130-style library directory: pick the ss/tt/ff files by their corner tag
+        def pick(tag):
+            hits = sorted(d.glob(f'*__{tag}_*.lib'))
+            pref = [h for h in hits if tag == 'ss' and '100C_1v60' in h.name] or \
+                   [h for h in hits if tag == 'tt' and '025C_1v80' in h.name] or \
+                   [h for h in hits if tag == 'ff' and 'n40C_1v95' in h.name]
+            return (pref or hits or [d / FULL_LIB_NAMES[tag]])[0]
+        LIBS = {k: pick(k) for k in ('tt', 'ss', 'ff')}
         missing = [str(v) for v in LIBS.values() if not v.exists()]
         if missing:
             sys.exit(f'--lib-dir: missing {missing}')
+        print(f"libraries: {', '.join(v.name for v in LIBS.values())}")
 
     if args.quick and not args.recipes:
         args.recipes = QUICK_RECIPES

@@ -343,7 +343,8 @@ construction (verified by 3000-cycle random simulation on every test):
 
 - **`repair_design`**: for each failing setup path, the highest-delay stage
   whose fanout is ≥ `max_fanout` gets its net split into buffer trees of
-  ≤ `max_fanout` sinks (`buf_2`); one net per path per round, the batch
+  ≤ `max_fanout` sinks (the liberty's plain buffer, `buf_2` on Sky130, see
+  §2.12); one net per path per round, the batch
   accepted on TNS and bisected on rejection. On the apb_timer reference
   netlist (`orfs_speed`): 15 nets, 30 buffers, WNS −0.079 → −0.009 ns and
   TNS −3.85 → −0.13 in one round; with upsizing it closes at +0.013 ns for
@@ -351,7 +352,8 @@ construction (verified by 3000-cycle random simulation on every test):
   rejected, which is the point of judging every move.
 - **`repair_hold`**: min-delay STA at the fast corner; each failing endpoint
   (a register data pin or an output port) gets one delay element per round,
-  a `dlygate` when the liberty has one, else `buf_1`. A round is kept only if
+  the liberty's slowest delay cell when it has one, else its weakest buffer
+  (§2.12). A round is kept only if
   hold TNS improves and slow-corner setup WNS does not drop below its floor.
   uart: hold −0.083 → +0.024 ns in two rounds, setup unchanged, +0.2 % area.
 

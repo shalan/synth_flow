@@ -264,6 +264,8 @@ class Config:
     repair_design: bool = False
     repair_hold: bool = False
     max_fanout: int = 8                # SDC set_max_fanout overrides
+    repair_buffer_cell: Optional[str] = None   # default: second-weakest buffer of the liberty
+    repair_delay_cell: Optional[str] = None    # default: slowest buffer (dlygate when present)
     resize_iters: int = 25
     resize_wns_tol_ps: int = 150       # WNS regression tolerated for a TNS gain ('tns' policy)
     resize_final: str = 'tns'          # tns | wns (never regress WNS)
@@ -2159,6 +2161,9 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
+            extra_libs=(cfg.macro_libs.get('slow' if cfg.lib_slow else 'typ', []) if cfg.macro_libs else []),
+            extra_libs_fast=(cfg.macro_libs.get('fast', []) if cfg.macro_libs else []),
+            dont_use=cfg.dont_use, buffer_cell=cfg.repair_buffer_cell, delay_cell=cfg.repair_delay_cell,
             log=lambda *x: log.debug('[resize] ' + ' '.join(str(v) for v in x)))
     except Exception as e:
         log.warning(f'[resize] {module}: failed ({e}); winner left unsized')
@@ -2445,6 +2450,19 @@ def main() -> int:
                 log.info(f"  {m} depends on: {', '.join(sorted(all_deps[m]))}")
 
     cfg_dict = asdict(cfg)
+
+    # ----- driving cell must exist in the synthesis liberty -----
+    if liberty_timing is not None:
+        try:
+            _lc = liberty_timing.LibCells([_synth_lib(cfg_dict)])
+            if cfg.driving_cell not in _lc:
+                fallback = _lc.default_driving_cell()
+                log.warning(f"driving_cell '{cfg.driving_cell}' is not in {Path(_synth_lib(cfg_dict)).name}; "
+                            f"using {fallback}")
+                cfg.driving_cell = fallback
+                cfg_dict['driving_cell'] = fallback
+        except Exception as e:  # never fatal
+            log.debug(f'driving cell check skipped: {e}')
 
     # ----- ABC delay target -----
     abc_d_ps, abc_d_note = resolve_abc_target(cfg)

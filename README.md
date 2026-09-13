@@ -136,6 +136,10 @@ standard cell library so that:
 2. OpenSTA gets timing arcs for paths that touch the macro — without
    this the SRAM input setup, clock-to-Q, and output transition are all
    silently zero, producing optimistic WNS and missed setup violations.
+3. The post-pass (`resize_winner`, `repair_design`, `repair_hold`) sees the
+   same arcs and treats macro instances as drivers and sinks, so a
+   high-fanout SRAM output can be buffered and a path into an SRAM data
+   pin sized like any other.
 
 Configure via the `macro_libs` YAML field. Two formats:
 

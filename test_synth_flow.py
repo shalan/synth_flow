@@ -167,7 +167,7 @@ except ValueError:
     check('unknown adder rejected', True)
 from resize import drive_families, next_size, prev_size, retype, instance_types
 fam = drive_families(str(LIB_SS))
-check('drive families parsed', fam.get('sky130_fd_sc_hd__nand2') == [1, 2, 4, 8], str(fam.get('sky130_fd_sc_hd__nand2')))
+check('drive families from footprint, ordered by drive', fam.family('sky130_fd_sc_hd__nand2_1') == ['sky130_fd_sc_hd__nand2_%d' % n for n in (1, 2, 4, 8)], str(fam.family('sky130_fd_sc_hd__nand2_1')))
 check('next_size steps up and stops at max', next_size('sky130_fd_sc_hd__nand2_2', fam) == 'sky130_fd_sc_hd__nand2_4' and next_size('sky130_fd_sc_hd__nand2_8', fam) is None)
 check('prev_size steps down and stops at min', prev_size('sky130_fd_sc_hd__nand2_4', fam) == 'sky130_fd_sc_hd__nand2_2' and prev_size('sky130_fd_sc_hd__nand2_1', fam) is None)
 _nl = "module m(a,y);\n  input a; output y;\n  sky130_fd_sc_hd__inv_1 _7_ (.A(a), .Y(y));\n  sky130_fd_sc_hd__buf_2 _8_ (.A(y), .X(z));\nendmodule\n"
@@ -195,6 +195,63 @@ _pre = _sc(clock_port='clk', period_ns=10.0)
 check('default I/O delays: max 20% of T, min 40% of max', 'set_input_delay  -clock clk -max 2.0 ' in _pre and 'set_input_delay  -clock clk -min 0.8 ' in _pre and 'set_output_delay -clock clk -min 0.8 ' in _pre, _pre)
 check('io_delay_min_frac default 0.4', abs(Config().io_delay_min_frac - 0.4) < 1e-9)
 check('repair flags are opt-in', Config().repair_design is False and Config().repair_hold is False and Config().max_fanout == 8)
+# ---- LibCells: technology-agnostic classification, macros, dont_use ----
+from liberty_timing import LibCells
+_lc = LibCells([str(LIB_SS)])
+_bufs = [b.name for b in _lc.buffers()]
+check('buffers found by function, weakest first', _bufs[0] == 'sky130_fd_sc_hd__buf_1' and all('buf' in b for b in _bufs) and 'sky130_fd_sc_hd__inv_1' not in _bufs, str(_bufs[:5]))
+check('delay cell = slowest buffer (no dlygate in hd_120)', _lc.delay_cell()[0] in _bufs and _lc.delay_cell()[1:] == ('A', 'X'))
+check('default driving cell is a mid-drive inverter', _lc.default_driving_cell() == 'sky130_fd_sc_hd__inv_2' and _lc.default_driving_cell('sky130_fd_sc_hd__inv_1') == 'sky130_fd_sc_hd__inv_1', _lc.default_driving_cell())
+check('dont_use pattern removes cells from sizing', LibCells([str(LIB_SS)], dont_use=['*nand2_8']).next_size('sky130_fd_sc_hd__nand2_4') is None and _lc.next_size('sky130_fd_sc_hd__nand2_4') == 'sky130_fd_sc_hd__nand2_8')
+check('same-base-name preference when stepping drive', _lc.next_size('sky130_fd_sc_hd__inv_1') == 'sky130_fd_sc_hd__inv_2', _lc.next_size('sky130_fd_sc_hd__inv_1'))
+with tempfile.TemporaryDirectory() as td:
+    mac = Path(td) / 'fake_sram.lib'
+    mac.write_text('''library (fake_sram) {
+  time_unit : "1ns"; capacitive_load_unit (1,pf);
+  cell (SRAM_256x32) {
+    area : 5000;
+    pin (CLK) { direction : input; capacitance : 0.02; clock : true; }
+    pin (WE)  { direction : input; capacitance : 0.005; }
+    pin (DIN) { direction : input; capacitance : 0.004; }
+    pin (DOUT) { direction : output; max_capacitance : 0.2; timing () { related_pin : "CLK"; timing_type : rising_edge; } }
+  }
+}''')
+    _both = LibCells([str(LIB_SS), str(mac)])
+    check('macro liberty merged: output pins by direction, not by name', _both.output_pins('SRAM_256x32') == {'DOUT'} and 'SRAM_256x32' in _both and len(_both.cells) == 121)
+    check('macro is not a buffer and not in any sizing family', 'SRAM_256x32' not in [b.name for b in _both.buffers()] and _both.next_size('SRAM_256x32') is None)
+    from resize import Netlist, liberty_output_pins
+    _nlm = ("module top(clk, we, d, q);\n  input clk; input we; input d; output q;\n  wire n1;\n"
+            "  SRAM_256x32 u_mem (\n    .CLK(clk),\n    .WE(we),\n    .DIN(d),\n    .DOUT(n1)\n  );\n"
+            "  sky130_fd_sc_hd__buf_1 _b_ (\n    .A(n1),\n    .X(q)\n  );\nendmodule\n")
+    _nm = Netlist(_nlm, liberty_output_pins(_both))
+    check('netlist model: macro output drives n1, buffer sinks it (no name-based guessing)', _nm.driver('n1') == ('u_mem', 'DOUT') and _nm.sinks('n1') == [('_b_', 'A')], str((_nm.driver('n1'), _nm.sinks('n1'))))
+    check('instance regex accepts non-sky130 cell names', 'u_mem' in _nm.inst and _nm.inst['u_mem']['type'] == 'SRAM_256x32')
+    # bus() pins (OpenRAM-style liberty) and Yosys concatenation connections
+    bus = Path(td) / 'bus_sram.lib'
+    bus.write_text('''library (bus_sram) {
+  time_unit : "1ns"; capacitive_load_unit (1,pf);
+  cell (BSRAM) {
+    area : 9000;
+    pin (clk0) { direction : input; capacitance : 0.02; clock : true; }
+    bus (din0) { bus_type : data; direction : input; capacitance : 0.006;
+      pin (din0[3:0]) { timing () { related_pin : "clk0"; timing_type : setup_rising; } } }
+    bus (dout0) { bus_type : data; direction : output;
+      pin (dout0[3:0]) { timing () { related_pin : "clk0"; timing_type : rising_edge; } } }
+  }
+}''')
+    _bl = LibCells([str(LIB_SS), str(bus)])
+    check('bus() groups become one pin per bus with the bus direction', _bl.output_pins('BSRAM') == {'dout0'} and _bl.cells['BSRAM'].pins['din0']['dir'] == 'input' and _bl.bus_ranges() == {'BSRAM': {'din0': (3, 0), 'dout0': (3, 0)}}, str(_bl.cells['BSRAM'].pins))
+    _bt = ("module top(clk, a, y);\n  input clk; input [3:0] a; output [3:0] y;\n  wire \\q[3] ; wire \\q[2] ; wire \\q[1] ; wire \\q[0] ; wire n1;\n"
+           "  BSRAM u_m (\n    .clk0(clk),\n    .din0({ \\a[3] , \\a[2] , \\a[1] , \\a[0]  }),\n    .dout0({ \\q[3] , \\q[2] , \\q[1] , \\q[0]  })\n  );\n"
+           + ''.join(f"  sky130_fd_sc_hd__inv_1 i{k} (\n    .A(\\q[0] ),\n    .Y({'n1' if k == 1 else chr(92) + 'y[' + str(k - 2) + '] '})\n  );\n" for k in (1, 2, 3))
+           + "endmodule\n")
+    _bn = Netlist(_bt, liberty_output_pins(_bl), _bl.bus_ranges())
+    check('macro bus bit is found as driver and its std-cell sinks are listed', _bn.driver('\\q[0]') == ('u_m', 'dout0') and len(_bn.sinks('\\q[0]')) == 3, str((_bn.driver('\\q[0]'), _bn.sinks('\\q[0]'))))
+    check('STA bus pin names map to the concatenation bit', _bn.pin_net('u_m', 'din0[1]') == '\\a[1]' and _bn.pin_net('u_m', 'dout0[3]') == '\\q[3]', str((_bn.pin_net('u_m', 'din0[1]'), _bn.pin_net('u_m', 'dout0[3]'))))
+    _bn.buffer_tree('\\q[0]', 'sky130_fd_sc_hd__buf_2', 2); _bn.delay_pin('u_m', 'din0[1]', 'sky130_fd_sc_hd__buf_1', 1)
+    _br = _bn.render()
+    check('buffer tree on a macro-driven bit and a delay cell into a macro bus bit render as concatenations',
+          '.din0({ \\a[3] , \\a[2] , _rdn_5_ , \\a[0] })' in _br and _br.count('sky130_fd_sc_hd__buf_2 _rd_') == 2 and '.A(\\a[1] )' in _br, _br)
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
