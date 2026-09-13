@@ -380,6 +380,71 @@ check('binding audit lines parsed', [(b['name'], b['status'], b['count'], b['obj
 _chk = ScenarioCheck('func', 'slow', worst=_w, groups={'setup': {'clk': 0.79, 'path delay': -0.2}, 'hold': {'clk': -0.3163}})
 check('scenario failures: hold check and fixed-bound group fail; setup-only scenario ignores hold', scenario_failures(_chk, ['setup', 'hold', 'recovery', 'removal']) == ['hold -0.316', 'group path delay (max) -0.200', 'group clk (min) -0.316'] and scenario_failures(_chk, ['setup']) == ['group path delay (max) -0.200'], str(scenario_failures(_chk, ['setup', 'hold', 'recovery', 'removal'])))
 check('STA failure is a failing check', scenario_failures(ScenarioCheck('a', 'slow', ok=False, error='boom'), ['setup']) == ['STA failed: boom'])
+# --- review regressions: enable-pin hold role, rejected/failed repair rollback --
+with tempfile.TemporaryDirectory() as td:
+    eflop = Path(td) / 'eflop.lib'
+    eflop.write_text('''library (eflop) {
+  time_unit : "1ns"; capacitive_load_unit (1,pf);
+  cell (fake__edfxtp_1) { area : 20;
+    ff (IQ, IQ_N) { clocked_on : "CLK"; next_state : "(DE*D)+(!DE*IQ)"; }
+    pin (CLK) { direction : input; capacitance : 0.002; }
+    pin (D)  { direction : input; capacitance : 0.002;
+      timing () { related_pin : "CLK"; timing_type : setup_rising; } timing () { related_pin : "CLK"; timing_type : hold_rising; } }
+    pin (DE) { direction : input; capacitance : 0.002;
+      timing () { related_pin : "CLK"; timing_type : setup_rising; } timing () { related_pin : "CLK"; timing_type : hold_rising; } }
+    pin (Q) { direction : output; function : "IQ"; timing () { related_pin : "CLK"; timing_type : rising_edge; } }
+  }
+  cell (fake__dfrtp_1) { area : 20;
+    ff (IQ, IQ_N) { clocked_on : "CLK"; next_state : "D"; clear : "!RESET_B"; }
+    pin (CLK) { direction : input; capacitance : 0.002; }
+    pin (D)  { direction : input; capacitance : 0.002;
+      timing () { related_pin : "CLK"; timing_type : setup_rising; } timing () { related_pin : "CLK"; timing_type : hold_rising; } }
+    pin (RESET_B) { direction : input; capacitance : 0.002;
+      timing () { related_pin : "CLK"; timing_type : recovery_rising; } timing () { related_pin : "CLK"; timing_type : removal_rising; } }
+    pin (Q) { direction : output; function : "IQ"; timing () { related_pin : "CLK"; timing_type : rising_edge; } }
+  }
+}''')
+    _el = LibCells([str(eflop)])
+    check('enable-flop roles: DE and D are data (hold-delayable), CLK is the clock even without `clock : true`, RESET_B is async',
+          (_el.pin_kind('fake__edfxtp_1', 'DE'), _el.pin_kind('fake__edfxtp_1', 'D'), _el.pin_kind('fake__edfxtp_1', 'CLK'),
+           _el.pin_kind('fake__dfrtp_1', 'RESET_B'), _el.pin_kind('fake__edfxtp_1', 'Q')) == ('data', 'data', 'clock', 'async', 'output'),
+          str((_el.pin_kind('fake__edfxtp_1', 'DE'), _el.pin_kind('fake__edfxtp_1', 'CLK'), _el.pin_kind('fake__dfrtp_1', 'RESET_B'))))
+
+# rollback: a hold phase that blows up must not discard the accepted setup result,
+# and the result must say so. OpenSTA and Yosys are replaced by canned answers.
+with tempfile.TemporaryDirectory() as td:
+    import resize as _rz
+    from resize import StaOut as _SO, PathInfo as _PI, Stage as _ST
+    _nlt = ("module top(clk, a, y);\n  input clk; input a; output y;\n  wire n1; wire n2;\n"
+            "  sky130_fd_sc_hd__inv_1 i1 (\n    .A(a),\n    .Y(n1)\n  );\n"
+            "  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(n2)\n  );\n"
+            "  sky130_fd_sc_hd__dfxtp_1 f1 (\n    .CLK(clk),\n    .D(n2),\n    .Q(y)\n  );\nendmodule\n")
+    _in = Path(td) / 'in.v'; _in.write_text(_nlt)
+    _calls = {'n': 0}
+    def _fake_sta(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode='max', extra_libs=()):
+        _calls['n'] += 1
+        if mode == 'min':
+            raise RuntimeError('simulated OpenSTA crash in the hold phase')
+        txt = Path(netlist).read_text()
+        # the first upsizing of b1 closes timing; anything else is the failing start state
+        if 'buf_2 b1' in txt:
+            return _SO(ok=True, wns=0.05, tns=0.0, paths=[])
+        return _SO(ok=True, wns=-0.10, tns=-0.10,
+                   paths=[_PI(endpoint='f1', slack=-0.10, stages=[_ST('b1', 'X', 'sky130_fd_sc_hd__buf_1', 0.30, 1, 0.01, 0.1)])])
+    _orig = (_rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section)
+    _rz.run_sta = _fake_sta
+    _rz.area_of = lambda *a, **k: 100.0
+    _rz.sf._sta_constraints = lambda **k: ''
+    _rz.sf._wire_load_section = lambda *a, **k: ''
+    try:
+        _res = _rz.resize(_in, 'top', str(LIB_SS), str(LIB_SS), 1000, 'clk', Path(td) / 'out', iters=3,
+                          repair_hold=True, lib_fast=str(LIB_SS), log=lambda *x: None)
+    finally:
+        _rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section = _orig
+    check('rollback: a failing hold phase keeps the accepted setup result and reports the failure',
+          _res['end']['wns_ns'] == 0.05 and 'buf_2 b1' in Path(_res['output']).read_text()
+          and _res['status']['repair_hold'].startswith('failed') and _res['status']['sizing'] == 'ok',
+          str((_res['end'], _res['status'])))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
