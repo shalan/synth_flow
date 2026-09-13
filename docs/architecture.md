@@ -388,6 +388,77 @@ violation on every short input-to-register path at the fast corner. The
 default is now 40 % of the maximum delay (`io_delay_min_frac`), the usual
 template value, and the in-house bench SDCs carry the same.
 
+### 2.12 Nothing in the repairs is HD-specific: the liberty is the catalogue
+
+Sizing, buffering and hold repair used to know Sky130 HD by name
+(`_1/_2/_4` suffixes, `buf_2`, `dlygate4sd3_1`, `inv_2`) and the netlist model
+only followed scalar connections, so a separate SRAM liberty was invisible to
+the post-pass and another library would have produced wrong or no moves.
+`liberty_timing.LibCells` now reads every liberty the flow has (standard
+cells plus `macro_libs`) and derives what the repairs need:
+
+- **drive families** = cells with identical pin names, directions and
+  functions (the footprint), ordered by area; flops included, since
+  `dfxtp_1/2/4` share one footprint as well;
+- **buffers** = single-input cells whose output function equals the input;
+  the tree buffer is the second-weakest member of the largest plain buffer
+  family (`buf_2` on HD/HS/MS/LS, `buf_1` on LP), the delay cell the slowest
+  weak-drive `dly*` cell when the liberty has one (`dlygate4sd3_1` on the full
+  Sky130 libraries, `dlygate4s50_1` on LP, `buf_1` on the bundled `hd_120`);
+- **default driving cell** = second-weakest plain inverter (`inv_2`), and a
+  cell named in the YAML or an SDC `-lib_cell` that is not in the synthesis
+  liberty is mapped to the same-named cell of that library
+  (`sky130_fd_sc_hd__inv_1` → `sky130_fd_sc_hs__inv_1`). Without this every
+  quick STA of the HS/MS/LS/LP benches aborted on the HD driving cell and
+  reported nothing: the first library run showed 1/16 closing for that reason.
+- **hard macros**: OpenRAM liberties declare `bus()` pins whose `type()` has
+  `bit_from : 0`, and OpenSTA numbers a Verilog concatenation in that order
+  (`dout0[31]` is the *last* item). The netlist model follows concatenation
+  connections with that mapping, so an SRAM output bit can get a buffer tree
+  and an SRAM data pin a hold delay cell. Verified on a wrapper around
+  `sram_1rw1r_32_256_8_sky130`: the STA fanout of every bus bit matches the
+  netlist sinks of the mapped net, trees on `dout0` bits were built, timed
+  and (rightly) rejected on TNS, and the final netlist is
+  simulation-equivalent to the input over 3000 random cycles.
+
+The five Sky130 standard-cell libraries through the default `delay` objective
+with `resize_winner`, per-design SDCs unchanged from the HD bench
+(`bench/results/lib-<v>.csv`; `--lib-dir` on the ciel PDK):
+
+| | HD (`hd_120`) | HS | MS | LS | LP |
+|---|---|---|---|---|---|
+| designs meeting timing | 16 / 16 | 16 / 16 | 14 / 16 | 8 / 16 | 5 / 16 |
+| mean WNS (ns) | +0.487 | +0.917 | +0.546 | -0.418 | -0.650 |
+| mean area vs HD | — | +31.1 % | +38.5 % | +45.5 % | +36.4 % |
+| STA-failed designs | 0 | 0 | 0 | 0 | 0 |
+
+HS closes everything and is faster than HD at +31 % area; MS is close.
+LS and LP are slower libraries running against periods tuned for HD, so
+half or more of the designs miss, but the post-pass behaves the same way on
+all of them: it sized 12 of the 16 LS designs (closing `mul16_pipe`, `zxip`,
+`sha256_core`, `apb_timer`) and 12 of the 16 LP designs, using each
+library's own drive families (`a2111oi_4`, `dfrtp_4`, `mux4_4`, LP's `_0`
+sizes, …). Per design:
+
+| design | HD WNS | HS WNS | MS WNS | LS WNS | LP WNS | HD area | HS Δarea | MS Δarea | LS Δarea | LP Δarea |
+|---|---|---|---|---|---|---|---|---|---|---|
+| alu32 | +0.487 | +1.054 | +0.152 | -3.398 | -3.105 | 11596 | +49.3 % | +54.8 % | +32.3 % | +24.5 % |
+| mul16_pipe | +0.952 | +1.548 | +0.391 | +0.010 | -1.500 | 11994 | +43.6 % | +44.3 % | +101.6 % | +45.5 % |
+| mul32_mac | +0.037 | +0.161 | -1.001 | -2.680 | -2.339 | 56921 | -4.7 % | +30.1 % | +30.4 % | +18.1 % |
+| fir8 | +0.237 | +2.451 | +1.198 | +0.105 | +0.792 | 13332 | +33.1 % | +34.0 % | +63.5 % | +52.4 % |
+| aes_round | +1.397 | +0.362 | +0.007 | -0.869 | -1.289 | 57296 | +58.0 % | +55.4 % | +57.5 % | +52.2 % |
+| sha256_core | +0.025 | +0.163 | +1.674 | +0.125 | -0.898 | 70110 | +34.2 % | +42.9 % | +44.8 % | +37.5 % |
+| crc32_8 | +0.145 | +0.021 | +0.239 | -0.399 | +0.182 | 2540 | +12.0 % | +20.1 % | +19.7 % | +52.4 % |
+| rr_arbiter16 | +0.026 | +0.029 | -0.753 | -1.964 | -2.280 | 3867 | +5.0 % | +32.0 % | +28.7 % | +1.3 % |
+| uart | +0.020 | +0.573 | +0.262 | +0.041 | -0.212 | 3719 | +33.0 % | +33.0 % | +51.5 % | +43.5 % |
+| spi_master | +0.143 | +0.134 | +0.058 | -0.622 | -0.452 | 4682 | +39.6 % | +44.1 % | +50.8 % | +47.9 % |
+| apb_timer | +0.129 | +0.570 | +0.058 | +0.035 | -0.051 | 11353 | +29.1 % | +29.4 % | +40.6 % | +39.1 % |
+| fifo_sync | +0.049 | +0.314 | +0.465 | -0.051 | -0.725 | 27264 | +20.7 % | +34.9 % | +46.6 % | +27.4 % |
+| zx16_core_ahb | +0.136 | +1.155 | +0.254 | -1.296 | -1.594 | 20573 | +33.8 % | +35.5 % | +47.1 % | +36.1 % |
+| zxip | +0.078 | +0.008 | +0.362 | +0.009 | +0.018 | 160331 | +36.2 % | +51.5 % | +37.8 % | +30.3 % |
+| ms_psram_ahb | +0.467 | +1.047 | +0.672 | +0.117 | +0.295 | 24714 | +43.9 % | +43.7 % | +43.9 % | +40.4 % |
+| uart_apb_sys | +3.457 | +5.082 | +4.691 | +4.150 | +2.756 | 16241 | +31.2 % | +30.9 % | +31.1 % | +33.3 % |
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

@@ -335,6 +335,27 @@ almost no area. The curated subset stays the default; the full liberty
 remains available through `--lib-dir` / `dont_use` for designs that need
 cells the subset lacks.
 
+## Other Sky130 libraries — `lib-hs.csv`, `lib-ms.csv`, `lib-ls.csv`, `lib-lp.csv`
+
+`./bench.py --use-sdc --objective delay --lib-dir <libs.ref>/sky130_fd_sc_<v>/lib --set "dont_use=[sky130_fd_sc_<v>__lpflow_*, sky130_fd_sc_<v>__probe*]" --set resize_winner=true --work-dir <own dir> --tag lib-<v>`
+for `v` in hs, ms, ls, lp (LP has no tt liberty; the bench uses the ss file
+for the typical corner). Same SDCs as the HD bench; the HD driving cell in
+them is mapped to each library's `inv_1` automatically.
+
+| | HD (`hd_120`) | HS | MS | LS | LP |
+|---|---|---|---|---|---|
+| designs meeting timing | 16 / 16 | 16 / 16 | 14 / 16 | 8 / 16 | 5 / 16 |
+| mean WNS (ns) | +0.487 | +0.917 | +0.546 | -0.418 | -0.650 |
+| mean area vs HD | — | +31.1 % | +38.5 % | +45.5 % | +36.4 % |
+| STA-failed designs | 0 | 0 | 0 | 0 | 0 |
+
+HS and MS are faster libraries and close 16 and 14 designs; LS and LP are
+slower than HD and miss at periods chosen for HD. The point of the run is
+that sizing, buffering and hold repair operate on every library from the
+liberty alone (docs/architecture.md §2.12): the post-pass sized 1 / 4 / 12 /
+12 designs on HS / MS / LS / LP. Runtime per design is 12–25 s on HS/MS/LS
+and 1–3 min on LP (701 cells).
+
 ## Repairs on the default flow — `obj-delay-repair.csv`
 
 `objective: delay` with `resize_winner`, `repair_design` and `repair_hold`
