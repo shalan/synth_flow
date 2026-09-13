@@ -335,6 +335,51 @@ with tempfile.TemporaryDirectory() as td:
     _k1 = _resize_key(_c1, _n); _k2 = _resize_key(_c2, _n)
     _n.write_text('module t; wire a; endmodule\n'); _k3 = _resize_key(_c1, _n)
     check('post-pass checkpoint key: stable for same inputs, changes with settings and netlist', _k1 != _k2 and _k1 != _k3 and _k3 == _resize_key(_c1, _n))
+# --- named scenarios, uncertainty budget, check-type parser, bindings ----------
+from synth_flow import (_normalise_scenarios, uncertainty_components, _parse_check_types, _parse_bindings,
+                        scenario_failures, required_combos, ScenarioCheck)
+_d = {'sdc': 'a.sdc'}; _normalise_scenarios(_d)
+check('sdc alone becomes the single rank+required scenario "default"', _d['scenarios'] == {'default': {'sdc': 'a.sdc', 'rank': True, 'required': True, 'corners': None, 'checks': ['setup', 'hold', 'recovery', 'removal']}} and _d['scenarios_explicit'] is False, str(_d))
+_d = {'scenarios': {'func': {'sdc': 'f.sdc', 'rank': True}, 'scan': {'sdc': 's.sdc', 'checks': ['hold']}, 'sleep': {'sdc': 'l.sdc', 'corners': ['slow'], 'required': False}}}
+_normalise_scenarios(_d)
+check('rank scenario SDC is copied to sdc; defaults filled', _d['sdc'] == 'f.sdc' and _d['scenarios_explicit'] and _d['scenarios']['scan']['required'] and _d['scenarios']['scan']['checks'] == ['hold'] and _d['scenarios']['sleep']['corners'] == ['slow'], str(_d))
+_d.update({'lib_slow': 'ss.lib', 'lib_typ': 'tt.lib', 'lib_fast': 'ff.lib'})
+check('required combos: required scenarios at their corners, else every configured corner', required_combos(_d) == [('func', 'slow'), ('func', 'typ'), ('func', 'fast'), ('scan', 'slow'), ('scan', 'typ'), ('scan', 'fast')], str(required_combos(_d)))
+_b = {'clock_budget': {'clk': {'jitter_ps': 50, 'skew_ps': 120, 'setup_margin_ps': 10, 'hold_margin_ps': 20, 'skew_post_cts_ps': 40}}, 'cts_stage': 'pre_cts'}
+_u = uncertainty_components(_b, 'clk')
+check('uncertainty budget pre-CTS: setup = jitter + skew + margin, hold = skew + margin', _u['setup_ps'] == 180 and _u['hold_ps'] == 140 and 'jitter 50' in _u['formula'], str(_u))
+_b['cts_stage'] = 'post_cts'; _u = uncertainty_components(_b, 'clk')
+check('uncertainty budget post-CTS uses skew_post_cts_ps', _u['setup_ps'] == 100 and _u['hold_ps'] == 60, str(_u))
+check('no budget -> None; "*" applies to every clock', uncertainty_components({'clock_budget': {}}, 'clk') is None and uncertainty_components({'clock_budget': {'*': {'jitter_ps': 5}}, 'cts_stage': 'pre_cts'}, 'x')['setup_ps'] == 5)
+_ct = '''>>> TYPES_BEGIN
+Startpoint: rst_n (input port clocked by clk)
+Endpoint: _889_ (removal check against rising-edge clock clk)
+Path Group: asynchronous
+Path Type: min
+             0.0011   slack (MET)
+Startpoint: _992_ (rising edge-triggered flip-flop clocked by clk)
+Endpoint: u_sram (falling edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: min
+            -0.3163   slack (VIOLATED)
+Startpoint: rst_n (input port clocked by clk)
+Endpoint: _889_ (recovery check against rising-edge clock clk)
+Path Group: asynchronous
+Path Type: max
+             7.0737   slack (MET)
+Startpoint: u_sram (falling edge-triggered flip-flop clocked by clk)
+Endpoint: parity (output port clocked by clk)
+Path Group: clk
+Path Type: max
+             0.7939   slack (MET)
+>>> TYPES_END'''
+_w = _parse_check_types(_ct)
+check('check-type parser: setup / hold / recovery / removal from report_check_types -verbose', _w == {'setup': 0.7939, 'hold': -0.3163, 'recovery': 7.0737, 'removal': 0.0011}, str(_w))
+_bd = _parse_bindings('x\nBINDING OK sram 1 u_sram\nBINDING OPT dbg 0\nBINDING FAIL regs 0\n')
+check('binding audit lines parsed', [(b['name'], b['status'], b['count'], b['objects']) for b in _bd] == [('sram', 'ok', 1, ['u_sram']), ('dbg', 'opt', 0, []), ('regs', 'fail', 0, [])], str(_bd))
+_chk = ScenarioCheck('func', 'slow', worst=_w, groups={'setup': {'clk': 0.79, 'path delay': -0.2}, 'hold': {'clk': -0.3163}})
+check('scenario failures: hold check and fixed-bound group fail; setup-only scenario ignores hold', scenario_failures(_chk, ['setup', 'hold', 'recovery', 'removal']) == ['hold -0.316', 'group path delay (max) -0.200', 'group clk (min) -0.316'] and scenario_failures(_chk, ['setup']) == ['group path delay (max) -0.200'], str(scenario_failures(_chk, ['setup', 'hold', 'recovery', 'removal'])))
+check('STA failure is a failing check', scenario_failures(ScenarioCheck('a', 'slow', ok=False, error='boom'), ['setup']) == ['STA failed: boom'])
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

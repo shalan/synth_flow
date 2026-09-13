@@ -574,6 +574,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            repair_hold=False, lib_fast=None, hold_iters=10, hold_max_paths=None, hold_sta_budget=60,
            extra_libs=(), extra_libs_fast=None, macro_libs=(), macro_libs_fast=None,
            dont_use=(), buffer_cell=None, delay_cell=None,
+           budget_section='', hook_section='', guard=None,
            log=print) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     constraints = sf._sta_constraints(
@@ -582,7 +583,18 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         unc_setup_ns=unc_setup_ps / 1000.0, unc_hold_ns=unc_hold_ps / 1000.0, user_sdc=sdc,
         driving_cell=driving_cell, load_pf=load_ff / 1000.0,
         wire_load_section=sf._wire_load_section(wire_load_model, sta_liberty), io_delay_frac=io_delay_frac,
-        io_delay_min_frac=io_delay_min_frac)
+        io_delay_min_frac=io_delay_min_frac, budget_section=budget_section, hook_section=hook_section)
+
+    def _guarded(ok: bool, path) -> bool:
+        """Acceptance rule across scenarios: a move that passes the ranking
+        scenario must not break a required scenario/corner check that passed
+        on the input netlist (`guard` runs those checks)."""
+        if not ok or guard is None:
+            return ok
+        g_ok, detail = guard(path)
+        if not g_ok:
+            log(f'{Path(path).name}: rejected by the scenario guard: {detail}')
+        return g_ok
     # Catalogue over the synthesis liberty plus hard-macro libraries, so macro
     # pins get directions (netlist model) and STA gets their timing arcs.
     # extra_libs: further standard-cell libraries (counted in area); macro_libs:
@@ -686,6 +698,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                     it += 1
                     new, sta_new = evaluate_text(nl.render(), f'it{it}')
                     ok = accept_tns(sta, sta_new)
+                    ok = _guarded(ok, new)
                     steps.append(Step(it=it, moves={net: f'buffer_tree({buf_cell})' for net in batch}, wns_before=sta.wns,
                                       tns_before=sta.tns, wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
                     log(f'it{it} (buffer): {len(batch)} nets, {nb} buffers -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
@@ -747,6 +760,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             sub = {i: moves[i] for i in batch}
             new, new_text, sta_new = evaluate(sub, f'it{it}')
             ok = accept(sta, sta_new)
+            ok = _guarded(ok, new)
             steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
                               wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
             log(f'it{it}: {len(sub)} upsizes -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
@@ -785,6 +799,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         it += 1
         new, new_text, sta_new = evaluate(moves, f'it{it}')
         ok = sta_new.ok and sta_new.wns > sta.wns + 1e-6 and sta_new.tns >= sta.tns - 1e-6
+        ok = _guarded(ok, new)
         steps.append(Step(it=it, moves=moves, wns_before=sta.wns, tns_before=sta.tns,
                           wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
         log(f'it{it} (wns repair): {len(moves)} upsizes -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
@@ -821,6 +836,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                     sub = {i: cands[i] for i in batch}
                     new, new_text, sta_new = evaluate(sub, f'it{it}')
                     ok = (sta_new.ok and sta_new.wns >= floor_wns - 1e-6 and sta_new.tns >= sta.tns - 1e-6)
+                    ok = _guarded(ok, new)
                     steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
                                       wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
                     log(f'it{it} (area): {len(sub)} downsizes/swaps -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
@@ -929,6 +945,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             sta_calls += 2
             ok = (hold_new.ok and setup_new.ok and hold_new.tns is not None and hold_new.tns > hold.tns + 1e-6
                   and setup_new.wns >= setup_floor - 1e-6 and setup_new.tns >= sta.tns - 0.05)
+            ok = _guarded(ok, new)
             steps.append(Step(it=it, moves={('hold:' + (t[1] if t[0] == 'port' else f'{t[1]}/{t[2]}')): dcell for t in batch},
                               wns_before=hold.wns, tns_before=hold.tns, wns_after=hold_new.wns, tns_after=hold_new.tns, accepted=ok))
             log(f'it{it} (hold): {n} delay cells on {len(batch)} endpoints -> hold WNS {_f(hold.wns)}->{_f(hold_new.wns)} '

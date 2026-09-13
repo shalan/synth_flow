@@ -20,6 +20,12 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
 - **SDC in, SDC out** — one SDC drives OpenSTA verbatim and synthesis
   (clocks, boundary conditions); `results/<module>/synth.sdc` shows what
   synthesis used ([docs/sdc-support.md](docs/sdc-support.md))
+- **Named scenarios, constraint hook, clock budget** — `scenarios:` ranks on
+  one SDC and accepts only candidates passing every required scenario ×
+  corner × check type (setup, hold, recovery, removal, fixed bounds); a Tcl
+  hook runs after `link_design` in every STA with a binding audit that fails
+  the run on unresolved objects; uncertainty from an explicit jitter/skew
+  budget, components reported ([docs/yaml-config.md](docs/yaml-config.md))
 - **STA-guided repairs** — `--resize` (drive strengths), `--repair-design`
   (buffer trees on high-fanout nets) and `--repair-hold` (delay cells on hold
   violations) with OpenSTA as the judge and function preserved by construction
