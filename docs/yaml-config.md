@@ -179,6 +179,8 @@ These are required only when `run_gls: true` (the default). Set
 | `resize_iters` | int | `25` | Sizing iterations (STA calls) in the TNS phase. |
 | `resize_wns_tol_ps` | int | `150` | WNS regression tolerated for a TNS gain under the `tns` policy. |
 | `resize_candidates` | int | `1` | Run the post-pass on the N most promising candidates (the selected one, the fastest, then the Pareto front) and select again with the same rule on the post-pass numbers. Catches a fast candidate that only closes after sizing. Per-candidate before/after in `results/<module>/postpass.json`. Also `--resize-candidates N` (implies `--resize`). |
+| `repair_hold_max_paths` | int | `max_paths` (200) | Failing hold endpoints listed per STA in the hold phase. |
+| `repair_hold_sta_budget` | int | `60` | OpenSTA calls the hold phase may spend (two per trial batch); the phase stops with status `ok (budget)` when it is used up. |
 | `resize_recover_area` | bool | `false` | After timing is met: downsize off-critical cells, or with several libraries swap them to the slower one first, in batches accepted only while WNS stays at its floor and TNS does not drop. Also `--recover-area` (implies `--resize`). |
 | `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. Timing-clean states are always eligible. |
 
@@ -194,6 +196,18 @@ These are required only when `run_gls: true` (the default). Set
 
 Any of `resize_winner`, `repair_design`, `repair_hold` enables the post-pass on
 each module's winner; the input netlist is kept as `winner.presize.v`.
+The hold phase orders endpoints worst-first, keeps those on setup paths
+within 300 ps of the floor (synchronizers, CDC bounds) apart and tries them
+one at a time after the others, and on a rejected batch retries **both**
+halves (worklist bisection), so every feasible endpoint gets its chance.
+With `resize_candidates > 1` the candidates' post-passes run concurrently
+(`parallel` workers) and each finished run is checkpointed in
+`work/<module>/resize/<recipe>/checkpoint.json`, keyed by netlist text,
+liberty files, SDC text and settings; a rerun with the same inputs reuses it.
+`resize.json` → `timing` says whether setup and hold actually closed on the
+delivered netlist and whether the final state was rolled back; cell count,
+library mix and hold numbers are recomputed from that netlist.
+
 Every edited netlist passes a structural check before it is timed (one module,
 known cells, liberty pins, single driver per net) and is rejected otherwise.
 Each phase (buffering, sizing, recovery, hold) is a transaction: a failure in

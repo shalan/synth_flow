@@ -532,6 +532,16 @@ discarded the setup gains. The post-pass now:
 - reports cells/area after the post-pass and the worst slack per path group
   (per clock) at the sign-off corners in `summary.md`.
 
+Second review round (same user, HS MCU): path-group names with spaces
+(`path delay`) are kept whole in the per-group table; the hold search orders
+endpoints worst-first, separates setup-sensitive endpoints (within 300 ps of
+the setup floor) and retries both halves of a rejected batch, with explicit
+STA-call and path-count budgets; the report describes the delivered netlist
+(cells, mix, hold re-timed after a rollback; `timing.setup_met` /
+`hold_met` apart from the phase status); candidate post-passes run in
+parallel with content-keyed checkpoints (a rerun with unchanged inputs takes
+seconds).
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

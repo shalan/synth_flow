@@ -325,6 +325,16 @@ _badpin = _good.replace('.Y(n1)', '.Q(n1)')
 check('structural check flags a pin that is not in the liberty', any('not a pin' in p for p in structural_problems(_badpin, _lc)), str(structural_problems(_badpin, _lc)))
 _unk = _good.replace('sky130_fd_sc_hd__inv_1 i1', 'sky130_fd_sc_hd__nosuch_1 i1')
 check('structural check flags an unknown cell', any('unknown cell' in p for p in structural_problems(_unk, _lc)))
+_g2 = _parse_group_slacks('>>> GROUPS_BEGIN\nGROUPS SETUP\nGroup                 Slack\n--------------------------\nclk                  0.4210\npath delay          -0.5120\n**async_default**    1.2000\n\nGROUPS HOLD\nGroup   Slack\n-----\nclk   0.2000\n>>> GROUPS_END')
+check('group slack parser keeps names with spaces and asterisks', _g2['setup'] == {'clk': 0.421, 'path delay': -0.512, '**async_default**': 1.2} and _g2['hold'] == {'clk': 0.2}, str(_g2))
+with tempfile.TemporaryDirectory() as td:
+    from synth_flow import _resize_key, Config as _Cfg
+    _n = Path(td) / 'n.v'; _n.write_text('module t; endmodule\n')
+    _c1 = _Cfg(rtl_files=['x.v'], lib_typ=str(LIB_SS), lib_slow=str(LIB_SS), lib_fast=str(LIB_SS), top='t', repair_hold=True)
+    _c2 = _Cfg(rtl_files=['x.v'], lib_typ=str(LIB_SS), lib_slow=str(LIB_SS), lib_fast=str(LIB_SS), top='t', repair_hold=False)
+    _k1 = _resize_key(_c1, _n); _k2 = _resize_key(_c2, _n)
+    _n.write_text('module t; wire a; endmodule\n'); _k3 = _resize_key(_c1, _n)
+    check('post-pass checkpoint key: stable for same inputs, changes with settings and netlist', _k1 != _k2 and _k1 != _k3 and _k3 == _resize_key(_c1, _n))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

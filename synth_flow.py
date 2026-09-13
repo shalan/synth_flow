@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import hashlib
 import json
 import logging
 import multiprocessing as mp
@@ -288,7 +289,11 @@ class Config:
     # post-pass on the N most promising candidates (selected, fastest, Pareto
     # front), then select again: a fast candidate that only closes after
     # sizing is not missed. 1 = the selected winner only. Also --resize-candidates.
-    resize_candidates: int = 1          # tns | wns (never regress WNS)
+    resize_candidates: int = 1
+    # hold repair search budgets (resize.py): failing endpoints per STA and the
+    # number of OpenSTA calls the hold phase may spend
+    repair_hold_max_paths: Optional[int] = None
+    repair_hold_sta_budget: int = 60          # tns | wns (never regress WNS)
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -1794,8 +1799,10 @@ def _parse_group_slacks(section: str) -> dict:
             mode = 'setup'; continue
         if line.startswith('GROUPS HOLD'):
             mode = 'hold'; continue
-        m = re.match(r'^(\S+)\s+(-?[0-9]+\.[0-9]+)\s*$', line.strip())
-        if mode and m and m.group(1) not in ('Group',):
+        # group names may contain spaces ("path delay", "**async_default**"):
+        # the slack is the last column, everything before it is the name
+        m = re.match(r'^(.*\S)\s+(-?[0-9]+\.[0-9]+)\s*$', line.strip())
+        if mode and m and m.group(1) != 'Group' and not set(m.group(1)) <= {'-'}:
             out[mode][m.group(1)] = float(m.group(2))
     return out
 
@@ -2308,14 +2315,50 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
     path.write_text('\n'.join(L) + '\n')
 
 
+_RESIZE_KEY_FIELDS = ('period_ps', 'clock_port', 'clock_port_2', 'period_ps_2', 'driving_cell', 'load_ff',
+                      'clock_uncertainty_setup_ps', 'clock_uncertainty_hold_ps', 'wire_load_model', 'io_delay_frac',
+                      'io_delay_min_frac', 'resize_iters', 'resize_wns_tol_ps', 'resize_final', 'resize_recover_area',
+                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget',
+                      'dont_use', 'repair_buffer_cell', 'repair_delay_cell', 'select_margin_ps')
+
+
+def _resize_key(cfg: Config, netlist_in: Path) -> str:
+    """Content key of a post-pass run: netlist text, every liberty (path, size,
+    mtime), the SDC text and the settings that change the result. Same key =
+    same answer, so a finished run is reused (checkpoint.json in its work dir)."""
+    h = hashlib.sha1()
+    h.update(netlist_in.read_bytes())
+    pl = _postpass_libs(cfg)
+    for lib in [pl['primary'], cfg.lib_slow or '', cfg.lib_fast or '', *pl['std'], *pl['std_fast'], *pl['macro'], *pl['macro_fast']]:
+        if lib and Path(lib).exists():
+            st = Path(lib).stat()
+            h.update(f'{lib}:{st.st_size}:{int(st.st_mtime)}'.encode())
+    if cfg.sdc and Path(cfg.sdc).exists():
+        h.update(Path(cfg.sdc).read_bytes())
+    h.update(json.dumps({k: getattr(cfg, k) for k in _RESIZE_KEY_FIELDS}, sort_keys=True, default=str).encode())
+    return h.hexdigest()
+
+
 def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log) -> Optional[dict]:
     """Run resize.py (sizing / repairs per cfg) on one netlist. Returns the
-    result dict or None on failure; never raises."""
+    result dict or None on failure; never raises. A finished run with the same
+    content key (netlist, libraries, SDC, settings) is reused from
+    <work_dir>/checkpoint.json instead of being recomputed."""
     try:
         import resize as resize_mod
     except ImportError:
         log.warning('[resize] resize.py not found; skipping')
         return None
+    key = _resize_key(cfg, netlist_in)
+    ckpt = work_dir / 'checkpoint.json'
+    if ckpt.exists():
+        try:
+            saved = json.loads(ckpt.read_text())
+            if saved.get('key') == key and Path(saved['result']['output']).exists():
+                res = dict(saved['result']); res['reused_checkpoint'] = True
+                return res
+        except Exception:
+            pass
     sta_lib = cfg.lib_slow or cfg.lib_typ
     try:
         res = resize_mod.resize(
@@ -2329,6 +2372,7 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
+            hold_max_paths=cfg.repair_hold_max_paths, hold_sta_budget=cfg.repair_hold_sta_budget,
             extra_libs=_postpass_libs(cfg)['std'], extra_libs_fast=_postpass_libs(cfg)['std_fast'],
             macro_libs=_postpass_libs(cfg)['macro'], macro_libs_fast=_postpass_libs(cfg)['macro_fast'],
             recover_area=cfg.resize_recover_area,
@@ -2337,6 +2381,10 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
     except Exception as e:
         log.warning(f'[resize] {module}: {netlist_in.name} failed ({e})')
         return None
+    try:
+        ckpt.write_text(json.dumps({'key': key, 'result': res}, indent=1))
+    except Exception:
+        pass
     return res
 
 
@@ -2358,6 +2406,8 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
 def _log_resize(module: str, res: dict, log) -> None:
     st = res.get('status', {})
     bad = {k: v for k, v in st.items() if v.startswith('failed')}
+    if res.get('reused_checkpoint'):
+        log.info(f'[resize] {module}: reused checkpoint (same netlist, libraries, SDC and settings)')
     log.info(f"[resize] {module}: WNS {res['start']['wns_ns']:+.3f} -> {res['end']['wns_ns']:+.3f}  "
              f"TNS {res['start']['tns_ns']:+.2f} -> {res['end']['tns_ns']:+.2f}  "
              f"area {res['start']['area']:.0f} -> {res['end']['area']:.0f}  cells {res.get('cells_start', '?')} -> {res.get('cells_end', '?')}  "
@@ -2392,8 +2442,24 @@ def _resize_candidates(cfg: Config, module: str, cands: list, sel, mod_results: 
     chosen = _postpass_candidates(cands, sel, cfg.resize_candidates)
     log.info(f"[resize] {module}: post-pass on {len(chosen)} candidates: {', '.join(c.recipe for c in chosen)}")
     post, records = [], {}
+    # independent post-passes run concurrently (each is OpenSTA/Yosys-bound)
+    workers = min(len(chosen), max(1, cfg.effective_parallel()))
+    results: dict[str, Optional[dict]] = {}
+    if workers > 1:
+        import concurrent.futures as _cf
+        with _cf.ProcessPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(_run_resize, cfg, module, Path(c.netlist), work_dir / c.recipe, log): c.recipe for c in chosen}
+            for fut in _cf.as_completed(futs):
+                try:
+                    results[futs[fut]] = fut.result()
+                except Exception as e:
+                    log.warning(f'[resize] {module}/{futs[fut]}: worker failed ({e})')
+                    results[futs[fut]] = None
+    else:
+        for c in chosen:
+            results[c.recipe] = _run_resize(cfg, module, Path(c.netlist), work_dir / c.recipe, log)
     for c in chosen:
-        res = _run_resize(cfg, module, Path(c.netlist), work_dir / c.recipe, log)
+        res = results.get(c.recipe)
         if res is None:
             records[c.recipe] = {'status': 'failed'}
             continue
