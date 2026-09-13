@@ -507,6 +507,31 @@ honest metric. `sky130_fd_sc_hvl` runs as a single library (57 cells,
 closes 1 of 16 designs at 2.4× the area, as expected for a 3.3 V
 thick-oxide library (`lib-hvl.csv`).
 
+### 2.14 Repairs as validated transactions; several candidates through the post-pass
+
+A user running an MCU with SRAM macros on the HS library reported (on an
+earlier version) a delay cell inserted at a register's Q output, a hold batch
+rejected as a whole and the pass stopping, and a hold-stage exception that
+discarded the setup gains. The post-pass now:
+
+- classifies every hold endpoint pin from the liberty (`LibCells.pin_kind`:
+  clock, data/enable, async control, output; clock pins are also recognised
+  as the `related_pin` of setup/hold arcs when a stripped liberty lacks
+  `clock : true`) and only delays data/enable pins;
+- deduplicates endpoints, delays them as one batch and bisects on rejection,
+  so a feasible subset lands instead of nothing;
+- checks every edited netlist structurally before STA (one module, known
+  cells, liberty pins, one driver per net) and rejects it on failure;
+- runs each phase as a transaction with an explicit status; a failure keeps
+  the last accepted netlist of the earlier phases (`resize.json` → `status`);
+- with `resize_candidates: N` sizes the selected candidate, the fastest and
+  the Pareto front, then applies the selection rule to the post-pass numbers
+  (`postpass.json`). On `rr_arbiter16` at 3.3 ns none of three candidates
+  closes, and the re-selection picks the knee again; on a design where only
+  the fastest candidate closes after sizing, it now wins.
+- reports cells/area after the post-pass and the worst slack per path group
+  (per clock) at the sign-off corners in `summary.md`.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

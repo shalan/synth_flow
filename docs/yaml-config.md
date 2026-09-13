@@ -178,6 +178,7 @@ These are required only when `run_gls: true` (the default). Set
 | `resize_winner` | bool | `false` | Run `resize.py` on each module's winner before multi-corner STA (needs OpenSTA). Also `--resize`. Input kept as `winner.presize.v`; log in `resize.json`. |
 | `resize_iters` | int | `25` | Sizing iterations (STA calls) in the TNS phase. |
 | `resize_wns_tol_ps` | int | `150` | WNS regression tolerated for a TNS gain under the `tns` policy. |
+| `resize_candidates` | int | `1` | Run the post-pass on the N most promising candidates (the selected one, the fastest, then the Pareto front) and select again with the same rule on the post-pass numbers. Catches a fast candidate that only closes after sizing. Per-candidate before/after in `results/<module>/postpass.json`. Also `--resize-candidates N` (implies `--resize`). |
 | `resize_recover_area` | bool | `false` | After timing is met: downsize off-critical cells, or with several libraries swap them to the slower one first, in batches accepted only while WNS stays at its floor and TNS does not drop. Also `--recover-area` (implies `--resize`). |
 | `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. Timing-clean states are always eligible. |
 
@@ -187,12 +188,23 @@ These are required only when `run_gls: true` (the default). Set
 |---|---|---|---|
 | `repair_design` | bool | `false` | Buffer trees on high-fanout nets of failing setup paths (`resize.py`): sinks split into groups of ≤ `max_fanout`, one net per failing path per round, batch accepted on TNS like the upsizes, bisected on rejection. Also `--repair-design`. ABC's own `buffer` runs before any measurement and without the real boundary loads; this is the repair step after OpenSTA has measured. |
 | `max_fanout` | int | `8` | Sink group size for `repair_design`. SDC `set_max_fanout` overrides. |
-| `repair_hold` | bool | `false` | Min-delay STA at the fast corner (`lib_fast`) lists failing hold endpoints; each gets one delay element (`repair_delay_cell`) in front of its data pin per round. A round is kept only if hold TNS improves and slow-corner setup WNS stays at its floor. Also `--repair-hold`. Function-preserving by construction. |
+| `repair_hold` | bool | `false` | Min-delay STA at the fast corner (`lib_fast`) lists failing hold endpoints. Each endpoint pin is checked against the liberty first: delay elements (`repair_delay_cell`) go only on data/enable inputs (setup/hold-checked pins, macro data pins, output ports); clock pins, async controls (recovery/removal-checked) and outputs are skipped and logged. Endpoints are deduplicated, delayed as one batch, and the batch is bisected on rejection so feasible subsets still land. A batch is kept only if hold TNS improves and slow-corner setup WNS stays at its floor. Also `--repair-hold`. Function-preserving by construction. |
 | `repair_buffer_cell` | string | liberty-chosen | Buffer used for `repair_design` trees. Default: the second-weakest cell of the liberty's largest plain buffer family (`buf_2` on Sky130 HD/HS/MS/LS, `buf_1` on LP). Buffers are recognised by function (output = input), not by name. |
 | `repair_delay_cell` | string | liberty-chosen | Delay element for `repair_hold`. Default: the slowest explicit delay cell (`dly*` name) among the weak-drive buffers, else the weakest plain buffer (`dlygate4sd3_1` on the full Sky130 libraries, `buf_1` on the bundled `hd_120` subset). |
 
 Any of `resize_winner`, `repair_design`, `repair_hold` enables the post-pass on
 each module's winner; the input netlist is kept as `winner.presize.v`.
+Every edited netlist passes a structural check before it is timed (one module,
+known cells, liberty pins, single driver per net) and is rejected otherwise.
+Each phase (buffering, sizing, recovery, hold) is a transaction: a failure in
+one phase keeps the last accepted netlist of the earlier phases and is
+reported in `resize.json` → `status` (`ok` / `skipped` / `failed: …`) and in
+the summary's post-pass column. `summary.md` also lists cells and area after
+the post-pass and the worst setup/hold slack per path group (per clock).
+
+For a frequency-pushing run where no candidate meets timing initially, use
+`fallback: best_wns` with `resize_final: wns` (and `resize_candidates: 3`):
+the fastest candidate is sized instead of the smaller, slower knee.
 The post-pass reads the same `macro_libs` as the corner STA (slow corner for
 setup, fast corner for hold), so SRAM/PLL pins have real arcs during sizing
 and their instances are recognised as drivers and sinks by the repairs.

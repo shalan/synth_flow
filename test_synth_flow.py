@@ -300,7 +300,31 @@ with tempfile.TemporaryDirectory() as td:
     check('_extra_libs = extra std libs + macro libs of the corner', _extra_libs(_d, 'slow') == [str(slow), 'm.lib'] and _extra_libs(_d, 'fast') == [])
     from synth_flow import _postpass_libs
     _d2 = dict(_d, lib_synth=str(slow), lib_synth_extra=[])       # mapping library is not the primary slow lib
-    check('post-pass gets the mapping liberty plus every other library of the corner', _postpass_libs(_d2) == (str(slow), [str(fast), 'm.lib'], []), str(_postpass_libs(_d2)))
+    _pl = _postpass_libs(_d2)
+    check('post-pass gets the mapping liberty, the other std libraries of the corner and the macros apart', _pl['primary'] == str(slow) and _pl['std'] == [str(fast)] and _pl['macro'] == ['m.lib'] and _pl['std_fast'] == [], str(_pl))
+    from synth_flow import _parse_group_slacks, _postpass_candidates, Candidate as _C, Selection as _S
+    _g = _parse_group_slacks('>>> GROUPS_BEGIN\nGROUPS SETUP\nGroup   Slack\n----\nclk   -0.1234\nclk2   1.5000\n\nGROUPS HOLD\nGroup Slack\n---\nclk   0.2000\n>>> GROUPS_END')
+    check('per path-group slack parser', _g == {'setup': {'clk': -0.1234, 'clk2': 1.5}, 'hold': {'clk': 0.2}}, str(_g))
+    _cs = [_C('a', 'a.v', -0.5, -3.0, 100, 1000.0, 1.0), _C('b', 'b.v', 0.3, 0.0, 120, 1300.0, 1.0), _C('c', 'c.v', -0.1, -0.5, 110, 1100.0, 1.0), _C('d', 'd.v', -0.9, -9.0, 90, 900.0, 1.0)]
+    _sel = _S(module='m', objective='delay', winner='c', candidates=_cs, pareto_front=['d', 'c', 'b'])
+    check('post-pass candidates: selected, fastest, then the Pareto front', [c.recipe for c in _postpass_candidates(_cs, _sel, 3)] == ['c', 'b', 'd'], str([c.recipe for c in _postpass_candidates(_cs, _sel, 3)]))
+# --- pin roles from the liberty and the structural netlist check ------------
+check('pin_kind: clock / data / async / input / output from the liberty',
+      (_lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'CLK'), _lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'D'),
+       _lc.pin_kind('sky130_fd_sc_hd__dfrtp_1', 'RESET_B'), _lc.pin_kind('sky130_fd_sc_hd__nand2_1', 'A'),
+       _lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'Q'), _lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'NOPE')) == ('clock', 'data', 'async', 'input', 'output', 'unknown'),
+      str((_lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'CLK'), _lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'D'), _lc.pin_kind('sky130_fd_sc_hd__dfrtp_1', 'RESET_B'), _lc.pin_kind('sky130_fd_sc_hd__nand2_1', 'A'))))
+check('pin_kind: enable pin of an enable flop is data', _lc.pin_kind('sky130_fd_sc_hd__edfxtp_1', 'DE') == 'data' if 'sky130_fd_sc_hd__edfxtp_1' in _lc else True, _lc.pin_kind('sky130_fd_sc_hd__edfxtp_1', 'DE') if 'sky130_fd_sc_hd__edfxtp_1' in _lc else 'n/a')
+from resize import structural_problems
+_good = ("module t(a, y);\n  input a; output y;\n  wire n1;\n"
+         "  sky130_fd_sc_hd__inv_1 i1 (\n    .A(a),\n    .Y(n1)\n  );\n  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(y)\n  );\nendmodule\n")
+check('structural check passes a sane netlist', structural_problems(_good, _lc) == [], str(structural_problems(_good, _lc)))
+_two = _good.replace("  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(y)\n  );", "  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(n1)\n  );")
+check('structural check flags a net with two drivers', any('2 drivers' in p for p in structural_problems(_two, _lc)), str(structural_problems(_two, _lc)))
+_badpin = _good.replace('.Y(n1)', '.Q(n1)')
+check('structural check flags a pin that is not in the liberty', any('not a pin' in p for p in structural_problems(_badpin, _lc)), str(structural_problems(_badpin, _lc)))
+_unk = _good.replace('sky130_fd_sc_hd__inv_1 i1', 'sky130_fd_sc_hd__nosuch_1 i1')
+check('structural check flags an unknown cell', any('unknown cell' in p for p in structural_problems(_unk, _lc)))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

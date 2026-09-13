@@ -394,6 +394,38 @@ def pick_delay_cell(liberty, fam: LibCells) -> tuple[str, str, str]:
     return fam.delay_cell()
 
 
+def structural_problems(text: str, fam: LibCells, limit: int = 5) -> list[str]:
+    """Cheap sanity check of an edited netlist before it is timed: exactly one
+    module, every instance a known cell, every pin a liberty pin of that cell,
+    no net driven by more than one instance output. Returns problem strings
+    (empty = fine)."""
+    probs: list[str] = []
+    if len(re.findall(r'^\s*module\s', text, re.M)) != 1:
+        probs.append('netlist must contain exactly one module')
+    nl = Netlist(text, liberty_output_pins(fam), fam.bus_ranges())
+    drivers: dict[str, int] = {}
+    for name, i in nl.inst.items():
+        c = fam.cells.get(i['type'])
+        if c is None:
+            probs.append(f'{name}: unknown cell {i["type"]}')
+            continue
+        for p, conn in i['pins'].items():
+            if p not in c.pins:
+                probs.append(f'{name}/{p}: not a pin of {i["type"]}')
+            elif c.pins[p]['dir'] == 'output':
+                for b in nl._conn_bits(conn):
+                    if not re.match(r"\d+'", b):
+                        drivers[b] = drivers.get(b, 0) + 1
+        if len(probs) >= limit:
+            break
+    for net, n in drivers.items():
+        if n > 1:
+            probs.append(f'net {net} has {n} drivers')
+            if len(probs) >= limit:
+                break
+    return probs[:limit]
+
+
 # --------------------------------------------------------------------------
 # OpenSTA: worst path per failing endpoint with stage details
 # --------------------------------------------------------------------------
@@ -493,8 +525,11 @@ class Step:
     accepted: bool
 
 
-def area_of(yosys: str, liberty: str, netlist: Path, top: str, extra_libs=()) -> float:
-    libs = ' '.join(f'read_liberty -lib {l};' for l in [liberty, *extra_libs])
+def area_of(yosys: str, liberty: str, netlist: Path, top: str, extra_libs=(), read_only=()) -> float:
+    """Chip area from Yosys stat over the standard-cell liberties; `read_only`
+    liberties (hard macros) are loaded so the netlist links but not counted,
+    matching the candidates' area from synthesis."""
+    libs = ' '.join(f'read_liberty -lib {l};' for l in [liberty, *extra_libs, *read_only])
     stat_libs = ' '.join(f'-liberty {l}' for l in [liberty, *extra_libs])
     r = subprocess.run([yosys, '-p', f'{libs} read_verilog {netlist}; hierarchy -top {top}; stat {stat_libs}'],
                        capture_output=True, text=True)
@@ -537,7 +572,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            recover_area=False, recover_rounds=6,
            repair_design=False, max_fanout=8, buffer_iters=6,
            repair_hold=False, lib_fast=None, hold_iters=10,
-           extra_libs=(), extra_libs_fast=None, dont_use=(), buffer_cell=None, delay_cell=None,
+           extra_libs=(), extra_libs_fast=None, macro_libs=(), macro_libs_fast=None,
+           dont_use=(), buffer_cell=None, delay_cell=None,
            log=print) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     constraints = sf._sta_constraints(
@@ -549,10 +585,15 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         io_delay_min_frac=io_delay_min_frac)
     # Catalogue over the synthesis liberty plus hard-macro libraries, so macro
     # pins get directions (netlist model) and STA gets their timing arcs.
-    fam = drive_families([liberty, *extra_libs], dont_use)
+    # extra_libs: further standard-cell libraries (counted in area); macro_libs:
+    # hard-macro liberties (timing arcs + pin directions only, like the candidates' stat)
+    std_extra = list(extra_libs or [])
+    macro_libs = list(macro_libs or [])
+    macro_libs_fast = list(macro_libs_fast if macro_libs_fast is not None else macro_libs)
+    fam = drive_families([liberty, *std_extra, *macro_libs], dont_use)
     driving_cell = driving_cell or fam.default_driving_cell()
-    extra_libs = list(extra_libs or [])
-    extra_libs_fast = list(extra_libs_fast if extra_libs_fast is not None else extra_libs)
+    extra_libs = std_extra + macro_libs
+    extra_libs_fast = list(extra_libs_fast if extra_libs_fast is not None else std_extra) + macro_libs_fast
     margin = margin_ps / 1000.0
 
     cur = out_dir / 'it0.v'
@@ -563,7 +604,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'it0', k=max_paths, slack_max=margin, extra_libs=extra_libs)
     if not sta.ok:
         raise RuntimeError(f'OpenSTA failed, see {sta.log}')
-    area0 = area_of(yosys, liberty, cur, top, extra_libs)
+    area0 = area_of(yosys, liberty, cur, top, std_extra, read_only=macro_libs)
     leak0, mix0 = fam.leakage_total(types), fam.lib_mix(types)
     if fam.is_multi_lib():
         log(f'libraries by speed: ' + ', '.join(Path(l).stem for l, _ in sorted(fam.lib_speed.items(), key=lambda x: x[1]))
@@ -573,7 +614,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     steps: list[Step] = []
     tried: set[str] = set()
     total_moves: dict[str, str] = {}
-    start_wns = sta.wns
+    start_wns, start_tns = sta.wns, sta.tns
     states: list[tuple[Path, float, float, dict]] = [(cur, sta.wns, sta.tns, {})]   # accepted (netlist, wns, tns, moves so far)
     out_pins = liberty_output_pins(fam)
     bus_ranges = fam.bus_ranges()
@@ -583,8 +624,17 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     def evaluate_text(new_text: str, tag: str):
         new = out_dir / f'{tag}.v'
         new.write_text(new_text)
+        probs = structural_problems(new_text, fam)
+        if probs:
+            log(f'{tag}: rejected before STA, netlist check failed: ' + '; '.join(probs))
+            return new, StaOut(ok=False, log='structural: ' + '; '.join(probs))
         r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin, extra_libs=extra_libs)
         return new, r
+
+    phase_status: dict[str, str] = {}
+
+    def _f(x, fmt='+.3f'):
+        return format(x, fmt) if isinstance(x, (int, float)) else 'n/a'
 
     def accept_tns(old: StaOut, new: StaOut) -> bool:
         if not new.ok or new.tns is None or old.tns is None:
@@ -596,66 +646,71 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     # Phase 0 (optional): repair_design. Split high-fanout nets on failing paths
     # with buffer trees (groups of <= max_fanout sinks), one net per failing
     # path per round, batch accepted on TNS, bisected on rejection.
-    if repair_design and sta.paths:
-        if buffer_cell and buffer_cell in fam:
-            c = fam.cells[buffer_cell]
-            buf_cell, buf_in, buf_out = buffer_cell, c.inputs[0], c.outputs[0]
-        else:
-            buf_cell, buf_in, buf_out = fam.buffer_cell()
-        buffered: set[str] = set()
-        for rnd in range(buffer_iters):
-            if not sta.paths:
-                break
-            nl = Netlist(text, out_pins, bus_ranges)
-            cands: list[tuple[float, str]] = []
-            for pth in sta.paths:
-                best = None
-                for st in pth.stages:
-                    if st.fanout is None or st.fanout <= max_fanout or st.inst not in nl.inst:   # split only nets with > max_fanout sinks
-                        continue
-                    net = nl.pin_net(st.inst, st.pin)
-                    if not net or re.match(r"\d+'", net) or net in buffered or net in [c[1] for c in cands]:
-                        continue
-                    if best is None or st.delay > best[0]:
-                        best = (st.delay, net)
-                if best:
-                    cands.append(best)
-            if not cands:
-                log('repair_design: no high-fanout stage left on failing paths; done')
-                break
-            cands.sort(reverse=True)
-            batch = [net for _, net in cands]
-            accepted = False
-            while batch:
+    try:
+        if repair_design and sta.paths:
+            if buffer_cell and buffer_cell in fam:
+                c = fam.cells[buffer_cell]
+                buf_cell, buf_in, buf_out = buffer_cell, c.inputs[0], c.outputs[0]
+            else:
+                buf_cell, buf_in, buf_out = fam.buffer_cell()
+            buffered: set[str] = set()
+            for rnd in range(buffer_iters):
+                if not sta.paths:
+                    break
                 nl = Netlist(text, out_pins, bus_ranges)
-                nb = sum(nl.buffer_tree(net, buf_cell, max_fanout, in_pin=buf_in, out_pin=buf_out) for net in batch)
-                if nb == 0:                       # STA fanout counted pins we do not split (ports etc.)
-                    buffered |= set(batch)
+                cands: list[tuple[float, str]] = []
+                for pth in sta.paths:
+                    best = None
+                    for st in pth.stages:
+                        if st.fanout is None or st.fanout <= max_fanout or st.inst not in nl.inst:   # split only nets with > max_fanout sinks
+                            continue
+                        net = nl.pin_net(st.inst, st.pin)
+                        if not net or re.match(r"\d+'", net) or net in buffered or net in [c[1] for c in cands]:
+                            continue
+                        if best is None or st.delay > best[0]:
+                            best = (st.delay, net)
+                    if best:
+                        cands.append(best)
+                if not cands:
+                    log('repair_design: no high-fanout stage left on failing paths; done')
                     break
-                it += 1
-                new, sta_new = evaluate_text(nl.render(), f'it{it}')
-                ok = accept_tns(sta, sta_new)
-                steps.append(Step(it=it, moves={net: f'buffer_tree({buf_cell})' for net in batch}, wns_before=sta.wns,
-                                  tns_before=sta.tns, wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
-                log(f'it{it} (buffer): {len(batch)} nets, {nb} buffers -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
-                    f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f} {"ACCEPT" if ok else "reject"}')
-                if ok:
-                    cur, sta = new, sta_new
-                    text = new.read_text()
-                    types = instance_types(text)
-                    buffered |= set(batch)
-                    buffers_inserted += nb
-                    for net in batch:
-                        total_moves[net] = f'buffer_tree({buf_cell}) x{max_fanout}'
-                    states.append((cur, sta.wns, sta.tns, dict(total_moves)))
-                    accepted = True
+                cands.sort(reverse=True)
+                batch = [net for _, net in cands]
+                accepted = False
+                while batch:
+                    nl = Netlist(text, out_pins, bus_ranges)
+                    nb = sum(nl.buffer_tree(net, buf_cell, max_fanout, in_pin=buf_in, out_pin=buf_out) for net in batch)
+                    if nb == 0:                       # STA fanout counted pins we do not split (ports etc.)
+                        buffered |= set(batch)
+                        break
+                    it += 1
+                    new, sta_new = evaluate_text(nl.render(), f'it{it}')
+                    ok = accept_tns(sta, sta_new)
+                    steps.append(Step(it=it, moves={net: f'buffer_tree({buf_cell})' for net in batch}, wns_before=sta.wns,
+                                      tns_before=sta.tns, wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
+                    log(f'it{it} (buffer): {len(batch)} nets, {nb} buffers -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
+                        f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f} {"ACCEPT" if ok else "reject"}')
+                    if ok:
+                        cur, sta = new, sta_new
+                        text = new.read_text()
+                        types = instance_types(text)
+                        buffered |= set(batch)
+                        buffers_inserted += nb
+                        for net in batch:
+                            total_moves[net] = f'buffer_tree({buf_cell}) x{max_fanout}'
+                        states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+                        accepted = True
+                        break
+                    if len(batch) == 1:
+                        buffered.add(batch[0])
+                        break
+                    batch = batch[:len(batch) // 2]
+                if not accepted and len(cands) <= 1:
                     break
-                if len(batch) == 1:
-                    buffered.add(batch[0])
-                    break
-                batch = batch[:len(batch) // 2]
-            if not accepted and len(cands) <= 1:
-                break
+        phase_status['repair_design'] = phase_status.get('repair_design', 'ok' if repair_design else 'skipped')
+    except Exception as e:      # keep the last accepted netlist; never lose earlier gains
+        phase_status['repair_design'] = f'failed: {e}'
+        log(f'repair_design: phase aborted ({e}); continuing with the last accepted netlist')
     def evaluate(moves: dict[str, str], tag: str):
         new_text = retype(text, moves)
         new = out_dir / f'{tag}.v'
@@ -744,44 +799,49 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     # path within `guard` of the margin, in batches bisected on rejection.
     # Accepted only while WNS stays >= min(start WNS, margin) and TNS does not
     # drop, so timing never pays for area.
-    if recover_area:
-        guard = 0.3
-        floor_wns = min(sta.wns, margin)
-        tried3: set[str] = set()
-        for rnd in range(recover_rounds):
-            near = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, f'near{rnd}', k=2000,
-                           slack_max=margin + guard, extra_libs=extra_libs)
-            protected = {st.inst for pth in near.paths for st in pth.stages}
-            # off-critical cells: same cell in a slower (lower-leakage) library first, else one drive down
-            cands = {i: (fam.slower_variant(t) or prev_size(t, fam)) for i, t in types.items()
-                     if i not in protected and i not in tried3 and (fam.slower_variant(t) or prev_size(t, fam))}
-            if not cands:
-                log('area recovery: no downsizing/swap candidates; done')
-                break
-            batch = sorted(cands)
-            done_round = False
-            while batch and it < iters + recover_rounds * 8:
-                it += 1
-                sub = {i: cands[i] for i in batch}
-                new, new_text, sta_new = evaluate(sub, f'it{it}')
-                ok = (sta_new.ok and sta_new.wns >= floor_wns - 1e-6 and sta_new.tns >= sta.tns - 1e-6)
-                steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
-                                  wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
-                log(f'it{it} (area): {len(sub)} downsizes/swaps -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
-                    f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f} {"ACCEPT" if ok else "reject"}')
-                if ok:
-                    cur, text, sta = new, new_text, sta_new
-                    types.update(sub)
-                    total_moves.update(sub)
-                    states.append((cur, sta.wns, sta.tns, dict(total_moves)))
-                    done_round = True
+    try:
+        if recover_area:
+            guard = 0.3
+            floor_wns = min(sta.wns, margin)
+            tried3: set[str] = set()
+            for rnd in range(recover_rounds):
+                near = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, f'near{rnd}', k=2000,
+                               slack_max=margin + guard, extra_libs=extra_libs)
+                protected = {st.inst for pth in near.paths for st in pth.stages}
+                # off-critical cells: same cell in a slower (lower-leakage) library first, else one drive down
+                cands = {i: (fam.slower_variant(t) or prev_size(t, fam)) for i, t in types.items()
+                         if i not in protected and i not in tried3 and (fam.slower_variant(t) or prev_size(t, fam))}
+                if not cands:
+                    log('area recovery: no downsizing/swap candidates; done')
                     break
-                if len(batch) == 1:
-                    tried3.add(batch[0])
+                batch = sorted(cands)
+                done_round = False
+                while batch and it < iters + recover_rounds * 8:
+                    it += 1
+                    sub = {i: cands[i] for i in batch}
+                    new, new_text, sta_new = evaluate(sub, f'it{it}')
+                    ok = (sta_new.ok and sta_new.wns >= floor_wns - 1e-6 and sta_new.tns >= sta.tns - 1e-6)
+                    steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
+                                      wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
+                    log(f'it{it} (area): {len(sub)} downsizes/swaps -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
+                        f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f} {"ACCEPT" if ok else "reject"}')
+                    if ok:
+                        cur, text, sta = new, new_text, sta_new
+                        types.update(sub)
+                        total_moves.update(sub)
+                        states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+                        done_round = True
+                        break
+                    if len(batch) == 1:
+                        tried3.add(batch[0])
+                        break
+                    batch = batch[:len(batch) // 2]
+                if not done_round and len(cands) <= 1:
                     break
-                batch = batch[:len(batch) // 2]
-            if not done_round and len(cands) <= 1:
-                break
+        phase_status['recover_area'] = phase_status.get('recover_area', 'ok' if recover_area else 'skipped')
+    except Exception as e:      # keep the last accepted netlist; never lose earlier gains
+        phase_status['recover_area'] = f'failed: {e}'
+        log(f'recover_area: phase aborted ({e}); continuing with the last accepted netlist')
 
     # Phase 4 (optional): repair_hold. Min-delay STA at the fast corner lists
     # failing hold endpoints; each gets one delay element in front of its
@@ -791,6 +851,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     hold_before = hold_after = None
     delay_cells = 0
     if repair_hold:
+      try:
         hold_lib = lib_fast or sta_liberty
         if delay_cell and delay_cell in fam:
             c = fam.cells[delay_cell]
@@ -799,47 +860,96 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             dcell, dpin_in, dpin_out = fam.delay_cell()
         hold = run_sta(opensta, hold_lib, cur, top, constraints, out_dir, 'hold0', k=max_paths, slack_max=0.0, mode='min', extra_libs=extra_libs_fast)
         hold_before = (hold.wns, hold.tns)
-        log(f'hold @fast: WNS={hold.wns:+.3f} TNS={hold.tns:+.2f} failing={len(hold.paths)}; delay cell {dcell}')
+        if not hold.ok:
+            raise RuntimeError('hold STA at the fast corner failed (see hold0.log)')
+        log(f'hold @fast: WNS={_f(hold.wns)} TNS={_f(hold.tns, "+.2f")} failing={len(hold.paths)}; delay cell {dcell}')
         setup_floor = min(sta.wns, margin)
+        tried_hold: set[tuple] = set()
         for rnd in range(hold_iters):
             if not hold.paths or not hold.ok:
                 break
-            nl = Netlist(text, out_pins, bus_ranges)
-            n = 0
+            nl0 = Netlist(text, out_pins, bus_ranges)
+            # Endpoints -> delay targets: one per (instance, pin) or port, validated
+            # against the liberty (delay goes on data/enable pins only, never on a
+            # clock, an async control or an output), minus targets already rejected.
+            targets: list[tuple] = []
+            skipped: dict[str, int] = {}
             for pth in hold.paths:
-                # report_checks names a register endpoint by instance; the data
-                # pin is the last stage of the path (e.g. _665_/D).
                 ep = pth.endpoint
                 last = pth.stages[-1] if pth.stages else None
-                if ep in nl.inst:
-                    pin = last.pin if (last and last.inst == ep) else 'D'
-                    n += nl.delay_pin(ep, pin, dcell, 1, dpin_in, dpin_out)
-                elif '/' in ep and ep.rsplit('/', 1)[0] in nl.inst:
+                if ep in nl0.inst:
+                    inst, pin = ep, (last.pin if (last and last.inst == ep) else 'D')
+                elif '/' in ep and ep.rsplit('/', 1)[0] in nl0.inst:
                     inst, pin = ep.rsplit('/', 1)
-                    n += nl.delay_pin(inst, pin, dcell, 1, dpin_in, dpin_out)
                 else:
-                    n += nl.delay_port(ep, dcell, 1, dpin_in, dpin_out)
-            if n == 0:
+                    key = ('port', ep)
+                    if key not in tried_hold and key not in targets:
+                        targets.append(key)
+                    continue
+                kind = fam.pin_kind(nl0.inst[inst]['type'], pin)
+                if kind not in ('data', 'input'):
+                    skipped[f'{kind}:{nl0.inst[inst]["type"].split("__")[-1]}/{pin}'] = skipped.get(f'{kind}:{nl0.inst[inst]["type"].split("__")[-1]}/{pin}', 0) + 1
+                    continue
+                key = ('pin', inst, pin)
+                if key not in tried_hold and key not in targets:
+                    targets.append(key)
+            if skipped:
+                log('hold: no delay cell on ' + ', '.join(f'{k} x{v}' for k, v in sorted(skipped.items())[:6])
+                    + ' (only data/enable pins are delayed)')
+            if not targets:
+                log('hold: no delayable endpoints left; done')
                 break
-            it += 1
-            new = out_dir / f'it{it}.v'
-            new.write_text(nl.render())
-            hold_new = run_sta(opensta, hold_lib, new, top, constraints, out_dir, f'hold{rnd + 1}', k=max_paths, slack_max=0.0, mode='min', extra_libs=extra_libs_fast)
-            setup_new = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, f'it{it}', k=max_paths, slack_max=margin, extra_libs=extra_libs)
-            ok = (hold_new.ok and setup_new.ok and hold_new.tns > hold.tns + 1e-6
-                  and setup_new.wns >= setup_floor - 1e-6 and setup_new.tns >= sta.tns - 0.05)
-            steps.append(Step(it=it, moves={f'hold:{p.endpoint}': dcell for p in hold.paths}, wns_before=hold.wns,
-                              tns_before=hold.tns, wns_after=hold_new.wns, tns_after=hold_new.tns, accepted=ok))
-            log(f'it{it} (hold): {n} delay cells on {len(hold.paths)} endpoints -> hold WNS {hold.wns:+.3f}->{hold_new.wns:+.3f} '
-                f'TNS {hold.tns:+.2f}->{hold_new.tns:+.2f}; setup WNS {sta.wns:+.3f}->{setup_new.wns:+.3f} {"ACCEPT" if ok else "reject"}')
-            if not ok:
+            # Batch = all targets; on rejection bisect down to single targets and
+            # go on with the feasible subset, like the sizing batches.
+            batch = list(targets)
+            accepted = False
+            while batch:
+                nl = Netlist(text, out_pins, bus_ranges)
+                n = 0
+                for t in batch:
+                    n += nl.delay_pin(t[1], t[2], dcell, 1, dpin_in, dpin_out) if t[0] == 'pin' else nl.delay_port(t[1], dcell, 1, dpin_in, dpin_out)
+                if n == 0:
+                    tried_hold.update(batch)
+                    break
+                it += 1
+                new = out_dir / f'it{it}.v'
+                new_text = nl.render()
+                probs = structural_problems(new_text, fam)
+                if probs:
+                    log(f'it{it} (hold): rejected before STA, netlist check failed: ' + '; '.join(probs))
+                    if len(batch) == 1:
+                        tried_hold.add(batch[0]); break
+                    batch = batch[:len(batch) // 2]
+                    continue
+                new.write_text(new_text)
+                hold_new = run_sta(opensta, hold_lib, new, top, constraints, out_dir, f'hold{it}', k=max_paths, slack_max=0.0, mode='min', extra_libs=extra_libs_fast)
+                setup_new = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, f'it{it}', k=max_paths, slack_max=margin, extra_libs=extra_libs)
+                ok = (hold_new.ok and setup_new.ok and hold_new.tns is not None and hold_new.tns > hold.tns + 1e-6
+                      and setup_new.wns >= setup_floor - 1e-6 and setup_new.tns >= sta.tns - 0.05)
+                steps.append(Step(it=it, moves={('hold:' + (t[1] if t[0] == 'port' else f'{t[1]}/{t[2]}')): dcell for t in batch},
+                                  wns_before=hold.wns, tns_before=hold.tns, wns_after=hold_new.wns, tns_after=hold_new.tns, accepted=ok))
+                log(f'it{it} (hold): {n} delay cells on {len(batch)} endpoints -> hold WNS {_f(hold.wns)}->{_f(hold_new.wns)} '
+                    f'TNS {_f(hold.tns, "+.2f")}->{_f(hold_new.tns, "+.2f")}; setup WNS {_f(sta.wns)}->{_f(setup_new.wns)} {"ACCEPT" if ok else "reject"}')
+                if ok:
+                    cur, text, hold, sta = new, new_text, hold_new, setup_new
+                    types = instance_types(text)
+                    delay_cells += n
+                    total_moves[f'hold_round_{rnd + 1}'] = f'{n} x {dcell} on {len(batch)} endpoints'
+                    states.append((cur, sta.wns, sta.tns, dict(total_moves)))
+                    accepted = True
+                    break
+                if len(batch) == 1:
+                    tried_hold.add(batch[0])
+                    break
+                batch = batch[:len(batch) // 2]
+            if not accepted and all(t in tried_hold for t in targets):
+                log('hold: every remaining endpoint was rejected; done')
                 break
-            cur, text, hold, sta = new, new.read_text(), hold_new, setup_new
-            types = instance_types(text)
-            delay_cells += n
-            total_moves[f'hold_round_{rnd + 1}'] = f'{n} x {dcell}'
-            states.append((cur, sta.wns, sta.tns, dict(total_moves)))
         hold_after = (hold.wns, hold.tns)
+        phase_status['repair_hold'] = 'ok'
+      except Exception as e:          # setup gains stay; report the hold failure explicitly
+        phase_status['repair_hold'] = f'failed: {e}'
+        log(f'repair_hold: phase aborted ({e}); continuing with the last accepted netlist')
 
     # Final state: best TNS among accepted states that did not regress WNS;
     # if every improvement moved the worst path, best TNS overall (reported).
@@ -866,14 +976,17 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         log(f'note: WNS regressed {start_wns:+.3f} -> {sta.wns:+.3f} for a TNS gain; --final wns forbids this')
     final = out_dir / 'resized.v'
     shutil.copy(cur, final)
-    area = area_of(yosys, liberty, final, top, extra_libs)
+    area = area_of(yosys, liberty, final, top, std_extra, read_only=macro_libs)
     log(f'end:   WNS={sta.wns:+.3f} TNS={sta.tns:+.2f} area={area:.1f} ({(area / area0 - 1) * 100:+.2f}%) '
         f'failing={len(sta.paths)} moves={len(total_moves)} -> {final}')
     leak1, mix1 = fam.leakage_total(types), fam.lib_mix(types)
     if leak0 is not None and leak1 is not None and (fam.is_multi_lib() or abs(leak1 - leak0) > 1e-9):
         log(f'leakage {leak0 / 1000:.2f} -> {leak1 / 1000:.2f} uW ({(leak1 / leak0 - 1) * 100 if leak0 else 0:+.1f}%); mix {mix1}')
-    res = {'input': str(netlist), 'output': str(final), 'top': top,
-           'start': {'wns_ns': steps[0].wns_before if steps else sta.wns, 'tns_ns': steps[0].tns_before if steps else sta.tns, 'area': area0,
+    phase_status.setdefault('sizing', 'ok')
+    phase_status.setdefault('repair_hold', 'skipped')
+    res = {'input': str(netlist), 'output': str(final), 'top': top, 'status': phase_status,
+           'cells_start': len(instance_types(netlist.read_text())), 'cells_end': len(types),
+           'start': {'wns_ns': start_wns, 'tns_ns': start_tns, 'area': area0,
                      'leakage_nw': leak0, 'lib_mix': mix0},
            'end': {'wns_ns': sta.wns, 'tns_ns': sta.tns, 'area': area, 'failing': len(sta.paths), 'leakage_nw': leak1, 'lib_mix': mix1},
            'moves': total_moves, 'steps': [asdict(s) for s in steps], 'wns_regressed': wns_regressed,
@@ -898,6 +1011,7 @@ def main() -> int:
     ap.add_argument('--max-fanout', type=int, default=8)
     ap.add_argument('--repair-hold', action='store_true', help='insert delay cells on failing hold endpoints (fast corner) while setup holds')
     ap.add_argument('--lib-fast', help='fast-corner liberty for hold analysis (default: --lib-sta)')
+    ap.add_argument('--macro-lib', action='append', default=[], help='hard-macro liberty: timing + pins, not counted in area (repeatable)')
     ap.add_argument('--extra-lib', action='append', default=[], help='hard-macro liberty (SRAM, PLL...), repeatable; read by STA and the netlist model')
     ap.add_argument('--dont-use', nargs='+', default=[], help='cell patterns never used by repairs')
     ap.add_argument('--buffer-cell', help='buffer cell for repair_design (default: second-weakest buffer in the liberty)')
@@ -920,7 +1034,7 @@ def main() -> int:
                  recover_area=a.recover_area, recover_rounds=a.recover_rounds,
                  repair_design=a.repair_design, max_fanout=a.max_fanout,
                  repair_hold=a.repair_hold, lib_fast=a.lib_fast,
-                 extra_libs=a.extra_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
+                 extra_libs=a.extra_lib, macro_libs=a.macro_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
     if a.json:
         print(json.dumps(res, indent=2))
     return 0

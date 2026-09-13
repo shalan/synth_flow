@@ -284,7 +284,11 @@ class Config:
     resize_final: str = 'tns'
     # after timing: downsize / swap to a slower library off-critical cells while
     # WNS holds (resize.py --recover-area). Also --recover-area.
-    resize_recover_area: bool = False          # tns | wns (never regress WNS)
+    resize_recover_area: bool = False
+    # post-pass on the N most promising candidates (selected, fastest, Pareto
+    # front), then select again: a fast candidate that only closes after
+    # sizing is not missed. 1 = the selected winner only. Also --resize-candidates.
+    resize_candidates: int = 1          # tns | wns (never regress WNS)
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -861,18 +865,20 @@ def _liberty_arg(cfg) -> str:
     return ' -liberty '.join(_synth_libs(cfg))
 
 
-def _postpass_libs(cfg) -> tuple[str, list[str], list[str]]:
-    """(primary, extras at the setup corner, extras at the fast corner) for the
-    post-pass: the mapping liberty first, then every other standard-cell
-    library of the corner and the hard macros, without duplicates."""
+def _postpass_libs(cfg) -> dict:
+    """Liberty sets for the post-pass: `primary` (the mapping liberty), `std`
+    (every other standard-cell library of the setup corner, counted in area),
+    `std_fast` (same at the fast corner), `macro` / `macro_fast` (hard macros:
+    timing and pins only). No duplicates."""
     primary = _synth_lib(cfg)
     corner = 'slow' if _cfg_get(cfg, 'lib_slow') else 'typ'
-    std = [_cfg_get(cfg, 'lib_slow') or _cfg_get(cfg, 'lib_typ')] + list((_cfg_get(cfg, 'lib_extra') or {}).get(corner, []))
+    extra = _cfg_get(cfg, 'lib_extra') or {}
     macro = _cfg_get(cfg, 'macro_libs') or {}
-    setup = [l for l in dict.fromkeys(std + list(macro.get(corner, []))) if l and l != primary]
-    fast = [l for l in dict.fromkeys([_cfg_get(cfg, 'lib_fast')] + list((_cfg_get(cfg, 'lib_extra') or {}).get('fast', []))
-                                     + list(macro.get('fast', []))) if l and l != _cfg_get(cfg, 'lib_fast')]
-    return primary, setup, fast
+    std = [l for l in dict.fromkeys([_cfg_get(cfg, 'lib_slow') or _cfg_get(cfg, 'lib_typ')] + list(extra.get(corner, [])))
+           if l and l != primary]
+    std_fast = [l for l in dict.fromkeys(list(extra.get('fast', []))) if l and l != _cfg_get(cfg, 'lib_fast')]
+    return {'primary': primary, 'std': std, 'std_fast': std_fast,
+            'macro': list(macro.get(corner, [])), 'macro_fast': list(macro.get('fast', []))}
 
 
 def _extra_libs(cfg, corner: str) -> list[str]:
@@ -1767,9 +1773,31 @@ report_checks -path_delay min -group_path_count 5 -format full_clock
 report_worst_slack -min -digits 4
 report_tns -min -digits 4
 puts ">>> HOLD_END"
+puts ">>> GROUPS_BEGIN"
+puts "GROUPS SETUP"
+report_checks -path_delay max -group_path_count 1 -format slack_only -digits 4
+puts "GROUPS HOLD"
+report_checks -path_delay min -group_path_count 1 -format slack_only -digits 4
+puts ">>> GROUPS_END"
 {sdf_line}
 exit
 """
+
+
+def _parse_group_slacks(section: str) -> dict:
+    """`report_checks -format slack_only` prints `<group> <slack>` per path
+    group (one per clock, plus async/unconstrained). -> {'setup': {g: s}, 'hold': {g: s}}"""
+    out = {'setup': {}, 'hold': {}}
+    mode = None
+    for line in section.splitlines():
+        if line.startswith('GROUPS SETUP'):
+            mode = 'setup'; continue
+        if line.startswith('GROUPS HOLD'):
+            mode = 'hold'; continue
+        m = re.match(r'^(\S+)\s+(-?[0-9]+\.[0-9]+)\s*$', line.strip())
+        if mode and m and m.group(1) not in ('Group',):
+            out[mode][m.group(1)] = float(m.group(2))
+    return out
 
 @dataclass
 class CornerResult:
@@ -1786,6 +1814,9 @@ class CornerResult:
     sdf_path: Optional[str] = None
     report_path: Optional[str] = None
     error: Optional[str] = None
+    # worst slack per path group (one per clock) at the sign-off corners
+    groups_setup_slow: dict = field(default_factory=dict)
+    groups_hold_fast: dict = field(default_factory=dict)
 
 def run_corner_sta(cfg: Config, module: str, netlist: Path,
                    results_dir: Path) -> CornerResult:
@@ -1842,16 +1873,19 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
             continue
         setup = out[out.find('>>> SETUP_BEGIN'):out.find('>>> SETUP_END')]
         hold = out[out.find('>>> HOLD_BEGIN'):out.find('>>> HOLD_END')]
+        groups = _parse_group_slacks(out[out.find('>>> GROUPS_BEGIN'):out.find('>>> GROUPS_END')])
         ws = grab(setup, r'^worst slack(?:\s+max)?\s+([-0-9.eE+]+)')
         ts = grab(setup, r'^tns(?:\s+max)?\s+([-0-9.eE+]+)')
         wh = grab(hold, r'^worst slack(?:\s+min)?\s+([-0-9.eE+]+)')
         th = grab(hold, r'^tns(?:\s+min)?\s+([-0-9.eE+]+)')
         if name == 'slow':
             res.wns_setup_slow, res.tns_setup_slow = ws, ts
+            res.groups_setup_slow = groups['setup']
         elif name == 'typical':
             res.wns_setup_typ, res.tns_setup_typ, res.wns_hold_typ, res.tns_hold_typ = ws, ts, wh, th
         else:
             res.wns_hold_fast, res.tns_hold_fast = wh, th
+            res.groups_hold_fast = groups['hold']
     log.write_text('\n'.join(log_parts))
     rpt.write_text('\n'.join(report_parts))
     res.sdf_path = str(sdf) if sdf.exists() else None
@@ -2004,12 +2038,23 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
     md.append('')
     md.append('## Winners')
     md.append('')
-    md.append('| Module | Recipe | WNS typ (ns) | Cells | Area (um²) | WNS setup slow | WNS setup typ | WNS hold fast | WNS hold typ | Status |')
-    md.append('|---|---|---|---|---|---|---|---|---|---|')
+    md.append('| Module | Recipe | WNS typ (ns) | Cells | Area (um²) | Cells / area after post-pass | WNS setup slow | WNS setup typ | WNS hold fast | WNS hold typ | Status |')
+    md.append('|---|---|---|---|---|---|---|---|---|---|---|')
     for m, sel in selections.items():
         if sel.winner is None:
-            md.append(f'| `{m}` | FAILED | — | — | — | — | — | — | — | ❌ |')
+            md.append(f'| `{m}` | FAILED | — | — | — | — | — | — | — | — | ❌ |')
             continue
+        post_s = '—'
+        pp = results_dir / m / 'resize.json'
+        if pp.exists():
+            try:
+                pr = json.loads(pp.read_text())
+                post_s = f"{pr.get('cells_end', '?')} / {pr['end']['area']:.1f}"
+                bad = [k for k, v in (pr.get('status') or {}).items() if str(v).startswith('failed')]
+                if bad:
+                    post_s += ' ⚠️ ' + ','.join(bad)
+            except Exception:
+                post_s = '?'
         win = next((c for c in sel.candidates if c.recipe == sel.winner), None)
         corner = corners.get(m)
         setup_slow = (f'{corner.wns_setup_slow:.3f}'
@@ -2030,10 +2075,26 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
         area_s = f'{win.area:.1f}' if win else '—'
         md.append(
             f'| `{m}` | `{sel.winner}` | '
-            f'{wns_cell} | {cells_s} | {area_s} | '
+            f'{wns_cell} | {cells_s} | {area_s} | {post_s} | '
             f'{setup_slow} | {setup_typ} | {hold_fast} | {hold_typ} | {status} |'
         )
     md.append('')
+    # per path group (clock) slack at the sign-off corners
+    grp_rows = []
+    for m, sel in selections.items():
+        corner = corners.get(m)
+        if corner and (corner.groups_setup_slow or corner.groups_hold_fast):
+            for g in sorted(set(corner.groups_setup_slow) | set(corner.groups_hold_fast)):
+                ss_ = corner.groups_setup_slow.get(g); hf = corner.groups_hold_fast.get(g)
+                grp_rows.append(f"| `{m}` | `{g}` | {ss_:+.3f} | {hf:+.3f} |" if ss_ is not None and hf is not None
+                                else f"| `{m}` | `{g}` | {'—' if ss_ is None else f'{ss_:+.3f}'} | {'—' if hf is None else f'{hf:+.3f}'} |")
+    if grp_rows:
+        md.append('### Slack per path group')
+        md.append('')
+        md.append('| Module | Path group | Setup slack slow (ns) | Hold slack fast (ns) |')
+        md.append('|---|---|---|---|')
+        md.extend(grp_rows)
+        md.append('')
 
     # Per-module recipe comparison
     md.append('## Recipe sweep results')
@@ -2247,21 +2308,18 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
     path.write_text('\n'.join(L) + '\n')
 
 
-def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, log) -> None:
-    """Run resize.py on results/<module>/winner.v; keep the pre-sizing netlist
-    as winner.presize.v and write resize.json. Never fatal."""
+def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log) -> Optional[dict]:
+    """Run resize.py (sizing / repairs per cfg) on one netlist. Returns the
+    result dict or None on failure; never raises."""
     try:
         import resize as resize_mod
     except ImportError:
         log.warning('[resize] resize.py not found; skipping')
-        return
-    winner = mod_results / 'winner.v'
-    presize = mod_results / 'winner.presize.v'
-    shutil.copy(winner, presize)
+        return None
     sta_lib = cfg.lib_slow or cfg.lib_typ
     try:
         res = resize_mod.resize(
-            presize, module, _synth_lib(asdict(cfg)), sta_lib, cfg.period_ps, cfg.clock_port, work_dir,
+            netlist_in, module, _synth_lib(asdict(cfg)), sta_lib, cfg.period_ps, cfg.clock_port, work_dir,
             sdc=cfg.sdc, iters=cfg.resize_iters, yosys=cfg.yosys, opensta=cfg.opensta,
             driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
             unc_setup_ps=cfg.clock_uncertainty_setup_ps, unc_hold_ps=cfg.clock_uncertainty_hold_ps,
@@ -2271,16 +2329,96 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
-            extra_libs=_postpass_libs(cfg)[1],
-            extra_libs_fast=_postpass_libs(cfg)[2],
+            extra_libs=_postpass_libs(cfg)['std'], extra_libs_fast=_postpass_libs(cfg)['std_fast'],
+            macro_libs=_postpass_libs(cfg)['macro'], macro_libs_fast=_postpass_libs(cfg)['macro_fast'],
             recover_area=cfg.resize_recover_area,
             dont_use=cfg.dont_use, buffer_cell=cfg.repair_buffer_cell, delay_cell=cfg.repair_delay_cell,
             log=lambda *x: log.debug('[resize] ' + ' '.join(str(v) for v in x)))
     except Exception as e:
-        log.warning(f'[resize] {module}: failed ({e}); winner left unsized')
+        log.warning(f'[resize] {module}: {netlist_in.name} failed ({e})')
+        return None
+    return res
+
+
+def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, log) -> None:
+    """Post-pass on results/<module>/winner.v; keep the pre-sizing netlist as
+    winner.presize.v and write resize.json. Never fatal."""
+    winner = mod_results / 'winner.v'
+    presize = mod_results / 'winner.presize.v'
+    shutil.copy(winner, presize)
+    res = _run_resize(cfg, module, presize, work_dir, log)
+    if res is None:
+        log.warning(f'[resize] {module}: winner left unsized')
         return
     shutil.copy(res['output'], winner)
     (mod_results / 'resize.json').write_text(json.dumps(res, indent=2))
+    _log_resize(module, res, log)
+
+
+def _log_resize(module: str, res: dict, log) -> None:
+    st = res.get('status', {})
+    bad = {k: v for k, v in st.items() if v.startswith('failed')}
+    log.info(f"[resize] {module}: WNS {res['start']['wns_ns']:+.3f} -> {res['end']['wns_ns']:+.3f}  "
+             f"TNS {res['start']['tns_ns']:+.2f} -> {res['end']['tns_ns']:+.2f}  "
+             f"area {res['start']['area']:.0f} -> {res['end']['area']:.0f}  cells {res.get('cells_start', '?')} -> {res.get('cells_end', '?')}  "
+             f"({len(res['moves'])} moves, {res['buffers_inserted']} buffers, {res['delay_cells_inserted']} delay cells"
+             + (f"; hold@fast {res['hold_before'][0]:+.3f} -> {res['hold_after'][0]:+.3f}" if res.get('hold_before') and res['hold_before'][0] is not None and res.get('hold_after') and res['hold_after'][0] is not None else '')
+             + ')' + (f"  PHASES FAILED: {bad}" if bad else ''))
+
+
+def _postpass_candidates(cands: list, sel, n: int) -> list:
+    """Which candidates get the post-pass when resize_candidates > 1: the
+    selected one, the fastest (best WNS), then the Pareto front in area order."""
+    order = []
+    def add(c):
+        if c and c.netlist and c not in order:
+            order.append(c)
+    add(next((c for c in cands if c.recipe == sel.winner), None))
+    timed = [c for c in cands if c.wns_ns is not None and c.netlist]
+    if timed:
+        add(max(timed, key=lambda c: c.wns_ns))
+    for r in sel.pareto_front:
+        add(next((c for c in cands if c.recipe == r), None))
+    for c in sorted(timed, key=lambda c: (-(c.wns_ns or 0), c.area)):
+        add(c)
+    return order[:max(1, n)]
+
+
+def _resize_candidates(cfg: Config, module: str, cands: list, sel, mod_results: Path, work_dir: Path, log):
+    """Post-pass on several candidates, then select again with the same rule
+    (min area among those meeting timing after repair; else fallback).
+    Writes winner.v / winner.presize.v / resize.json for the final choice and
+    postpass.json with every candidate's before/after."""
+    chosen = _postpass_candidates(cands, sel, cfg.resize_candidates)
+    log.info(f"[resize] {module}: post-pass on {len(chosen)} candidates: {', '.join(c.recipe for c in chosen)}")
+    post, records = [], {}
+    for c in chosen:
+        res = _run_resize(cfg, module, Path(c.netlist), work_dir / c.recipe, log)
+        if res is None:
+            records[c.recipe] = {'status': 'failed'}
+            continue
+        _log_resize(f'{module}/{c.recipe}', res, log)
+        post.append(Candidate(recipe=c.recipe, netlist=res['output'], wns_ns=res['end']['wns_ns'], tns_ns=res['end']['tns_ns'],
+                              cells=res.get('cells_end', c.cells), area=res['end']['area'], runtime_s=c.runtime_s))
+        records[c.recipe] = {'before': {'wns_ns': c.wns_ns, 'tns_ns': c.tns_ns, 'area': c.area, 'cells': c.cells},
+                             'after': {'wns_ns': res['end']['wns_ns'], 'tns_ns': res['end']['tns_ns'], 'area': res['end']['area'],
+                                       'cells': res.get('cells_end')}, 'status': res.get('status'), 'resize_json': str(Path(res['output']).parent / 'resize.json')}
+    if not post:
+        log.warning(f'[resize] {module}: every candidate failed the post-pass; keeping the pre-pass winner')
+        return sel
+    sel2 = select_winner(post, cfg.objective, cfg.select_margin_ps / 1000.0, cfg.fallback, period_ns=cfg.period_ps / 1000.0)
+    win = next(c for c in post if c.recipe == sel2.winner)
+    orig = next(c for c in cands if c.recipe == sel2.winner)
+    shutil.copy(orig.netlist, mod_results / 'winner.presize.v')
+    shutil.copy(win.netlist, mod_results / 'winner.v')
+    shutil.copy(Path(win.netlist).parent / 'resize.json', mod_results / 'resize.json')
+    (mod_results / 'postpass.json').write_text(json.dumps({'winner': sel2.winner, 'rationale': sel2.rationale,
+                                                            'candidates': records}, indent=2))
+    if sel2.winner != sel.winner:
+        log.info(f"[winner] {module}: after the post-pass {sel2.winner} replaces {sel.winner} ({sel2.rationale})")
+    sel.winner = sel2.winner
+    sel.rationale = f'after post-pass over {len(post)} candidates: {sel2.rationale}'
+    return sel
     s0, s1 = res['start'], res['end']
     extra = ''
     if res.get('buffers_inserted'):
@@ -2316,6 +2454,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--abc-target', help="ABC -D: 'none' (default, min-delay mapping), 'period', 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
     p.add_argument('--repair-design', action='store_true', help='buffer trees on high-fanout nets of failing paths (needs OpenSTA)')
+    p.add_argument('--resize-candidates', type=int, help='run the post-pass on the N best candidates and select again (default 1)')
     p.add_argument('--recover-area', action='store_true', help='after the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies --resize)')
     p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
     p.add_argument('--max-fanout', type=int, help='sink group size for repair_design (default 8; SDC set_max_fanout overrides)')
@@ -2382,6 +2521,9 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.resize_winner = True
     if getattr(args, 'repair_design', False):
         cfg.repair_design = True
+    if getattr(args, 'resize_candidates', None):
+        cfg.resize_candidates = args.resize_candidates
+        cfg.resize_winner = True
     if getattr(args, 'recover_area', False):
         cfg.resize_recover_area = True
         cfg.resize_winner = True
@@ -2720,7 +2862,11 @@ def main() -> int:
                 shutil.copy(win.netlist, mod_results / 'winner.v')
                 winner_netlists[module] = str(mod_results / 'winner.v')
                 if (cfg.resize_winner or cfg.repair_design or cfg.repair_hold) and cfg.run_sta:
-                    _resize_winner(cfg, module, mod_results, work / module / 'resize', log)
+                    if cfg.resize_candidates > 1:
+                        sel = _resize_candidates(cfg, module, cands, sel, mod_results, work / module / 'resize', log)
+                        selections[module] = sel
+                    else:
+                        _resize_winner(cfg, module, mod_results, work / module / 'resize', log)
             write_derived_sdc(cfg, sdc_constraints, mod_results / 'synth.sdc', sdc_overrides,
                               groups=module_groups.get(module))
             win_groups = work / module / f'{sel.winner}.groups.json'
