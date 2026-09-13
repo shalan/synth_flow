@@ -52,7 +52,7 @@ primitives_dir: $PDK/sky130_fd_sc_hd/verilog
 | Field | Type | Description |
 |---|---|---|
 | `rtl_files` | list of strings | Verilog/SystemVerilog source files. Globs allowed. Must be non-empty and all paths must resolve. |
-| `lib_typ` | string | Path to typical-corner liberty file. Final fallback for synthesis when neither `lib_synth` nor `lib_slow` is set. |
+| `lib_typ` | string or list | Path to typical-corner liberty file. Final fallback for synthesis when neither `lib_synth` nor `lib_slow` is set. A **list** loads several standard-cell libraries at once (see *Several libraries at once* below). |
 | `top` | string | Name of the project top module. Used as the GLS netlist filename and report title. Does not need to be in `modules` (auto-detection still scans it). |
 
 ### Required for STA
@@ -62,14 +62,46 @@ These are required only when `run_sta: true` (the default). Set
 
 | Field | Type | Description |
 |---|---|---|
-| `lib_fast` | string | Fast-corner liberty (lowest delay, used for hold checks). |
-| `lib_slow` | string | Slow-corner liberty (highest delay, used for setup checks). **Also the default synthesis library** — Yosys/ABC see SS-corner cell delays during mapping. Override with `lib_synth`. |
+| `lib_fast` | string or list | Fast-corner liberty (lowest delay, used for hold checks). |
+| `lib_slow` | string or list | Slow-corner liberty (highest delay, used for setup checks). **Also the default synthesis library** — Yosys/ABC see SS-corner cell delays during mapping. Override with `lib_synth`. |
 
 ### Optional synthesis-library override
 
 | Field | Type | Description |
 |---|---|---|
-| `lib_synth` | string | Explicit liberty for synthesis (Yosys / dfflibmap / ABC / stat). Bypasses the default `lib_slow → lib_typ` resolution. Use `lib_synth: <lib_typ_path>` to fall back to the older optimistic-synth-at-TT flow. |
+| `lib_synth` | string or list | Explicit liberty for synthesis (Yosys / dfflibmap / ABC / stat). Bypasses the default `lib_slow → lib_typ` resolution. Use `lib_synth: <lib_typ_path>` to fall back to the older optimistic-synth-at-TT flow. |
+
+#### Several libraries at once
+
+```yaml
+lib_typ:  [$PDK/sky130_fd_sc_hs/lib/sky130_fd_sc_hs__tt_025C_1v80.lib, $PDK/sky130_fd_sc_ls/lib/sky130_fd_sc_ls__tt_025C_1v80.lib]
+lib_slow: [$PDK/sky130_fd_sc_hs/lib/sky130_fd_sc_hs__ss_100C_1v60.lib, $PDK/sky130_fd_sc_ls/lib/sky130_fd_sc_ls__ss_100C_1v60.lib]
+lib_fast: [$PDK/sky130_fd_sc_hs/lib/sky130_fd_sc_hs__ff_n40C_1v95.lib, $PDK/sky130_fd_sc_ls/lib/sky130_fd_sc_ls__ff_n40C_1v95.lib]
+resize_winner: true
+resize_recover_area: true
+```
+
+The first file of each list is the primary library (wire-load model, flop
+timing for budgets); the others are kept in `lib_extra` per corner and are
+passed to `dfflibmap`, `abc` and `stat` (`-liberty` repeated), read into every
+OpenSTA session and loaded into the post-pass. ABC then maps with the union of
+the cells. The post-pass ranks the libraries by the delay of their inverters
+and buffers and adds two moves that need no equivalence check (same pins,
+same function): on failing paths the same cell in the next **faster** library
+is tried before a bigger drive; with `resize_recover_area` off-critical cells
+are moved to the next **slower** (lower-leakage) library before being
+downsized, while WNS holds. `resize.json` reports leakage (from the liberty)
+and the instance count per library before and after. On the CLI,
+`--lib a.lib,b.lib` (also `--lib-slow`, `--lib-fast`) does the same.
+
+Only libraries that share a placement site and rail geometry can be mixed
+in one design: on Sky130 that is `hs`, `ms`, `ls` and `lp` (0.48 × 3.33 µm
+`unit` site); `hd`/`hdll` (2.72 µm) and `hvl` (4.07 µm, 3.3 V) stand alone.
+The Vt implants differ between HS/MS (low-Vt NMOS) and LS/LP (high-Vt PMOS),
+so a mixed layout needs its own DRC/LVS at cell boundaries; the PDK vendor
+verified each library on its own. `sky130_fd_sc_hvl` works as a single
+library (57 cells, 3.3 V nominal: `tt_025C_3v30` / `ss_100C_3v00` /
+`ff_n40C_4v40`).
 
 ### Required for GLS
 
@@ -134,6 +166,7 @@ These are required only when `run_gls: true` (the default). Set
 | `resize_winner` | bool | `false` | Run `resize.py` on each module's winner before multi-corner STA (needs OpenSTA). Also `--resize`. Input kept as `winner.presize.v`; log in `resize.json`. |
 | `resize_iters` | int | `25` | Sizing iterations (STA calls) in the TNS phase. |
 | `resize_wns_tol_ps` | int | `150` | WNS regression tolerated for a TNS gain under the `tns` policy. |
+| `resize_recover_area` | bool | `false` | After timing is met: downsize off-critical cells, or with several libraries swap them to the slower one first, in batches accepted only while WNS stays at its floor and TNS does not drop. Also `--recover-area` (implies `--resize`). |
 | `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. Timing-clean states are always eligible. |
 
 ### Post-pass: repairs

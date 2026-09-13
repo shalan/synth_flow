@@ -68,7 +68,8 @@ Notes:
   the Sky130 HD library. When the bench runs against another library
   (`--lib-dir .../sky130_fd_sc_hs/lib`), the flow substitutes that
   library's `inv_1` (same-named cell) and logs it; STA sources the adapted
-  copy `results/<top>/constraints.libadapted.sdc`.
+  copy `results/<top>/constraints.libadapted.sdc`. `--lib-dir` can be
+  repeated to synthesise with several libraries at once (first = primary).
 - The tool derives async-reset false paths from register async pins, so the
   `set_false_path -from` lines above are confirmations, not requirements.
 - `ms_psram_ahb`'s SDC also sets `set_input_transition` and min loads; those
