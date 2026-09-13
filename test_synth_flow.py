@@ -264,6 +264,67 @@ with tempfile.TemporaryDirectory() as td:
     check('SDC -lib_cell from another library is mapped to the same-named cell', _out is not None and '-lib_cell sky130_fd_sc_hd__inv_1 [all_inputs]' in _txt and '-lib_cell sky130_fd_sc_hd__inv_2 [get_ports a]' in _txt, _txt)
     check('SDC with only known cells is left alone', _adapt_sdc_lib_cells(_out, _lc, Path(td) / 'res2', _logging.getLogger('t')) is None)
 check('same-named cell of another library variant is preferred as driving cell', _lc.default_driving_cell('sky130_fd_sc_hs__inv_1') == 'sky130_fd_sc_hd__inv_1' and _lc.default_driving_cell('sky130_fd_sc_hs__nosuch_3') == 'sky130_fd_sc_hd__inv_2')
+# --- several standard-cell libraries at once -------------------------------
+with tempfile.TemporaryDirectory() as td:
+    def _fakelib(name, delay, leak):
+        return f'''library ({name}) {{
+  time_unit : "1ns"; capacitive_load_unit (1,pf); leakage_power_unit : "1nW";
+  cell ({name}__inv_1) {{ area : 3; cell_leakage_power : {leak};
+    pin (A) {{ direction : input; capacitance : 0.002; }}
+    pin (Y) {{ direction : output; function : "!A"; max_capacitance : 0.1;
+      timing () {{ related_pin : "A"; cell_rise (scalar) {{ values ("{delay}"); }} cell_fall (scalar) {{ values ("{delay}"); }} }} }} }}
+  cell ({name}__inv_2) {{ area : 5; cell_leakage_power : {leak * 2};
+    pin (A) {{ direction : input; capacitance : 0.004; }}
+    pin (Y) {{ direction : output; function : "!A"; max_capacitance : 0.2;
+      timing () {{ related_pin : "A"; cell_rise (scalar) {{ values ("{delay * 0.8}"); }} cell_fall (scalar) {{ values ("{delay * 0.8}"); }} }} }} }}
+  cell ({name}__nand2_1) {{ area : 4; cell_leakage_power : {leak};
+    pin (A) {{ direction : input; capacitance : 0.002; }} pin (B) {{ direction : input; capacitance : 0.002; }}
+    pin (Y) {{ direction : output; function : "!(A&B)"; max_capacitance : 0.1; }} }}
+}}'''
+    fast, slow = Path(td) / 'fast.lib', Path(td) / 'slow.lib'
+    fast.write_text(_fakelib('fastlib', 0.10, 100.0)); slow.write_text(_fakelib('slowlib', 0.25, 10.0))
+    _ml = LibCells([str(fast), str(slow)])
+    check('two libraries are ranked by the delay of their single-input cells', _ml.is_multi_lib() and _ml.lib_speed[str(fast)] < _ml.lib_speed[str(slow)], str(_ml.lib_speed))
+    check('faster_variant is the same cell in the faster library; none from the fastest', _ml.faster_variant('slowlib__nand2_1') == 'fastlib__nand2_1' and _ml.faster_variant('fastlib__nand2_1') is None)
+    check('fastest_variant jumps straight to the fastest library', _ml.fastest_variant('slowlib__nand2_1') == 'fastlib__nand2_1' and _ml.fastest_variant('fastlib__nand2_1') is None and _ml.fastest_lib() == str(fast))
+    check('slower_variant is the reverse', _ml.slower_variant('fastlib__inv_2') == 'slowlib__inv_2' and _ml.slower_variant('slowlib__inv_2') is None)
+    check('next_size stays inside one library', _ml.next_size('slowlib__inv_1') == 'slowlib__inv_2' and _ml.next_size('fastlib__inv_1') == 'fastlib__inv_2')
+    check('leakage is read per cell and summed over instance types', _ml.cells['fastlib__inv_2'].leakage_nw == 200.0 and _ml.leakage_total({'a': 'fastlib__inv_1', 'b': 'slowlib__inv_1'}) == 110.0)
+    check('lib_mix counts instances per library prefix', _ml.lib_mix({'a': 'fastlib__inv_1', 'b': 'slowlib__inv_1', 'c': 'slowlib__nand2_1'}) == {'fastlib': 1, 'slowlib': 2})
+    check('single library: no variants, sizing unchanged', not _lc.is_multi_lib() and _lc.faster_variant('sky130_fd_sc_hd__nand2_1') is None)
+    from synth_flow import _split_lib_lists, _synth_libs, _liberty_arg, _extra_libs
+    _d = {'lib_typ': [str(fast), str(slow)], 'lib_slow': f'{fast},{slow}', 'lib_fast': str(fast), 'macro_libs': {'slow': ['m.lib']}}
+    _split_lib_lists(_d)
+    check('list-valued lib fields split into primary + lib_extra per corner', _d['lib_typ'] == str(fast) and _d['lib_extra'] == {'typ': [str(slow)], 'slow': [str(slow)], 'fast': []} and _d['lib_slow'] == str(fast), str(_d))
+    check('_synth_libs / _liberty_arg use the slow corner and its extras', _synth_libs(_d) == [str(fast), str(slow)] and _liberty_arg(_d) == f'{fast} -liberty {slow}')
+    check('_extra_libs = extra std libs + macro libs of the corner', _extra_libs(_d, 'slow') == [str(slow), 'm.lib'] and _extra_libs(_d, 'fast') == [])
+    from synth_flow import _postpass_libs
+    _d2 = dict(_d, lib_synth=str(slow), lib_synth_extra=[])       # mapping library is not the primary slow lib
+    _pl = _postpass_libs(_d2)
+    check('post-pass gets the mapping liberty, the other std libraries of the corner and the macros apart', _pl['primary'] == str(slow) and _pl['std'] == [str(fast)] and _pl['macro'] == ['m.lib'] and _pl['std_fast'] == [], str(_pl))
+    from synth_flow import _parse_group_slacks, _postpass_candidates, Candidate as _C, Selection as _S
+    _g = _parse_group_slacks('>>> GROUPS_BEGIN\nGROUPS SETUP\nGroup   Slack\n----\nclk   -0.1234\nclk2   1.5000\n\nGROUPS HOLD\nGroup Slack\n---\nclk   0.2000\n>>> GROUPS_END')
+    check('per path-group slack parser', _g == {'setup': {'clk': -0.1234, 'clk2': 1.5}, 'hold': {'clk': 0.2}}, str(_g))
+    _cs = [_C('a', 'a.v', -0.5, -3.0, 100, 1000.0, 1.0), _C('b', 'b.v', 0.3, 0.0, 120, 1300.0, 1.0), _C('c', 'c.v', -0.1, -0.5, 110, 1100.0, 1.0), _C('d', 'd.v', -0.9, -9.0, 90, 900.0, 1.0)]
+    _sel = _S(module='m', objective='delay', winner='c', candidates=_cs, pareto_front=['d', 'c', 'b'])
+    check('post-pass candidates: selected, fastest, then the Pareto front', [c.recipe for c in _postpass_candidates(_cs, _sel, 3)] == ['c', 'b', 'd'], str([c.recipe for c in _postpass_candidates(_cs, _sel, 3)]))
+# --- pin roles from the liberty and the structural netlist check ------------
+check('pin_kind: clock / data / async / input / output from the liberty',
+      (_lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'CLK'), _lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'D'),
+       _lc.pin_kind('sky130_fd_sc_hd__dfrtp_1', 'RESET_B'), _lc.pin_kind('sky130_fd_sc_hd__nand2_1', 'A'),
+       _lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'Q'), _lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'NOPE')) == ('clock', 'data', 'async', 'input', 'output', 'unknown'),
+      str((_lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'CLK'), _lc.pin_kind('sky130_fd_sc_hd__dfxtp_1', 'D'), _lc.pin_kind('sky130_fd_sc_hd__dfrtp_1', 'RESET_B'), _lc.pin_kind('sky130_fd_sc_hd__nand2_1', 'A'))))
+check('pin_kind: enable pin of an enable flop is data', _lc.pin_kind('sky130_fd_sc_hd__edfxtp_1', 'DE') == 'data' if 'sky130_fd_sc_hd__edfxtp_1' in _lc else True, _lc.pin_kind('sky130_fd_sc_hd__edfxtp_1', 'DE') if 'sky130_fd_sc_hd__edfxtp_1' in _lc else 'n/a')
+from resize import structural_problems
+_good = ("module t(a, y);\n  input a; output y;\n  wire n1;\n"
+         "  sky130_fd_sc_hd__inv_1 i1 (\n    .A(a),\n    .Y(n1)\n  );\n  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(y)\n  );\nendmodule\n")
+check('structural check passes a sane netlist', structural_problems(_good, _lc) == [], str(structural_problems(_good, _lc)))
+_two = _good.replace("  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(y)\n  );", "  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(n1)\n  );")
+check('structural check flags a net with two drivers', any('2 drivers' in p for p in structural_problems(_two, _lc)), str(structural_problems(_two, _lc)))
+_badpin = _good.replace('.Y(n1)', '.Q(n1)')
+check('structural check flags a pin that is not in the liberty', any('not a pin' in p for p in structural_problems(_badpin, _lc)), str(structural_problems(_badpin, _lc)))
+_unk = _good.replace('sky130_fd_sc_hd__inv_1 i1', 'sky130_fd_sc_hd__nosuch_1 i1')
+check('structural check flags an unknown cell', any('unknown cell' in p for p in structural_problems(_unk, _lc)))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

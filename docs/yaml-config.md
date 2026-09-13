@@ -52,7 +52,7 @@ primitives_dir: $PDK/sky130_fd_sc_hd/verilog
 | Field | Type | Description |
 |---|---|---|
 | `rtl_files` | list of strings | Verilog/SystemVerilog source files. Globs allowed. Must be non-empty and all paths must resolve. |
-| `lib_typ` | string | Path to typical-corner liberty file. Final fallback for synthesis when neither `lib_synth` nor `lib_slow` is set. |
+| `lib_typ` | string or list | Path to typical-corner liberty file. Final fallback for synthesis when neither `lib_synth` nor `lib_slow` is set. A **list** loads several standard-cell libraries at once (see *Several libraries at once* below). |
 | `top` | string | Name of the project top module. Used as the GLS netlist filename and report title. Does not need to be in `modules` (auto-detection still scans it). |
 
 ### Required for STA
@@ -62,14 +62,58 @@ These are required only when `run_sta: true` (the default). Set
 
 | Field | Type | Description |
 |---|---|---|
-| `lib_fast` | string | Fast-corner liberty (lowest delay, used for hold checks). |
-| `lib_slow` | string | Slow-corner liberty (highest delay, used for setup checks). **Also the default synthesis library** — Yosys/ABC see SS-corner cell delays during mapping. Override with `lib_synth`. |
+| `lib_fast` | string or list | Fast-corner liberty (lowest delay, used for hold checks). |
+| `lib_slow` | string or list | Slow-corner liberty (highest delay, used for setup checks). **Also the default synthesis library** — Yosys/ABC see SS-corner cell delays during mapping. Override with `lib_synth`. |
 
 ### Optional synthesis-library override
 
 | Field | Type | Description |
 |---|---|---|
-| `lib_synth` | string | Explicit liberty for synthesis (Yosys / dfflibmap / ABC / stat). Bypasses the default `lib_slow → lib_typ` resolution. Use `lib_synth: <lib_typ_path>` to fall back to the older optimistic-synth-at-TT flow. |
+| `mixed_map` | string | `fastest` | With several libraries: `fastest` maps with the fastest library only, `all` offers every cell to ABC (see below). |
+| `lib_synth` | string or list | Explicit liberty for synthesis (Yosys / dfflibmap / ABC / stat). Bypasses the default `lib_slow → lib_typ` resolution. Use `lib_synth: <lib_typ_path>` to fall back to the older optimistic-synth-at-TT flow. |
+
+#### Several libraries at once
+
+```yaml
+lib_typ:  [$PDK/sky130_fd_sc_hs/lib/sky130_fd_sc_hs__tt_025C_1v80.lib, $PDK/sky130_fd_sc_ls/lib/sky130_fd_sc_ls__tt_025C_1v80.lib]
+lib_slow: [$PDK/sky130_fd_sc_hs/lib/sky130_fd_sc_hs__ss_100C_1v60.lib, $PDK/sky130_fd_sc_ls/lib/sky130_fd_sc_ls__ss_100C_1v60.lib]
+lib_fast: [$PDK/sky130_fd_sc_hs/lib/sky130_fd_sc_hs__ff_n40C_1v95.lib, $PDK/sky130_fd_sc_ls/lib/sky130_fd_sc_ls__ff_n40C_1v95.lib]
+resize_winner: true
+resize_recover_area: true
+```
+
+The first file of each list is the primary library (wire-load model, flop
+timing for budgets); the others are kept in `lib_extra` per corner, read into
+every OpenSTA session and loaded into the post-pass. The flow ranks the
+libraries by the delay of their inverters and buffers (from the liberty, so
+HS < MS < LP < LS on Sky130) and applies one rule: **critical paths use fast
+cells only, slow cells go where there is slack.**
+
+- **Mapping** (`mixed_map: fastest`, default): Yosys/ABC map with the fastest
+  library alone, so ABC never trades a critical-path cell for an equal-area
+  slow one. `mixed_map: all` passes every library to `dfflibmap`, `abc` and
+  `stat` (`-liberty` repeated) and lets ABC pick from the union.
+- **Timing repair**: on a failing path the slowest stage is first replaced by
+  the same cell in the *fastest* library (same pins, same function, no area
+  change), then upsized.
+- **Recovery** (`resize_recover_area`): cells farther than 300 ps from the
+  worst slack move to the next *slower* library before being downsized, in
+  batches kept only while WNS holds and TNS does not drop.
+
+`resize.json` reports leakage and the instance count per library before and
+after. Leakage is what the liberty states (`cell_leakage_power`, else the mean
+of the `leakage_power` groups); the Sky130 LS/LP SS liberties report zero for
+most combinational cells, so compare leakage across libraries with care. On
+the CLI, `--lib a.lib,b.lib` (also `--lib-slow`, `--lib-fast`) does the same.
+
+Only libraries that share a placement site and rail geometry can be mixed
+in one design: on Sky130 that is `hs`, `ms`, `ls` and `lp` (0.48 × 3.33 µm
+`unit` site); `hd`/`hdll` (2.72 µm) and `hvl` (4.07 µm, 3.3 V) stand alone.
+The Vt implants differ between HS/MS (low-Vt NMOS) and LS/LP (high-Vt PMOS),
+so a mixed layout needs its own DRC/LVS at cell boundaries; the PDK vendor
+verified each library on its own. `sky130_fd_sc_hvl` works as a single
+library (57 cells, 3.3 V nominal: `tt_025C_3v30` / `ss_100C_3v00` /
+`ff_n40C_4v40`).
 
 ### Required for GLS
 
@@ -134,6 +178,8 @@ These are required only when `run_gls: true` (the default). Set
 | `resize_winner` | bool | `false` | Run `resize.py` on each module's winner before multi-corner STA (needs OpenSTA). Also `--resize`. Input kept as `winner.presize.v`; log in `resize.json`. |
 | `resize_iters` | int | `25` | Sizing iterations (STA calls) in the TNS phase. |
 | `resize_wns_tol_ps` | int | `150` | WNS regression tolerated for a TNS gain under the `tns` policy. |
+| `resize_candidates` | int | `1` | Run the post-pass on the N most promising candidates (the selected one, the fastest, then the Pareto front) and select again with the same rule on the post-pass numbers. Catches a fast candidate that only closes after sizing. Per-candidate before/after in `results/<module>/postpass.json`. Also `--resize-candidates N` (implies `--resize`). |
+| `resize_recover_area` | bool | `false` | After timing is met: downsize off-critical cells, or with several libraries swap them to the slower one first, in batches accepted only while WNS stays at its floor and TNS does not drop. Also `--recover-area` (implies `--resize`). |
 | `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. Timing-clean states are always eligible. |
 
 ### Post-pass: repairs
@@ -142,12 +188,23 @@ These are required only when `run_gls: true` (the default). Set
 |---|---|---|---|
 | `repair_design` | bool | `false` | Buffer trees on high-fanout nets of failing setup paths (`resize.py`): sinks split into groups of ≤ `max_fanout`, one net per failing path per round, batch accepted on TNS like the upsizes, bisected on rejection. Also `--repair-design`. ABC's own `buffer` runs before any measurement and without the real boundary loads; this is the repair step after OpenSTA has measured. |
 | `max_fanout` | int | `8` | Sink group size for `repair_design`. SDC `set_max_fanout` overrides. |
-| `repair_hold` | bool | `false` | Min-delay STA at the fast corner (`lib_fast`) lists failing hold endpoints; each gets one delay element (`repair_delay_cell`) in front of its data pin per round. A round is kept only if hold TNS improves and slow-corner setup WNS stays at its floor. Also `--repair-hold`. Function-preserving by construction. |
+| `repair_hold` | bool | `false` | Min-delay STA at the fast corner (`lib_fast`) lists failing hold endpoints. Each endpoint pin is checked against the liberty first: delay elements (`repair_delay_cell`) go only on data/enable inputs (setup/hold-checked pins, macro data pins, output ports); clock pins, async controls (recovery/removal-checked) and outputs are skipped and logged. Endpoints are deduplicated, delayed as one batch, and the batch is bisected on rejection so feasible subsets still land. A batch is kept only if hold TNS improves and slow-corner setup WNS stays at its floor. Also `--repair-hold`. Function-preserving by construction. |
 | `repair_buffer_cell` | string | liberty-chosen | Buffer used for `repair_design` trees. Default: the second-weakest cell of the liberty's largest plain buffer family (`buf_2` on Sky130 HD/HS/MS/LS, `buf_1` on LP). Buffers are recognised by function (output = input), not by name. |
 | `repair_delay_cell` | string | liberty-chosen | Delay element for `repair_hold`. Default: the slowest explicit delay cell (`dly*` name) among the weak-drive buffers, else the weakest plain buffer (`dlygate4sd3_1` on the full Sky130 libraries, `buf_1` on the bundled `hd_120` subset). |
 
 Any of `resize_winner`, `repair_design`, `repair_hold` enables the post-pass on
 each module's winner; the input netlist is kept as `winner.presize.v`.
+Every edited netlist passes a structural check before it is timed (one module,
+known cells, liberty pins, single driver per net) and is rejected otherwise.
+Each phase (buffering, sizing, recovery, hold) is a transaction: a failure in
+one phase keeps the last accepted netlist of the earlier phases and is
+reported in `resize.json` → `status` (`ok` / `skipped` / `failed: …`) and in
+the summary's post-pass column. `summary.md` also lists cells and area after
+the post-pass and the worst setup/hold slack per path group (per clock).
+
+For a frequency-pushing run where no candidate meets timing initially, use
+`fallback: best_wns` with `resize_final: wns` (and `resize_candidates: 3`):
+the fastest candidate is sized instead of the smaller, slower knee.
 The post-pass reads the same `macro_libs` as the corner STA (slow corner for
 setup, fast corner for hold), so SRAM/PLL pins have real arcs during sizing
 and their instances are recognised as drivers and sinks by the repairs.

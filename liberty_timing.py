@@ -41,6 +41,14 @@ _BUS_RE = re.compile(r'\bbus\s*\(\s*"?([^")\s]+)"?\s*\)\s*\{')
 _TYPE_RE = re.compile(r'^\s*type\s*\(\s*"?([^")\s]+)"?\s*\)\s*\{', re.M)
 
 
+def _check_kind(timing_type: str):
+    t = timing_type.lower()
+    for k in ('setup', 'hold', 'recovery', 'removal', 'min_pulse_width', 'minimum_period', 'nochange', 'skew'):
+        if t.startswith(k):
+            return k
+    return None
+
+
 def _strip_groups(body: str, group_re) -> str:
     """Blank out every `<group>(...) { ... }` block so nested pins are not rescanned."""
     out, pos = [], 0
@@ -185,6 +193,8 @@ class CellInfo:
     pins: dict = field(default_factory=dict)      # pin -> {'dir', 'cap', 'function', 'max_cap'}
     # representative delay of the (single) output arc, ps, when there is exactly one input
     delay_ps: Optional[float] = None
+    lib: str = ''                                  # liberty file the cell came from
+    leakage_nw: Optional[float] = None             # cell_leakage_power (else mean of leakage_power groups), nW
 
     @property
     def inputs(self) -> list[str]:
@@ -233,6 +243,15 @@ class LibCells:
         for c in self.cells.values():
             if c.outputs:      # flops included: dfxtp_1/2/4 share a footprint too
                 self._families.setdefault(c.footprint(), []).append(c.name)
+        # Speed rank of each standard-cell library = median delay of its usable
+        # single-input cells (inverters/buffers). Libraries without such cells
+        # (hard macros) get no rank and take no part in cross-library swaps.
+        self.lib_speed: dict[str, float] = {}
+        for lib in self.libs:
+            d = [c.delay_ps for c in self.cells.values()
+                 if c.lib == lib and c.delay_ps and len(c.inputs) == 1 and len(c.outputs) == 1 and not c.is_ff]
+            if d:
+                self.lib_speed[lib] = statistics.median(d)
         for fp, names in self._families.items():
             # area is the reliable drive order within one footprint (max_capacitance
             # is not monotonic with size on every library, e.g. sky130 HS nand2)
@@ -244,6 +263,8 @@ class LibCells:
         tu = 1.0 if (m and m.group(1).lower() == 'ps') else 1000.0
         um = re.search(r'capacitive_load_unit\s*\(\s*([0-9.]+)\s*,\s*"?(pf|ff)"?\s*\)', text, re.I)
         cu = (1000.0 if um and um.group(2).lower() == 'pf' else 1.0) * (float(um.group(1)) if um else 1.0)
+        lu = re.search(r'leakage_power_unit\s*:\s*"?\s*1\s*(pw|nw|uw|mw)"?', text, re.I)
+        leak_unit = {'pw': 1e-3, 'nw': 1.0, 'uw': 1e3, 'mw': 1e6}.get(lu.group(1).lower(), 1.0) if lu else 1.0
         # library-level bus types: `type (data) { bit_from : 0; bit_to : 31; }`.
         # bit_from is the first (leftmost) bit of a Verilog connection, which is
         # how OpenSTA numbers the bits; OpenRAM liberties are [0:N-1].
@@ -256,9 +277,15 @@ class LibCells:
                 bus_types[tm.group(1)] = (int(bf.group(1)), int(bt.group(1)))
         for cm in _CELL_RE.finditer(text):
             body, _ = _block(text, cm.end() - 1)
-            ci = CellInfo(name=cm.group(1))
+            ci = CellInfo(name=cm.group(1), lib=lib)
             am = _AREA_RE.search(body)
             ci.area = float(am.group(1)) if am else 0.0
+            lk = re.search(r'\bcell_leakage_power\s*:\s*([0-9.eE+-]+)', body)
+            leak = float(lk.group(1)) if lk else 0.0
+            if leak <= 0.0:
+                vals = [float(v) for v in re.findall(r'\bleakage_power\s*\(\s*\)\s*\{[^}]*?\bvalue\s*:\s*([0-9.eE+-]+)', body)]
+                leak = statistics.mean(vals) if vals else 0.0
+            ci.leakage_nw = leak * leak_unit if (lk or leak) else None
             ci.is_ff = bool(_FF_RE.search(body)) or bool(re.search(r'\blatch\s*\(', body))
             ci.dont_use = bool(re.search(r'\bdont_use\s*:\s*true', body, re.I))
             delays: list[float] = []
@@ -289,11 +316,15 @@ class LibCells:
                 cap = re.search(r'\bcapacitance\s*:\s*([0-9.eE+-]+)', pbody)
                 mc = re.search(r'\bmax_capacitance\s*:\s*([0-9.eE+-]+)', pbody)
                 fn = re.search(r'\bfunction\s*:\s*"([^"]*)"', pbody)
+                # timing role of an input pin: which checks constrain it
+                checks = sorted({_check_kind(t) for t in re.findall(r'\btiming_type\s*:\s*"?(\w+)"?', pbody)} - {None})
                 ci.pins[pm.group(1)] = {
                     'dir': d.group(1).lower() if d else 'input',
                     'cap': float(cap.group(1)) * cu if cap else None,
                     'max_cap': float(mc.group(1)) * cu if mc else None,
                     'function': fn.group(1) if fn else None,
+                    'clock': bool(re.search(r'\bclock\s*:\s*true', pbody, re.I)),
+                    'checks': checks,
                 }
                 if d and d.group(1).lower() == 'output':
                     for tm in _TIMING_RE.finditer(pbody):
@@ -305,6 +336,16 @@ class LibCells:
                                     delays.append(v * tu)
             if delays:
                 ci.delay_ps = statistics.median(delays)
+            # a pin that setup/hold/recovery/removal arcs are related to is a clock,
+            # whether or not the liberty carries `clock : true` (stripped subsets may not)
+            for pm in _PIN_RE.finditer(body):
+                pbody, _ = _block(body, pm.end() - 1)
+                for tm in _TIMING_RE.finditer(pbody):
+                    tbody, _ = _block(pbody, tm.end() - 1)
+                    tt = re.search(r'\btiming_type\s*:\s*"?(\w+)"?', tbody)
+                    rp = re.search(r'\brelated_pin\s*:\s*"?([\w\[\]]+)"?', tbody)
+                    if tt and rp and _check_kind(tt.group(1)) in ('setup', 'hold', 'recovery', 'removal') and rp.group(1) in ci.pins:
+                        ci.pins[rp.group(1)]['clock'] = True
             self.cells[ci.name] = ci
 
     # ---- queries -----------------------------------------------------------
@@ -314,6 +355,93 @@ class LibCells:
     def output_pins(self, cell: str) -> Optional[set]:
         c = self.cells.get(cell)
         return set(c.outputs) if c else None
+
+    def pin_kind(self, cell: str, pin: str) -> str:
+        """Role of `cell/pin` from the liberty: 'output'; 'clock' (clock : true);
+        'async' (recovery/removal checked: RESET_B, SET_B); 'data' (setup/hold
+        checked: D, DE, SCD, SCE, macro data/address pins); 'input' (plain
+        combinational input); 'unknown' (cell or pin not in the liberty).
+        Hold repair inserts delay only on 'data' and 'input' pins."""
+        c = self.cells.get(cell)
+        base = pin.split('[')[0]
+        if not c or base not in c.pins:
+            return 'unknown'
+        i = c.pins[base]
+        if i['dir'] == 'output':
+            return 'output'
+        if i.get('clock'):
+            return 'clock'
+        ch = set(i.get('checks') or [])
+        if ch & {'recovery', 'removal'}:
+            return 'async'
+        if ch & {'setup', 'hold'}:
+            return 'data'
+        return 'input'
+
+    # ---- several standard-cell libraries at once (HS + LS, ...) ----------
+    @staticmethod
+    def _short(name: str) -> str:
+        return name.split('__')[-1]
+
+    def is_multi_lib(self) -> bool:
+        return len(self.lib_speed) > 1
+
+    def variants(self, cell: str) -> list[str]:
+        """Usable cells with the same footprint and the same short name in
+        other libraries (sky130_fd_sc_ls__nand2_2 -> [sky130_fd_sc_hs__nand2_2])."""
+        c = self.cells.get(cell)
+        if not c or not self.is_multi_lib():
+            return []
+        return [n for n in self.family(cell)
+                if n != cell and self.cells[n].lib != c.lib and self._short(n) == self._short(cell) and self.usable(n)]
+
+    def _variant(self, cell: str, faster: bool) -> Optional[str]:
+        c = self.cells.get(cell)
+        if not c or c.lib not in self.lib_speed:
+            return None
+        cur = self.lib_speed[c.lib]
+        cands = [(self.lib_speed[self.cells[n].lib], n) for n in self.variants(cell)
+                 if self.cells[n].lib in self.lib_speed]
+        cands = [x for x in cands if (x[0] < cur if faster else x[0] > cur)]
+        if not cands:
+            return None
+        # one step at a time: the slowest of the faster libraries / fastest of the slower ones
+        return (max(cands) if faster else min(cands))[1]
+
+    def fastest_variant(self, cell: str) -> Optional[str]:
+        """Same cell in the fastest library that has it (None if already there):
+        timing repair uses fast cells only, no intermediate steps."""
+        c = self.cells.get(cell)
+        if not c or c.lib not in self.lib_speed:
+            return None
+        cands = [(self.lib_speed[self.cells[n].lib], n) for n in self.variants(cell)
+                 if self.cells[n].lib in self.lib_speed and self.lib_speed[self.cells[n].lib] < self.lib_speed[c.lib]]
+        return min(cands)[1] if cands else None
+
+    def fastest_lib(self) -> Optional[str]:
+        return min(self.lib_speed, key=self.lib_speed.get) if self.lib_speed else None
+
+    def faster_variant(self, cell: str) -> Optional[str]:
+        """Same cell in the next faster library (a Vt swap), or None."""
+        return self._variant(cell, True)
+
+    def slower_variant(self, cell: str) -> Optional[str]:
+        """Same cell in the next slower (lower-leakage) library, or None."""
+        return self._variant(cell, False)
+
+    def leakage_total(self, types: dict) -> Optional[float]:
+        """Sum of cell leakage (nW) over instance types; None when no cell reports leakage."""
+        vals = [self.cells[t].leakage_nw for t in types.values() if t in self.cells and self.cells[t].leakage_nw is not None]
+        return sum(vals) if vals else None
+
+    def lib_mix(self, types: dict) -> dict[str, int]:
+        """Instance count per library (by cell-name prefix before '__', else liberty stem)."""
+        out: dict[str, int] = {}
+        for t in types.values():
+            c = self.cells.get(t)
+            key = t.split('__')[0] if '__' in t else (Path(c.lib).stem if c else t)
+            out[key] = out.get(key, 0) + 1
+        return dict(sorted(out.items()))
 
     def bus_ranges(self) -> dict[str, dict[str, tuple[int, int]]]:
         """{cell: {bus pin: (msb, lsb)}} for cells with bus() pins (hard macros)."""

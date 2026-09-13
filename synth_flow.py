@@ -132,6 +132,19 @@ class Config:
     # the design is signed off against. Set lib_synth: <path> to override
     # (e.g. lib_synth: hd_120_tt.lib for the older optimistic-synth flow).
     lib_synth: Optional[str] = None
+    # Several standard-cell libraries at once (e.g. sky130_fd_sc_hs + _ls, which
+    # share a placement site): give lib_typ / lib_slow / lib_fast / lib_synth as
+    # YAML lists. The first file is the primary library (wire-load model, flop
+    # timing for budgets); the rest land here per corner and are loaded into
+    # every Yosys (-liberty) and OpenSTA (read_liberty) step and into the
+    # post-pass, which can then swap a cell for its same-named variant in a
+    # faster or slower library.
+    lib_extra: dict = field(default_factory=lambda: {'typ': [], 'slow': [], 'fast': []})
+    lib_synth_extra: list = field(default_factory=list)
+    # With several libraries: 'fastest' maps with the fastest library only
+    # (critical paths come out of ABC with fast cells; slower cells enter through
+    # the post-pass recovery where slack allows); 'all' offers every cell to ABC.
+    mixed_map: str = 'fastest'
 
     # --- user-supplied SDC (optional) ---
     # Path to an SDC file sourced by OpenSTA after create_clock and before
@@ -268,7 +281,14 @@ class Config:
     repair_delay_cell: Optional[str] = None    # default: slowest buffer (dlygate when present)
     resize_iters: int = 25
     resize_wns_tol_ps: int = 150       # WNS regression tolerated for a TNS gain ('tns' policy)
-    resize_final: str = 'tns'          # tns | wns (never regress WNS)
+    resize_final: str = 'tns'
+    # after timing: downsize / swap to a slower library off-critical cells while
+    # WNS holds (resize.py --recover-area). Also --recover-area.
+    resize_recover_area: bool = False
+    # post-pass on the N most promising candidates (selected, fastest, Pareto
+    # front), then select again: a fast candidate that only closes after
+    # sizing is not missed. 1 = the selected winner only. Also --resize-candidates.
+    resize_candidates: int = 1          # tns | wns (never regress WNS)
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -317,6 +337,9 @@ class Config:
                     'cell_blackbox'):
             if key in data and isinstance(data[key], str):
                 data[key] = os.path.expandvars(os.path.expanduser(data[key]))
+            elif key in data and isinstance(data[key], list):
+                data[key] = [os.path.expandvars(os.path.expanduser(str(x))) for x in data[key]]
+        _split_lib_lists(data)
         # Glob expansion for file lists
         for key in ('rtl_files', 'tb_files', 'pre_read_files'):
             if key in data:
@@ -357,17 +380,25 @@ class Config:
                 errs.append(f"lib_fast missing or not set (required for STA)")
             if not self.lib_slow or not Path(self.lib_slow).exists():
                 errs.append(f"lib_slow missing or not set (required for STA)")
-        # macro_libs: every file must exist
+        # macro_libs / extra standard-cell libs: every file must exist
         for corner in ('typ', 'fast', 'slow'):
             for f in self.macro_libs.get(corner, []):
                 if not Path(f).exists():
                     errs.append(f"macro_libs[{corner}] missing: {f}")
+            for f in (self.lib_extra or {}).get(corner, []):
+                if not Path(f).exists():
+                    errs.append(f"lib_{corner} extra library missing: {f}")
+        for f in self.lib_synth_extra:
+            if not Path(f).exists():
+                errs.append(f"lib_synth extra library missing: {f}")
         if self.run_gls:
             if not self.tb_files:
                 errs.append("tb_files required for GLS")
             for f in self.tb_files:
                 if not Path(f).exists():
                     errs.append(f"tb file missing: {f}")
+        if self.mixed_map not in ('fastest', 'all'):
+            errs.append(f"mixed_map must be fastest|all, got {self.mixed_map}")
         if self.objective not in ('delay', 'area', 'balanced', 'fastest', 'pareto'):
             errs.append(f"objective must be delay|area|balanced, got {self.objective}")
         if self.fallback not in ('knee', 'best_wns'):
@@ -385,6 +416,29 @@ class Config:
 
     def effective_parallel(self) -> int:
         return self.parallel if self.parallel > 0 else (os.cpu_count() or 1)
+
+
+def _split_lib_lists(data: dict) -> None:
+    """YAML `lib_typ: [a.lib, b.lib]` -> lib_typ = a.lib, lib_extra[typ] = [b.lib]
+    (same for slow/fast; lib_synth -> lib_synth_extra). Comma-separated strings
+    are accepted too (CLI). No-op for plain single paths."""
+    extra = dict(data.get('lib_extra') or {})
+    for key, corner in (('lib_typ', 'typ'), ('lib_slow', 'slow'), ('lib_fast', 'fast')):
+        v = data.get(key)
+        if isinstance(v, str) and ',' in v:
+            v = [x.strip() for x in v.split(',') if x.strip()]
+        if isinstance(v, list):
+            data[key] = v[0] if v else ''
+            extra[corner] = list(extra.get(corner, [])) + [str(x) for x in v[1:]]
+    for c in ('typ', 'slow', 'fast'):
+        extra.setdefault(c, [])
+    data['lib_extra'] = extra
+    v = data.get('lib_synth')
+    if isinstance(v, str) and ',' in v:
+        v = [x.strip() for x in v.split(',') if x.strip()]
+    if isinstance(v, list):
+        data['lib_synth'] = v[0] if v else None
+        data['lib_synth_extra'] = list(data.get('lib_synth_extra') or []) + [str(x) for x in v[1:]]
 
 
 def _normalise_macro_libs(raw) -> dict:
@@ -790,29 +844,73 @@ def _synth_lib(cfg) -> str:
     return cfg.get('lib_synth') or cfg.get('lib_slow') or cfg.get('lib_typ')
 
 
+def _cfg_get(cfg, key, default=None):
+    return getattr(cfg, key, default) if hasattr(cfg, 'lib_typ') else cfg.get(key, default)
+
+
+def _synth_libs(cfg) -> list[str]:
+    """All liberty files for synthesis: the primary (`_synth_lib`) plus the
+    extra standard-cell libraries of the same corner."""
+    if _cfg_get(cfg, 'lib_synth'):
+        return [_cfg_get(cfg, 'lib_synth'), *(_cfg_get(cfg, 'lib_synth_extra') or [])]
+    extra = _cfg_get(cfg, 'lib_extra') or {}
+    if _cfg_get(cfg, 'lib_slow'):
+        return [_cfg_get(cfg, 'lib_slow'), *extra.get('slow', [])]
+    return [_cfg_get(cfg, 'lib_typ'), *extra.get('typ', [])]
+
+
+def _liberty_arg(cfg) -> str:
+    """Value for `-liberty {liberty}` in the Yosys templates; several files
+    become `a.lib -liberty b.lib` (dfflibmap, abc and stat accept repeats)."""
+    return ' -liberty '.join(_synth_libs(cfg))
+
+
+def _postpass_libs(cfg) -> dict:
+    """Liberty sets for the post-pass: `primary` (the mapping liberty), `std`
+    (every other standard-cell library of the setup corner, counted in area),
+    `std_fast` (same at the fast corner), `macro` / `macro_fast` (hard macros:
+    timing and pins only). No duplicates."""
+    primary = _synth_lib(cfg)
+    corner = 'slow' if _cfg_get(cfg, 'lib_slow') else 'typ'
+    extra = _cfg_get(cfg, 'lib_extra') or {}
+    macro = _cfg_get(cfg, 'macro_libs') or {}
+    std = [l for l in dict.fromkeys([_cfg_get(cfg, 'lib_slow') or _cfg_get(cfg, 'lib_typ')] + list(extra.get(corner, [])))
+           if l and l != primary]
+    std_fast = [l for l in dict.fromkeys(list(extra.get('fast', []))) if l and l != _cfg_get(cfg, 'lib_fast')]
+    return {'primary': primary, 'std': std, 'std_fast': std_fast,
+            'macro': list(macro.get(corner, [])), 'macro_fast': list(macro.get('fast', []))}
+
+
+def _extra_libs(cfg, corner: str) -> list[str]:
+    """Extra standard-cell libraries plus hard-macro libraries of a corner:
+    everything OpenSTA / the post-pass must read besides the primary liberty."""
+    extra = _cfg_get(cfg, 'lib_extra') or {}
+    macro = _cfg_get(cfg, 'macro_libs') or {}
+    return list(extra.get(corner, [])) + list(macro.get(corner, []))
+
+
 def _pre_read_section(cfg: dict) -> str:
     lines = []
     if cfg.get('pre_read_files'):
-        lines.append(f'read_liberty -lib {_synth_lib(cfg)}')
+        lines.extend(f'read_liberty -lib {l}' for l in _synth_libs(cfg))
         for f in cfg['pre_read_files']:
             lines.append(f'read_verilog -sv {f}')
     return '\n'.join(lines)
 
 
 def _liberty_lib_section(cfg: dict) -> str:
-    """Load the standard cell library as a Yosys -lib (blackbox) library.
-    Used by the hierarchical driver before reading pre-synthesised
+    """Load the standard cell library (or libraries) as Yosys -lib (blackbox)
+    libraries. Used by the hierarchical driver before reading pre-synthesised
     sub-module netlists, which reference std-cell names directly. Without
     this, Yosys aborts on the first std-cell reference."""
-    lib = _synth_lib(cfg)
-    return f'read_liberty -lib {lib}' if lib else ''
+    return '\n'.join(f'read_liberty -lib {l}' for l in _synth_libs(cfg) if l)
 
 
 def _macro_lib_yosys_section(cfg: dict, corner: str = 'typ') -> str:
     """Emit `read_liberty -lib <macro.lib>` lines for Yosys so each macro
     is recognised as a blackbox cell during synth/dfflibmap. Empty if no
     macro liberty is configured."""
-    libs = (cfg.get('macro_libs') or {}).get(corner, [])
+    libs = _extra_libs(cfg, corner)
     if not libs:
         return ''
     return '\n'.join(f'read_liberty -lib {f}' for f in libs)
@@ -821,10 +919,7 @@ def _macro_lib_yosys_section(cfg: dict, corner: str = 'typ') -> str:
 def _macro_lib_sta_section(cfg, corner: str) -> str:
     """Emit `read_liberty -corner <corner> <macro.lib>` lines for OpenSTA
     so timing arcs through hard macros are honoured at this corner."""
-    macro_libs = getattr(cfg, 'macro_libs', None) or (
-        cfg.get('macro_libs') if isinstance(cfg, dict) else {}
-    ) or {}
-    libs = macro_libs.get(corner, [])
+    libs = _extra_libs(cfg, corner)
     if not libs:
         return ''
     return '\n'.join(f'read_liberty -corner {corner} {f}' for f in libs)
@@ -843,10 +938,7 @@ def _user_sdc_section(cfg) -> str:
 def _macro_lib_quick_sta_section(cfg) -> str:
     """Emit `read_liberty <macro.lib>` lines for the single-corner quick STA
     used in winner selection. Uses the typ corner."""
-    macro_libs = getattr(cfg, 'macro_libs', None) or (
-        cfg.get('macro_libs') if isinstance(cfg, dict) else {}
-    ) or {}
-    libs = macro_libs.get('typ', [])
+    libs = _extra_libs(cfg, 'typ')
     if not libs:
         return ''
     return '\n'.join(f'read_liberty {f}' for f in libs)
@@ -1292,7 +1384,7 @@ def run_recipe(args: dict) -> RecipeResult:
         cell_blackbox=bb,
         cell_blackbox_line=bb_line,
         module=module,
-        liberty=_synth_lib(cfg),
+        liberty=_liberty_arg(cfg),
         constr=constr,
         recipe=recipe_path,
         period_ps=cfg.get('abc_d_ps', cfg['period_ps']),
@@ -1303,7 +1395,7 @@ def run_recipe(args: dict) -> RecipeResult:
         stats_json=stats,
         syn_netlist=syn_nl,
         out_netlist=netlist,
-        group_section=(_group_section(groups_spec, _synth_lib(cfg), constr, recipe_path, str(groups_txt),
+        group_section=(_group_section(groups_spec, _liberty_arg(cfg), constr, recipe_path, str(groups_txt),
                                       _dont_use_flags(cfg.get('dont_use')))
                        if groups_spec else ''),
         synth_flags=_front_end(cfg.get('yosys_opts'))[0],
@@ -1539,7 +1631,7 @@ def _quick_sta_job(args: dict) -> tuple[str, Optional[float], Optional[float]]:
         cfg['opensta'], cfg.get('lib_slow') or cfg['lib_typ'], args['netlist'], args['module'],
         cfg['period_ps'], cfg['clock_port'], Path(args['log']),
         clock_port_2=cfg.get('clock_port_2'), period_ps_2=cfg.get('period_ps_2'),
-        macro_libs=(cfg.get('macro_libs') or {}).get(corner, []),
+        macro_libs=_extra_libs(cfg, corner),
         sdc=cfg.get('sdc'), driving_cell=cfg['driving_cell'], load_ff=cfg['load_ff'],
         unc_setup_ps=cfg['clock_uncertainty_setup_ps'], unc_hold_ps=cfg['clock_uncertainty_hold_ps'],
         wire_load_model=cfg['wire_load_model'], io_delay_frac=cfg['io_delay_frac'],
@@ -1681,9 +1773,31 @@ report_checks -path_delay min -group_path_count 5 -format full_clock
 report_worst_slack -min -digits 4
 report_tns -min -digits 4
 puts ">>> HOLD_END"
+puts ">>> GROUPS_BEGIN"
+puts "GROUPS SETUP"
+report_checks -path_delay max -group_path_count 1 -format slack_only -digits 4
+puts "GROUPS HOLD"
+report_checks -path_delay min -group_path_count 1 -format slack_only -digits 4
+puts ">>> GROUPS_END"
 {sdf_line}
 exit
 """
+
+
+def _parse_group_slacks(section: str) -> dict:
+    """`report_checks -format slack_only` prints `<group> <slack>` per path
+    group (one per clock, plus async/unconstrained). -> {'setup': {g: s}, 'hold': {g: s}}"""
+    out = {'setup': {}, 'hold': {}}
+    mode = None
+    for line in section.splitlines():
+        if line.startswith('GROUPS SETUP'):
+            mode = 'setup'; continue
+        if line.startswith('GROUPS HOLD'):
+            mode = 'hold'; continue
+        m = re.match(r'^(\S+)\s+(-?[0-9]+\.[0-9]+)\s*$', line.strip())
+        if mode and m and m.group(1) not in ('Group',):
+            out[mode][m.group(1)] = float(m.group(2))
+    return out
 
 @dataclass
 class CornerResult:
@@ -1700,6 +1814,9 @@ class CornerResult:
     sdf_path: Optional[str] = None
     report_path: Optional[str] = None
     error: Optional[str] = None
+    # worst slack per path group (one per clock) at the sign-off corners
+    groups_setup_slow: dict = field(default_factory=dict)
+    groups_hold_fast: dict = field(default_factory=dict)
 
 def run_corner_sta(cfg: Config, module: str, netlist: Path,
                    results_dir: Path) -> CornerResult:
@@ -1735,7 +1852,7 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
             wire_load_section=_wire_load_section(cfg.wire_load_model, lib),
             io_delay_frac=cfg.io_delay_frac, io_delay_min_frac=cfg.io_delay_min_frac,
         )
-        macro = cfg.macro_libs.get(key, []) if cfg.macro_libs else []
+        macro = _extra_libs(cfg, key)
         tcl = out_dir / f'sta_{name}.tcl'
         tcl.write_text(CORNER_SESSION_TCL.format(
             liberty=lib, macro_libs='\n'.join(f'read_liberty {f}' for f in macro),
@@ -1756,16 +1873,19 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
             continue
         setup = out[out.find('>>> SETUP_BEGIN'):out.find('>>> SETUP_END')]
         hold = out[out.find('>>> HOLD_BEGIN'):out.find('>>> HOLD_END')]
+        groups = _parse_group_slacks(out[out.find('>>> GROUPS_BEGIN'):out.find('>>> GROUPS_END')])
         ws = grab(setup, r'^worst slack(?:\s+max)?\s+([-0-9.eE+]+)')
         ts = grab(setup, r'^tns(?:\s+max)?\s+([-0-9.eE+]+)')
         wh = grab(hold, r'^worst slack(?:\s+min)?\s+([-0-9.eE+]+)')
         th = grab(hold, r'^tns(?:\s+min)?\s+([-0-9.eE+]+)')
         if name == 'slow':
             res.wns_setup_slow, res.tns_setup_slow = ws, ts
+            res.groups_setup_slow = groups['setup']
         elif name == 'typical':
             res.wns_setup_typ, res.tns_setup_typ, res.wns_hold_typ, res.tns_hold_typ = ws, ts, wh, th
         else:
             res.wns_hold_fast, res.tns_hold_fast = wh, th
+            res.groups_hold_fast = groups['hold']
     log.write_text('\n'.join(log_parts))
     rpt.write_text('\n'.join(report_parts))
     res.sdf_path = str(sdf) if sdf.exists() else None
@@ -1918,12 +2038,23 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
     md.append('')
     md.append('## Winners')
     md.append('')
-    md.append('| Module | Recipe | WNS typ (ns) | Cells | Area (um²) | WNS setup slow | WNS setup typ | WNS hold fast | WNS hold typ | Status |')
-    md.append('|---|---|---|---|---|---|---|---|---|---|')
+    md.append('| Module | Recipe | WNS typ (ns) | Cells | Area (um²) | Cells / area after post-pass | WNS setup slow | WNS setup typ | WNS hold fast | WNS hold typ | Status |')
+    md.append('|---|---|---|---|---|---|---|---|---|---|---|')
     for m, sel in selections.items():
         if sel.winner is None:
-            md.append(f'| `{m}` | FAILED | — | — | — | — | — | — | — | ❌ |')
+            md.append(f'| `{m}` | FAILED | — | — | — | — | — | — | — | — | ❌ |')
             continue
+        post_s = '—'
+        pp = results_dir / m / 'resize.json'
+        if pp.exists():
+            try:
+                pr = json.loads(pp.read_text())
+                post_s = f"{pr.get('cells_end', '?')} / {pr['end']['area']:.1f}"
+                bad = [k for k, v in (pr.get('status') or {}).items() if str(v).startswith('failed')]
+                if bad:
+                    post_s += ' ⚠️ ' + ','.join(bad)
+            except Exception:
+                post_s = '?'
         win = next((c for c in sel.candidates if c.recipe == sel.winner), None)
         corner = corners.get(m)
         setup_slow = (f'{corner.wns_setup_slow:.3f}'
@@ -1944,10 +2075,26 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
         area_s = f'{win.area:.1f}' if win else '—'
         md.append(
             f'| `{m}` | `{sel.winner}` | '
-            f'{wns_cell} | {cells_s} | {area_s} | '
+            f'{wns_cell} | {cells_s} | {area_s} | {post_s} | '
             f'{setup_slow} | {setup_typ} | {hold_fast} | {hold_typ} | {status} |'
         )
     md.append('')
+    # per path group (clock) slack at the sign-off corners
+    grp_rows = []
+    for m, sel in selections.items():
+        corner = corners.get(m)
+        if corner and (corner.groups_setup_slow or corner.groups_hold_fast):
+            for g in sorted(set(corner.groups_setup_slow) | set(corner.groups_hold_fast)):
+                ss_ = corner.groups_setup_slow.get(g); hf = corner.groups_hold_fast.get(g)
+                grp_rows.append(f"| `{m}` | `{g}` | {ss_:+.3f} | {hf:+.3f} |" if ss_ is not None and hf is not None
+                                else f"| `{m}` | `{g}` | {'—' if ss_ is None else f'{ss_:+.3f}'} | {'—' if hf is None else f'{hf:+.3f}'} |")
+    if grp_rows:
+        md.append('### Slack per path group')
+        md.append('')
+        md.append('| Module | Path group | Setup slack slow (ns) | Hold slack fast (ns) |')
+        md.append('|---|---|---|---|')
+        md.extend(grp_rows)
+        md.append('')
 
     # Per-module recipe comparison
     md.append('## Recipe sweep results')
@@ -2161,21 +2308,18 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
     path.write_text('\n'.join(L) + '\n')
 
 
-def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, log) -> None:
-    """Run resize.py on results/<module>/winner.v; keep the pre-sizing netlist
-    as winner.presize.v and write resize.json. Never fatal."""
+def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log) -> Optional[dict]:
+    """Run resize.py (sizing / repairs per cfg) on one netlist. Returns the
+    result dict or None on failure; never raises."""
     try:
         import resize as resize_mod
     except ImportError:
         log.warning('[resize] resize.py not found; skipping')
-        return
-    winner = mod_results / 'winner.v'
-    presize = mod_results / 'winner.presize.v'
-    shutil.copy(winner, presize)
+        return None
     sta_lib = cfg.lib_slow or cfg.lib_typ
     try:
         res = resize_mod.resize(
-            presize, module, _synth_lib(asdict(cfg)), sta_lib, cfg.period_ps, cfg.clock_port, work_dir,
+            netlist_in, module, _synth_lib(asdict(cfg)), sta_lib, cfg.period_ps, cfg.clock_port, work_dir,
             sdc=cfg.sdc, iters=cfg.resize_iters, yosys=cfg.yosys, opensta=cfg.opensta,
             driving_cell=cfg.driving_cell, load_ff=cfg.load_ff,
             unc_setup_ps=cfg.clock_uncertainty_setup_ps, unc_hold_ps=cfg.clock_uncertainty_hold_ps,
@@ -2185,15 +2329,96 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
-            extra_libs=(cfg.macro_libs.get('slow' if cfg.lib_slow else 'typ', []) if cfg.macro_libs else []),
-            extra_libs_fast=(cfg.macro_libs.get('fast', []) if cfg.macro_libs else []),
+            extra_libs=_postpass_libs(cfg)['std'], extra_libs_fast=_postpass_libs(cfg)['std_fast'],
+            macro_libs=_postpass_libs(cfg)['macro'], macro_libs_fast=_postpass_libs(cfg)['macro_fast'],
+            recover_area=cfg.resize_recover_area,
             dont_use=cfg.dont_use, buffer_cell=cfg.repair_buffer_cell, delay_cell=cfg.repair_delay_cell,
             log=lambda *x: log.debug('[resize] ' + ' '.join(str(v) for v in x)))
     except Exception as e:
-        log.warning(f'[resize] {module}: failed ({e}); winner left unsized')
+        log.warning(f'[resize] {module}: {netlist_in.name} failed ({e})')
+        return None
+    return res
+
+
+def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, log) -> None:
+    """Post-pass on results/<module>/winner.v; keep the pre-sizing netlist as
+    winner.presize.v and write resize.json. Never fatal."""
+    winner = mod_results / 'winner.v'
+    presize = mod_results / 'winner.presize.v'
+    shutil.copy(winner, presize)
+    res = _run_resize(cfg, module, presize, work_dir, log)
+    if res is None:
+        log.warning(f'[resize] {module}: winner left unsized')
         return
     shutil.copy(res['output'], winner)
     (mod_results / 'resize.json').write_text(json.dumps(res, indent=2))
+    _log_resize(module, res, log)
+
+
+def _log_resize(module: str, res: dict, log) -> None:
+    st = res.get('status', {})
+    bad = {k: v for k, v in st.items() if v.startswith('failed')}
+    log.info(f"[resize] {module}: WNS {res['start']['wns_ns']:+.3f} -> {res['end']['wns_ns']:+.3f}  "
+             f"TNS {res['start']['tns_ns']:+.2f} -> {res['end']['tns_ns']:+.2f}  "
+             f"area {res['start']['area']:.0f} -> {res['end']['area']:.0f}  cells {res.get('cells_start', '?')} -> {res.get('cells_end', '?')}  "
+             f"({len(res['moves'])} moves, {res['buffers_inserted']} buffers, {res['delay_cells_inserted']} delay cells"
+             + (f"; hold@fast {res['hold_before'][0]:+.3f} -> {res['hold_after'][0]:+.3f}" if res.get('hold_before') and res['hold_before'][0] is not None and res.get('hold_after') and res['hold_after'][0] is not None else '')
+             + ')' + (f"  PHASES FAILED: {bad}" if bad else ''))
+
+
+def _postpass_candidates(cands: list, sel, n: int) -> list:
+    """Which candidates get the post-pass when resize_candidates > 1: the
+    selected one, the fastest (best WNS), then the Pareto front in area order."""
+    order = []
+    def add(c):
+        if c and c.netlist and c not in order:
+            order.append(c)
+    add(next((c for c in cands if c.recipe == sel.winner), None))
+    timed = [c for c in cands if c.wns_ns is not None and c.netlist]
+    if timed:
+        add(max(timed, key=lambda c: c.wns_ns))
+    for r in sel.pareto_front:
+        add(next((c for c in cands if c.recipe == r), None))
+    for c in sorted(timed, key=lambda c: (-(c.wns_ns or 0), c.area)):
+        add(c)
+    return order[:max(1, n)]
+
+
+def _resize_candidates(cfg: Config, module: str, cands: list, sel, mod_results: Path, work_dir: Path, log):
+    """Post-pass on several candidates, then select again with the same rule
+    (min area among those meeting timing after repair; else fallback).
+    Writes winner.v / winner.presize.v / resize.json for the final choice and
+    postpass.json with every candidate's before/after."""
+    chosen = _postpass_candidates(cands, sel, cfg.resize_candidates)
+    log.info(f"[resize] {module}: post-pass on {len(chosen)} candidates: {', '.join(c.recipe for c in chosen)}")
+    post, records = [], {}
+    for c in chosen:
+        res = _run_resize(cfg, module, Path(c.netlist), work_dir / c.recipe, log)
+        if res is None:
+            records[c.recipe] = {'status': 'failed'}
+            continue
+        _log_resize(f'{module}/{c.recipe}', res, log)
+        post.append(Candidate(recipe=c.recipe, netlist=res['output'], wns_ns=res['end']['wns_ns'], tns_ns=res['end']['tns_ns'],
+                              cells=res.get('cells_end', c.cells), area=res['end']['area'], runtime_s=c.runtime_s))
+        records[c.recipe] = {'before': {'wns_ns': c.wns_ns, 'tns_ns': c.tns_ns, 'area': c.area, 'cells': c.cells},
+                             'after': {'wns_ns': res['end']['wns_ns'], 'tns_ns': res['end']['tns_ns'], 'area': res['end']['area'],
+                                       'cells': res.get('cells_end')}, 'status': res.get('status'), 'resize_json': str(Path(res['output']).parent / 'resize.json')}
+    if not post:
+        log.warning(f'[resize] {module}: every candidate failed the post-pass; keeping the pre-pass winner')
+        return sel
+    sel2 = select_winner(post, cfg.objective, cfg.select_margin_ps / 1000.0, cfg.fallback, period_ns=cfg.period_ps / 1000.0)
+    win = next(c for c in post if c.recipe == sel2.winner)
+    orig = next(c for c in cands if c.recipe == sel2.winner)
+    shutil.copy(orig.netlist, mod_results / 'winner.presize.v')
+    shutil.copy(win.netlist, mod_results / 'winner.v')
+    shutil.copy(Path(win.netlist).parent / 'resize.json', mod_results / 'resize.json')
+    (mod_results / 'postpass.json').write_text(json.dumps({'winner': sel2.winner, 'rationale': sel2.rationale,
+                                                            'candidates': records}, indent=2))
+    if sel2.winner != sel.winner:
+        log.info(f"[winner] {module}: after the post-pass {sel2.winner} replaces {sel.winner} ({sel2.rationale})")
+    sel.winner = sel2.winner
+    sel.rationale = f'after post-pass over {len(post)} candidates: {sel2.rationale}'
+    return sel
     s0, s1 = res['start'], res['end']
     extra = ''
     if res.get('buffers_inserted'):
@@ -2214,7 +2439,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--config', help='YAML config file')
     # Direct overrides
     p.add_argument('--rtl', action='append', help='RTL files/globs (repeatable)')
-    p.add_argument('--lib', help='typical-corner liberty (synthesis)')
+    p.add_argument('--lib', help='typical-corner liberty; a comma-separated list loads several standard-cell libraries at once')
     p.add_argument('--lib-fast', help='fast-corner liberty (STA hold)')
     p.add_argument('--lib-slow', help='slow-corner liberty (STA setup)')
     p.add_argument('--macro-lib', action='append', dest='macro_lib',
@@ -2229,6 +2454,8 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--abc-target', help="ABC -D: 'none' (default, min-delay mapping), 'period', 'reg2reg' (T - t_cq - t_su - uncertainty), or ps")
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
     p.add_argument('--repair-design', action='store_true', help='buffer trees on high-fanout nets of failing paths (needs OpenSTA)')
+    p.add_argument('--resize-candidates', type=int, help='run the post-pass on the N best candidates and select again (default 1)')
+    p.add_argument('--recover-area', action='store_true', help='after the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies --resize)')
     p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
     p.add_argument('--max-fanout', type=int, help='sink group size for repair_design (default 8; SDC set_max_fanout overrides)')
     p.add_argument('--yosys-opts', nargs='+', help='front-end options: booth, adder=kogge-stone|han-carlson|sklansky, noshare, hieropt')
@@ -2278,6 +2505,10 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         v = getattr(args, arg, None)
         if v is not None:
             setattr(cfg, attr, v)
+    if any(',' in str(getattr(args, a, '') or '') for a in ('lib', 'lib_slow', 'lib_fast')):
+        d = {'lib_typ': cfg.lib_typ, 'lib_slow': cfg.lib_slow, 'lib_fast': cfg.lib_fast, 'lib_extra': cfg.lib_extra}
+        _split_lib_lists(d)
+        cfg.lib_typ, cfg.lib_slow, cfg.lib_fast, cfg.lib_extra = d['lib_typ'], d['lib_slow'], d['lib_fast'], d['lib_extra']
     if args.no_sta:
         cfg.run_sta = False
     if args.no_gls:
@@ -2290,6 +2521,12 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.resize_winner = True
     if getattr(args, 'repair_design', False):
         cfg.repair_design = True
+    if getattr(args, 'resize_candidates', None):
+        cfg.resize_candidates = args.resize_candidates
+        cfg.resize_winner = True
+    if getattr(args, 'recover_area', False):
+        cfg.resize_recover_area = True
+        cfg.resize_winner = True
     if getattr(args, 'repair_hold', False):
         cfg.repair_hold = True
     if getattr(args, 'max_fanout', None):
@@ -2478,13 +2715,21 @@ def main() -> int:
     # ----- driving cell must exist in the synthesis liberty -----
     if liberty_timing is not None:
         try:
-            _lc = liberty_timing.LibCells([_synth_lib(cfg_dict)])
+            _lc = liberty_timing.LibCells(_synth_libs(cfg_dict))
             if cfg.driving_cell not in _lc:
                 fallback = _lc.default_driving_cell(cfg.driving_cell)
                 log.warning(f"driving_cell '{cfg.driving_cell}' is not in {Path(_synth_lib(cfg_dict)).name}; "
                             f"using {fallback}")
                 cfg.driving_cell = fallback
                 cfg_dict['driving_cell'] = fallback
+            # Several libraries: map with the fastest one only (mixed_map: fastest)
+            if cfg.mixed_map == 'fastest' and len(_synth_libs(cfg_dict)) > 1 and _lc.fastest_lib():
+                fastest = _lc.fastest_lib()
+                others = [Path(l).name for l in _synth_libs(cfg_dict) if l != fastest]
+                log.info(f"mixed libraries: mapping with the fastest, {Path(fastest).name}; "
+                         f"{', '.join(others)} enter through the post-pass (mixed_map: all to offer every cell to ABC)")
+                cfg.lib_synth, cfg.lib_synth_extra = fastest, []
+                cfg_dict['lib_synth'], cfg_dict['lib_synth_extra'] = fastest, []
             # The user SDC is sourced verbatim by every STA run; a `-lib_cell`
             # from another library (an HD SDC run against HS/MS/LS/LP) would
             # abort OpenSTA, so source a copy with those cells substituted.
@@ -2617,7 +2862,11 @@ def main() -> int:
                 shutil.copy(win.netlist, mod_results / 'winner.v')
                 winner_netlists[module] = str(mod_results / 'winner.v')
                 if (cfg.resize_winner or cfg.repair_design or cfg.repair_hold) and cfg.run_sta:
-                    _resize_winner(cfg, module, mod_results, work / module / 'resize', log)
+                    if cfg.resize_candidates > 1:
+                        sel = _resize_candidates(cfg, module, cands, sel, mod_results, work / module / 'resize', log)
+                        selections[module] = sel
+                    else:
+                        _resize_winner(cfg, module, mod_results, work / module / 'resize', log)
             write_derived_sdc(cfg, sdc_constraints, mod_results / 'synth.sdc', sdc_overrides,
                               groups=module_groups.get(module))
             win_groups = work / module / f'{sel.winner}.groups.json'

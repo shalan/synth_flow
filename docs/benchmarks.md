@@ -356,6 +356,29 @@ liberty alone (docs/architecture.md §2.12): the post-pass sized 1 / 4 / 12 /
 12 designs on HS / MS / LS / LP. Runtime per design is 12–25 s on HS/MS/LS
 and 1–3 min on LP (701 cells).
 
+## Mixed libraries and HVL — `mix-hs-ls.csv`, `mix-hs-ls-allmap.csv`, `mix-all.csv`, `lib-hvl.csv`
+
+`./bench.py --use-sdc --objective delay --lib-dir <hs>/lib --lib-dir <ls>/lib --set resize_winner=true --set resize_recover_area=true --tag mix-hs-ls`
+(first `--lib-dir` = primary; add `--set mixed_map=all` for the union
+mapping; `lib-hs-recover.csv` is HS alone with the same recovery flags).
+The CSV gains `leakage_uw_before/after` and `lib_mix_before/after` from
+`resize.json`.
+
+| | HS alone + recovery | HS+LS fastest mapping | HS+LS union mapping | HS+MS+LS+LP |
+|---|---|---|---|---|
+| designs meeting timing | 16 / 16 | 16 / 16 | 16 / 16 | 16 / 16 |
+| mean WNS (ns) | +0.702 | +0.299 | +0.280 | +0.225 |
+| mean area vs HS alone | — | +2.1 % | +8.3 % | +1.5 % |
+| cells outside HS after the post-pass | 0 % | 38 % (20449 / 53337) | 55 % (33661 / 61245) | 68 % (MS 27 %, LP 24 %, LS 17 %) |
+
+Per design the LS share tracks the slack: `uart` 305/323, `zxip` 11350/14700,
+`fir8` 839/1331 in LS; `rr_arbiter16` 2/293, `mul32_mac` 64/4990, `crc32_8`
+7/204. Analysis in docs/architecture.md §2.13. HVL alone
+(`--lib-dir <hvl>/lib`, corners `tt_025C_3v30` / `ss_100C_3v00` /
+`ff_n40C_4v40`) runs all 16 designs without errors and closes 1 at the HD
+periods (mean WNS −6.65 ns, area +140 %): a 3.3 V library needs its own
+constraints.
+
 ## Repairs on the default flow — `obj-delay-repair.csv`
 
 `objective: delay` with `resize_winner`, `repair_design` and `repair_hold`
