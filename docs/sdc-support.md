@@ -97,6 +97,37 @@ on one of those is honored by STA only, and the tool lists those lines.
   `results/<top>/<name>.libadapted.sdc`, and the substitution is logged.
   The same rule applies to the YAML `driving_cell`.
 
+### Scenarios and the constraint hook
+
+Several SDCs can be named scenarios (`scenarios:` in the YAML, see
+yaml-config.md). Synthesis and ranking read the `rank: true` scenario; every
+`required` scenario governs acceptance and the post-pass; all are reported
+at sign-off per corner and check type.
+
+`constraint_hook: file.tcl` is sourced by OpenSTA in this order, in every
+STA session:
+
+```
+read_liberty …  →  read_verilog netlist  →  link_design  →  defaults
+→ clock_budget uncertainty  →  scenario SDC  →  constraint hook
+→ binding validation (fails the run on a missing/miscounted required binding)
+→ timing checks
+```
+
+The hook applies constraints directly on the mapped design:
+
+```tcl
+puts "hook: $synth_scenario @ $synth_corner ($synth_module)"
+require_binding sram      [get_cells u_sram] -count 1
+require_binding din_pins  [get_pins u_sram/din0*] -count 32
+optional_binding debug    [get_cells dbg*]
+set_false_path -from [get_ports rst_n]
+if {$synth_scenario eq "scan"} { set_case_analysis 1 [get_ports scan_en] }
+```
+
+`bindings.json` next to the results records each binding's name, status and
+resolved objects; `constraint_hook.tcl` is the copy that was used.
+
 ### Derived constraints file
 
 For every module, synthesis writes `results/<module>/synth.sdc`: the clocks,

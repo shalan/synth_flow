@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import glob
+import hashlib
 import json
 import logging
 import multiprocessing as mp
@@ -145,6 +147,35 @@ class Config:
     # (critical paths come out of ABC with fast cells; slower cells enter through
     # the post-pass recovery where slack allows); 'all' offers every cell to ABC.
     mixed_map: str = 'fastest'
+
+    # --- named constraint scenarios ---
+    # scenarios:
+    #   func:  {sdc: sdc/func.sdc, rank: true}         # ranking uses this one
+    #   scan:  {sdc: sdc/scan.sdc, checks: [hold]}      # required, hold only
+    #   sleep: {sdc: sdc/sleep.sdc, corners: [slow]}    # checked at slow only
+    # A candidate is timing-closed only when every required scenario passes at
+    # each of its corners for each of its check types (setup, hold, recovery,
+    # removal, plus every path group, i.e. fixed max/min-delay bounds). Among
+    # closed candidates the smallest area wins; if none closes, `fallback`
+    # applies and the result is marked NOT CLOSED with every failing check.
+    # The same rule guards the post-pass: a repair that breaks a passing
+    # required check is rejected. `sdc:` alone is the single scenario `default`.
+    scenarios: dict = field(default_factory=dict)
+    scenarios_explicit: bool = False            # set when `scenarios:` was given (enables gate + guards)
+    scenario_check_candidates: int = 3          # rank-meeting candidates tried against the required checks
+    # Tcl sourced by OpenSTA after link_design and the scenario SDC, in every
+    # STA (ranking, repairs, sign-off). It sees the linked design and the
+    # variables synth_scenario / synth_corner / synth_module, applies
+    # constraints directly, and records bindings with `require_binding`.
+    constraint_hook: Optional[str] = None
+    # Clock uncertainty from an explicit budget (ps) instead of the flat
+    # clock_uncertainty_*_ps:  clock_budget: {clk: {jitter_ps: 50, skew_ps: 120,
+    # setup_margin_ps: 0, hold_margin_ps: 0, skew_post_cts_ps: 40}}
+    #   pre_cts : setup = jitter + skew + setup_margin ; hold = skew + hold_margin
+    #   post_cts: setup = jitter + skew_post_cts + setup_margin ; hold = skew_post_cts + hold_margin
+    # The components are written to synth.sdc and the summary. '*' = every clock.
+    clock_budget: dict = field(default_factory=dict)
+    cts_stage: str = 'pre_cts'
 
     # --- user-supplied SDC (optional) ---
     # Path to an SDC file sourced by OpenSTA after create_clock and before
@@ -288,7 +319,11 @@ class Config:
     # post-pass on the N most promising candidates (selected, fastest, Pareto
     # front), then select again: a fast candidate that only closes after
     # sizing is not missed. 1 = the selected winner only. Also --resize-candidates.
-    resize_candidates: int = 1          # tns | wns (never regress WNS)
+    resize_candidates: int = 1
+    # hold repair search budgets (resize.py): failing endpoints per STA and the
+    # number of OpenSTA calls the hold phase may spend
+    repair_hold_max_paths: Optional[int] = None
+    repair_hold_sta_budget: int = 60          # tns | wns (never regress WNS)
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -340,6 +375,9 @@ class Config:
             elif key in data and isinstance(data[key], list):
                 data[key] = [os.path.expandvars(os.path.expanduser(str(x))) for x in data[key]]
         _split_lib_lists(data)
+        if isinstance(data.get('constraint_hook'), str):
+            data['constraint_hook'] = os.path.expandvars(os.path.expanduser(data['constraint_hook']))
+        _normalise_scenarios(data)
         # Glob expansion for file lists
         for key in ('rtl_files', 'tb_files', 'pre_read_files'):
             if key in data:
@@ -399,6 +437,23 @@ class Config:
                     errs.append(f"tb file missing: {f}")
         if self.mixed_map not in ('fastest', 'all'):
             errs.append(f"mixed_map must be fastest|all, got {self.mixed_map}")
+        if self.scenarios:
+            ranks = [n for n, s in self.scenarios.items() if s.get('rank')]
+            if len(ranks) != 1:
+                errs.append(f"scenarios: exactly one must have rank: true (got {ranks or 'none'})")
+            for n, s in self.scenarios.items():
+                if not s.get('sdc') or not Path(s['sdc']).exists():
+                    errs.append(f"scenarios[{n}].sdc missing: {s.get('sdc')}")
+                bad = set(s.get('corners') or []) - {'slow', 'typ', 'fast'}
+                if bad:
+                    errs.append(f"scenarios[{n}].corners: unknown {sorted(bad)} (slow|typ|fast)")
+                bad = set(s.get('checks') or []) - set(SCENARIO_CHECKS)
+                if bad:
+                    errs.append(f"scenarios[{n}].checks: unknown {sorted(bad)} ({'|'.join(SCENARIO_CHECKS)})")
+        if self.constraint_hook and not Path(self.constraint_hook).exists():
+            errs.append(f"constraint_hook missing: {self.constraint_hook}")
+        if self.cts_stage not in ('pre_cts', 'post_cts'):
+            errs.append(f"cts_stage must be pre_cts|post_cts, got {self.cts_stage}")
         if self.objective not in ('delay', 'area', 'balanced', 'fastest', 'pareto'):
             errs.append(f"objective must be delay|area|balanced, got {self.objective}")
         if self.fallback not in ('knee', 'best_wns'):
@@ -439,6 +494,303 @@ def _split_lib_lists(data: dict) -> None:
     if isinstance(v, list):
         data['lib_synth'] = v[0] if v else None
         data['lib_synth_extra'] = list(data.get('lib_synth_extra') or []) + [str(x) for x in v[1:]]
+
+
+SCENARIO_CHECKS = ('setup', 'hold', 'recovery', 'removal')
+
+
+def _normalise_scenarios(data: dict) -> None:
+    """`scenarios: {name: {sdc, rank, required, corners, checks}}` (a bare string
+    is the SDC path). `sdc:` alone becomes the single scenario `default`. The
+    rank scenario's SDC is what synthesis reads and ranking times, so it is
+    copied to `sdc`."""
+    raw = data.get('scenarios') or {}
+    out: dict = {}
+    for name, spec in raw.items():
+        spec = {'sdc': spec} if isinstance(spec, str) else dict(spec or {})
+        sdc = spec.get('sdc')
+        spec['sdc'] = os.path.expandvars(os.path.expanduser(str(sdc))) if sdc else None
+        spec['rank'] = bool(spec.get('rank', False))
+        spec['required'] = bool(spec.get('required', True))
+        spec['corners'] = [str(c) for c in spec['corners']] if spec.get('corners') else None
+        spec['checks'] = [str(c) for c in spec['checks']] if spec.get('checks') else list(SCENARIO_CHECKS)
+        out[str(name)] = spec
+    data['scenarios_explicit'] = bool(out)
+    if not out and data.get('sdc'):
+        out = {'default': {'sdc': data['sdc'], 'rank': True, 'required': True, 'corners': None, 'checks': list(SCENARIO_CHECKS)}}
+    if out:
+        ranks = [n for n, s in out.items() if s['rank']]
+        if not ranks and len(out) == 1:
+            next(iter(out.values()))['rank'] = True
+            ranks = list(out)
+        if len(ranks) == 1 and out[ranks[0]]['sdc']:
+            data['sdc'] = out[ranks[0]]['sdc']
+    data['scenarios'] = out
+
+
+def rank_scenario(cfg) -> Optional[str]:
+    sc = _cfg_get(cfg, 'scenarios') or {}
+    return next((n for n, s in sc.items() if s.get('rank')), None)
+
+
+def required_combos(cfg) -> list[tuple[str, str]]:
+    """(scenario, corner) pairs that govern acceptance: every required scenario
+    at each of its corners (`corners:` given) or at every configured corner."""
+    sc = _cfg_get(cfg, 'scenarios') or {}
+    have = [c for c, lib in (('slow', _cfg_get(cfg, 'lib_slow')), ('typ', _cfg_get(cfg, 'lib_typ')), ('fast', _cfg_get(cfg, 'lib_fast'))) if lib]
+    out = []
+    for name, s in sc.items():
+        if not s.get('required', True):
+            continue
+        for c in (s.get('corners') or have):
+            if c in have:
+                out.append((name, c))
+    return out
+
+
+def _corner_lib(cfg, corner: str) -> Optional[str]:
+    return {'slow': _cfg_get(cfg, 'lib_slow'), 'typ': _cfg_get(cfg, 'lib_typ'), 'fast': _cfg_get(cfg, 'lib_fast')}[corner]
+
+
+def uncertainty_components(cfg, clock: str) -> Optional[dict]:
+    """Explicit clock-uncertainty budget for `clock` (ps) or None when no
+    budget is configured. pre_cts: setup = jitter + skew + setup_margin,
+    hold = skew + hold_margin; post_cts uses skew_post_cts_ps for skew."""
+    budget = _cfg_get(cfg, 'clock_budget') or {}
+    b = budget.get(clock) or budget.get('*')
+    if not b:
+        return None
+    stage = _cfg_get(cfg, 'cts_stage') or 'pre_cts'
+    jitter = float(b.get('jitter_ps', 0))
+    skew = float(b.get('skew_ps', 0)) if stage == 'pre_cts' else float(b.get('skew_post_cts_ps', 0))
+    sm, hm = float(b.get('setup_margin_ps', 0)), float(b.get('hold_margin_ps', 0))
+    return {'clock': clock, 'stage': stage, 'jitter_ps': jitter, 'skew_ps': skew,
+            'setup_margin_ps': sm, 'hold_margin_ps': hm,
+            'setup_ps': jitter + skew + sm, 'hold_ps': skew + hm,
+            'formula': (f'setup = jitter {jitter:g} + skew {skew:g} + margin {sm:g} = {jitter + skew + sm:g} ps; '
+                        f'hold = skew {skew:g} + margin {hm:g} = {skew + hm:g} ps ({stage}'
+                        + (', skew = skew_post_cts_ps' if stage == 'post_cts' else '') + ')')}
+
+
+def _budget_section(cfg) -> str:
+    """set_clock_uncertainty lines derived from clock_budget, with the formula
+    as a comment. Applied after the flat defaults, before the scenario SDC."""
+    budget = _cfg_get(cfg, 'clock_budget') or {}
+    if not budget:
+        return ''
+    clocks = [c for c in (_cfg_get(cfg, 'clock_port'), _cfg_get(cfg, 'clock_port_2')) if c]
+    clocks += [c for c in budget if c not in clocks and c != '*']
+    L = ['# Clock uncertainty from clock_budget (see synth.sdc / summary for the components)']
+    for c in clocks:
+        u = uncertainty_components(cfg, c)
+        if not u:
+            continue
+        L.append(f'# {c}: {u["formula"]}')
+        L.append(f'set_clock_uncertainty -setup {u["setup_ps"] / 1000.0:.4f} [get_clocks {c}]')
+        L.append(f'set_clock_uncertainty -hold {u["hold_ps"] / 1000.0:.4f} [get_clocks {c}]')
+    return '\n'.join(L)
+
+
+_HOOK_PROCS = r'''
+# --- constraint hook support (synth_flow) ---------------------------------
+# require_binding NAME OBJECTS [-count N] [-min N] [-max N]
+#   records what NAME resolved to; the run fails when nothing (or an
+#   unexpected number of objects) is found. optional_binding never fails.
+proc _synth_names {objs} {
+  set names {}
+  foreach o $objs { catch { lappend names [get_full_name $o] } }
+  return $names
+}
+proc require_binding {name objs args} {
+  set n [llength $objs]
+  set want ""; set lo 1; set hi ""
+  for {set i 0} {$i < [llength $args]} {incr i} {
+    switch -- [lindex $args $i] {
+      -count { incr i; set want [lindex $args $i] }
+      -min   { incr i; set lo [lindex $args $i] }
+      -max   { incr i; set hi [lindex $args $i] }
+    }
+  }
+  set bad 0
+  if {$want ne "" && $n != $want} { set bad 1 }
+  if {$n < $lo} { set bad 1 }
+  if {$hi ne "" && $n > $hi} { set bad 1 }
+  if {$bad} {
+    puts "BINDING FAIL $name $n"
+    error "constraint hook: required binding '$name' resolved to $n object(s)"
+  }
+  puts "BINDING OK $name $n [join [_synth_names $objs] ,]"
+}
+proc optional_binding {name objs} {
+  puts "BINDING OPT $name [llength $objs] [join [_synth_names $objs] ,]"
+}
+'''
+
+
+def _hook_section(cfg, scenario: Optional[str], corner: Optional[str], module: Optional[str]) -> str:
+    hook = _cfg_get(cfg, 'constraint_hook')
+    if not hook:
+        return ''
+    return '\n'.join([
+        f'set synth_scenario {{{scenario or ""}}}',
+        f'set synth_corner {{{corner or ""}}}',
+        f'set synth_module {{{module or ""}}}',
+        _HOOK_PROCS.strip('\n'),
+        'puts ">>> HOOK_BEGIN"',
+        f'source {hook}',
+        'puts ">>> HOOK_END"',
+    ])
+
+
+def _parse_bindings(text: str) -> list[dict]:
+    out = []
+    for m in re.finditer(r'^BINDING (OK|FAIL|OPT) (\S+) (\d+)(?: (.*))?$', text, re.M):
+        out.append({'name': m.group(2), 'status': m.group(1).lower(), 'count': int(m.group(3)),
+                    'objects': [o for o in (m.group(4) or '').split(',') if o]})
+    return out
+
+
+def _parse_check_types(section: str) -> dict:
+    """Worst slack per check type from `report_check_types -verbose`: one path
+    block per type; the endpoint line names recovery/removal checks, the rest
+    are setup (Path Type: max) or hold (min)."""
+    worst: dict = {k: None for k in SCENARIO_CHECKS}
+    for block in re.split(r'^Startpoint:', section, flags=re.M)[1:]:
+        ep = re.search(r'^Endpoint:.*$', block, re.M)
+        pt = re.search(r'^Path Type:\s*(max|min)', block, re.M)
+        sl = re.search(r'^\s*(-?[0-9]+\.[0-9]+)\s+slack', block, re.M)
+        if not sl:
+            continue
+        kind = None
+        if ep and 'recovery check' in ep.group(0):
+            kind = 'recovery'
+        elif ep and 'removal check' in ep.group(0):
+            kind = 'removal'
+        elif pt:
+            kind = 'setup' if pt.group(1) == 'max' else 'hold'
+        if kind:
+            v = float(sl.group(1))
+            worst[kind] = v if worst[kind] is None else min(worst[kind], v)
+    return worst
+
+
+SCENARIO_TCL = """\
+read_liberty {liberty}
+{extra}
+read_verilog {netlist}
+link_design {module}
+{constraints}
+puts ">>> GROUPS_BEGIN"
+puts "GROUPS SETUP"
+report_checks -path_delay max -group_path_count 1 -format slack_only -digits 4
+puts "GROUPS HOLD"
+report_checks -path_delay min -group_path_count 1 -format slack_only -digits 4
+puts ">>> GROUPS_END"
+puts ">>> TYPES_BEGIN"
+report_check_types -max_delay -min_delay -recovery -removal -verbose -digits 4
+puts ">>> TYPES_END"
+exit
+"""
+
+
+@dataclass
+class ScenarioCheck:
+    scenario: str
+    corner: str
+    ok: bool = True
+    error: Optional[str] = None
+    worst: dict = field(default_factory=dict)      # setup/hold/recovery/removal -> slack ns (None = no such check)
+    groups: dict = field(default_factory=dict)     # {'setup': {group: slack}, 'hold': {...}}
+    bindings: list = field(default_factory=list)
+    failures: list = field(default_factory=list)   # after scenario_failures(): human-readable
+    log_path: Optional[str] = None
+
+
+def scenario_constraints(cfg, scenario: str, corner: str, module: str, liberty: str) -> str:
+    """Full constraint preamble for one scenario at one corner: defaults,
+    budget uncertainty, the scenario's SDC, then the constraint hook."""
+    spec = (_cfg_get(cfg, 'scenarios') or {}).get(scenario) or {}
+    return _sta_constraints(
+        clock_port=_cfg_get(cfg, 'clock_port'), period_ns=_cfg_get(cfg, 'period_ps') / 1000.0,
+        clock_port_2=_cfg_get(cfg, 'clock_port_2'),
+        period_2_ns=(_cfg_get(cfg, 'period_ps_2') / 1000.0) if (_cfg_get(cfg, 'clock_port_2') and _cfg_get(cfg, 'period_ps_2')) else None,
+        unc_setup_ns=_cfg_get(cfg, 'clock_uncertainty_setup_ps') / 1000.0, unc_hold_ns=_cfg_get(cfg, 'clock_uncertainty_hold_ps') / 1000.0,
+        user_sdc=spec.get('sdc') or _cfg_get(cfg, 'sdc'), driving_cell=_cfg_get(cfg, 'driving_cell'),
+        load_pf=_cfg_get(cfg, 'load_ff') / 1000.0, wire_load_section=_wire_load_section(_cfg_get(cfg, 'wire_load_model'), liberty),
+        io_delay_frac=_cfg_get(cfg, 'io_delay_frac'), io_delay_min_frac=_cfg_get(cfg, 'io_delay_min_frac'),
+        budget_section=_budget_section(cfg), hook_section=_hook_section(cfg, scenario, corner, module))
+
+
+def run_scenario_check(cfg, module: str, netlist: Path, scenario: str, corner: str, out_dir: Path, tag: str) -> ScenarioCheck:
+    """One OpenSTA session: scenario SDC + hook at `corner`; worst slack per
+    check type and per path group, bindings. Never raises."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lib = _corner_lib(cfg, corner)
+    chk = ScenarioCheck(scenario=scenario, corner=corner)
+    if not lib:
+        chk.ok, chk.error = False, f'no liberty for corner {corner}'
+        return chk
+    extra = '\n'.join(f'read_liberty {f}' for f in _extra_libs(cfg, corner))
+    tcl = out_dir / f'{tag}.tcl'
+    tcl.write_text(SCENARIO_TCL.format(liberty=lib, extra=extra, netlist=netlist, module=module,
+                                       constraints=scenario_constraints(cfg, scenario, corner, module, lib)))
+    try:
+        r = subprocess.run([_cfg_get(cfg, 'opensta'), '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=900)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        chk.ok, chk.error = False, str(e)
+        return chk
+    out = r.stdout + r.stderr
+    log_path = out_dir / f'{tag}.log'
+    log_path.write_text(out)
+    chk.log_path = str(log_path)
+    chk.bindings = _parse_bindings(out)
+    if any(b['status'] == 'fail' for b in chk.bindings):
+        chk.ok, chk.error = False, 'constraint hook: required binding failed: ' + ', '.join(b['name'] for b in chk.bindings if b['status'] == 'fail')
+        return chk
+    if r.returncode != 0 or '>>> TYPES_END' not in out:
+        err = next((l for l in out.splitlines() if l.startswith('Error')), f'opensta exit {r.returncode}')
+        chk.ok, chk.error = False, err
+        return chk
+    chk.groups = _parse_group_slacks(out[out.find('>>> GROUPS_BEGIN'):out.find('>>> GROUPS_END')])
+    chk.worst = _parse_check_types(out[out.find('>>> TYPES_BEGIN'):out.find('>>> TYPES_END')])
+    return chk
+
+
+def scenario_failures(chk: ScenarioCheck, checks: list) -> list[str]:
+    """Failing required checks of one scenario/corner result: check types
+    below zero, and path groups (fixed max/min-delay bounds included) below
+    zero in the directions the scenario requires."""
+    if not chk.ok:
+        return [f'STA failed: {chk.error}']
+    f = []
+    for t in checks:
+        v = chk.worst.get(t)
+        if v is not None and v < -1e-6:
+            f.append(f'{t} {v:+.3f}')
+    if 'setup' in checks or 'recovery' in checks:
+        f += [f'group {g} (max) {v:+.3f}' for g, v in chk.groups.get('setup', {}).items() if v < -1e-6]
+    if 'hold' in checks or 'removal' in checks:
+        f += [f'group {g} (min) {v:+.3f}' for g, v in chk.groups.get('hold', {}).items() if v < -1e-6]
+    return f
+
+
+def check_required(cfg, module: str, netlist: Path, out_dir: Path, tag: str, combos=None) -> tuple[list[ScenarioCheck], list[str]]:
+    """Run every required (scenario, corner) check on `netlist`; returns the
+    checks and the flat list of failures ('scenario@corner: what')."""
+    sc = _cfg_get(cfg, 'scenarios') or {}
+    checks, fails = [], []
+    for s, c in (combos if combos is not None else required_combos(cfg)):
+        chk = run_scenario_check(cfg, module, netlist, s, c, out_dir, f'{tag}_{s}_{c}')
+        chk.failures = [f'{s}@{c}: {x}' for x in scenario_failures(chk, sc.get(s, {}).get('checks') or list(SCENARIO_CHECKS))]
+        checks.append(chk)
+        fails += chk.failures
+    return checks, fails
+
+
+def _guard_check(cfg, module: str, combos: list, out_dir: Path, netlist: Path) -> tuple[bool, str]:
+    """Post-pass guard: every previously passing required check must still pass."""
+    _, fails = check_required(cfg, module, Path(netlist), Path(out_dir), Path(netlist).stem, combos)
+    return (not fails), '; '.join(fails[:4])
 
 
 def _normalise_macro_libs(raw) -> dict:
@@ -1517,11 +1869,13 @@ def _sta_constraints(*, clock_port: str, period_ns: float,
                      driving_cell: Optional[str] = None,
                      load_pf: Optional[float] = None,
                      wire_load_section: str = '',
-                     io_delay_frac: float = 0.2, io_delay_min_frac: float = 0.4) -> str:
-    """Constraint preamble shared by quick STA and multi-corner STA so that
-    winner ranking and the final report see the same model. Order: clocks,
-    uncertainty, default driving cell / load / wire load / I/O delays,
-    async-reset false paths, then the user SDC last so it overrides."""
+                     io_delay_frac: float = 0.2, io_delay_min_frac: float = 0.4,
+                     budget_section: str = '', hook_section: str = '') -> str:
+    """Constraint preamble shared by quick STA, the post-pass and sign-off so
+    that ranking, repairs and the report see the same model. Order: clocks,
+    flat uncertainty, uncertainty from clock_budget, default driving cell /
+    load / wire load / I/O delays, async-reset false paths, the scenario SDC
+    (overrides the defaults), then the constraint hook (sees the linked design)."""
     L = [f'create_clock -name {clock_port} -period {period_ns} [get_ports {clock_port}]']
     if clock_port_2 and period_2_ns:
         L.append(f'create_clock -name {clock_port_2} -period {period_2_ns} [get_ports {clock_port_2}]')
@@ -1529,6 +1883,8 @@ def _sta_constraints(*, clock_port: str, period_ns: float,
                  f'-group [get_clocks {clock_port_2}]')
     L.append(f'set_clock_uncertainty -setup {unc_setup_ns} [all_clocks]')
     L.append(f'set_clock_uncertainty -hold {unc_hold_ns} [all_clocks]')
+    if budget_section:
+        L.append(budget_section.rstrip())
     if driving_cell:
         L.append(f'set_driving_cell -lib_cell {driving_cell} [all_inputs -no_clocks]')
     if load_pf is not None:
@@ -1547,6 +1903,9 @@ def _sta_constraints(*, clock_port: str, period_ns: float,
         # user SDC override the defaults above (later set_* replaces earlier).
         L.append('# User-supplied SDC (overrides defaults above)')
         L.append(f'source {user_sdc}')
+    if hook_section:
+        L.append('# Constraint hook (after the SDC, with the linked design)')
+        L.append(hook_section.rstrip())
     return '\n'.join(L) + '\n'
 
 
@@ -1571,7 +1930,8 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
                load_ff: Optional[float] = None,
                unc_setup_ps: int = 250, unc_hold_ps: int = 100,
                wire_load_model: str = 'auto',
-               io_delay_frac: float = 0.2, io_delay_min_frac: float = 0.4) -> tuple[Optional[float], Optional[float]]:
+               io_delay_frac: float = 0.2, io_delay_min_frac: float = 0.4,
+               budget_section: str = '', hook_section: str = '') -> tuple[Optional[float], Optional[float]]:
     """Run a quick STA (ranking corner). Returns (wns_ns, tns_ns) or (None, None).
     Uses the same constraint preamble as the multi-corner STA."""
     period_ns = period_ps / 1000.0
@@ -1587,6 +1947,7 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
         load_pf=(load_ff / 1000.0) if load_ff is not None else None,
         wire_load_section=_wire_load_section(wire_load_model, liberty),
         io_delay_frac=io_delay_frac, io_delay_min_frac=io_delay_min_frac,
+        budget_section=budget_section, hook_section=hook_section,
     )
     with tempfile.NamedTemporaryFile('w', suffix='.tcl', delete=False) as f:
         f.write(QSTA_TCL.format(
@@ -1635,7 +1996,8 @@ def _quick_sta_job(args: dict) -> tuple[str, Optional[float], Optional[float]]:
         sdc=cfg.get('sdc'), driving_cell=cfg['driving_cell'], load_ff=cfg['load_ff'],
         unc_setup_ps=cfg['clock_uncertainty_setup_ps'], unc_hold_ps=cfg['clock_uncertainty_hold_ps'],
         wire_load_model=cfg['wire_load_model'], io_delay_frac=cfg['io_delay_frac'],
-        io_delay_min_frac=cfg.get('io_delay_min_frac', 0.4))
+        io_delay_min_frac=cfg.get('io_delay_min_frac', 0.4),
+        budget_section=_budget_section(cfg), hook_section=_hook_section(cfg, rank_scenario(cfg), corner, args['module']))
     return args['recipe'], wns, tns
 
 
@@ -1661,6 +2023,7 @@ class Selection:
     candidates: list[Candidate]
     pareto_front: list[str] = field(default_factory=list)
     rationale: str = ''
+    acceptance: dict = field(default_factory=dict)   # required scenario checks: {'closed', 'combos', 'evaluated'}
 
 def _stability_idx(recipe: str) -> int:
     base = _base_recipe(recipe)
@@ -1794,8 +2157,10 @@ def _parse_group_slacks(section: str) -> dict:
             mode = 'setup'; continue
         if line.startswith('GROUPS HOLD'):
             mode = 'hold'; continue
-        m = re.match(r'^(\S+)\s+(-?[0-9]+\.[0-9]+)\s*$', line.strip())
-        if mode and m and m.group(1) not in ('Group',):
+        # group names may contain spaces ("path delay", "**async_default**"):
+        # the slack is the last column, everything before it is the name
+        m = re.match(r'^(.*\S)\s+(-?[0-9]+\.[0-9]+)\s*$', line.strip())
+        if mode and m and m.group(1) != 'Group' and not set(m.group(1)) <= {'-'}:
             out[mode][m.group(1)] = float(m.group(2))
     return out
 
@@ -1817,6 +2182,12 @@ class CornerResult:
     # worst slack per path group (one per clock) at the sign-off corners
     groups_setup_slow: dict = field(default_factory=dict)
     groups_hold_fast: dict = field(default_factory=dict)
+    # named scenarios at sign-off: one entry per scenario x corner (asdict of ScenarioCheck)
+    scenarios: list = field(default_factory=list)
+    closed: Optional[bool] = None          # every required check passes (None: no scenarios configured)
+    failing: list = field(default_factory=list)
+    bindings: list = field(default_factory=list)
+    uncertainty: list = field(default_factory=list)
 
 def run_corner_sta(cfg: Config, module: str, netlist: Path,
                    results_dir: Path) -> CornerResult:
@@ -1851,6 +2222,7 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
             load_pf=cfg.load_ff / 1000.0,  # OpenSTA wants pF
             wire_load_section=_wire_load_section(cfg.wire_load_model, lib),
             io_delay_frac=cfg.io_delay_frac, io_delay_min_frac=cfg.io_delay_min_frac,
+            budget_section=_budget_section(cfg), hook_section=_hook_section(cfg, rank_scenario(cfg), key, module),
         )
         macro = _extra_libs(cfg, key)
         tcl = out_dir / f'sta_{name}.tcl'
@@ -1889,6 +2261,24 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
     log.write_text('\n'.join(log_parts))
     rpt.write_text('\n'.join(report_parts))
     res.sdf_path = str(sdf) if sdf.exists() else None
+    # scenarios x corners x check types (required ones decide `closed`)
+    if cfg.scenarios:
+        sc_dir = out_dir / 'scenarios'
+        combos = [(n, c) for n, s in cfg.scenarios.items()
+                  for c in (s.get('corners') or [k for _, l, k in corners if l]) if _corner_lib(cfg, c)]
+        checks, _ = check_required(cfg, module, netlist, sc_dir, 'signoff', combos)
+        req = set(required_combos(cfg))
+        res.scenarios = [asdict(c) for c in checks]
+        res.failing = [f for c in checks if (c.scenario, c.corner) in req for f in c.failures]
+        res.closed = not res.failing
+        res.bindings = next((c.bindings for c in checks if c.bindings), [])
+        if cfg.constraint_hook:
+            shutil.copy(cfg.constraint_hook, out_dir / 'constraint_hook.tcl')
+            (out_dir / 'bindings.json').write_text(json.dumps({'hook': cfg.constraint_hook, 'bindings': res.bindings}, indent=2))
+    for c in [cfg.clock_port, cfg.clock_port_2]:
+        u = uncertainty_components(cfg, c) if c else None
+        if u:
+            res.uncertainty.append(u)
     return res
 
 
@@ -2070,6 +2460,8 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
             status = '⚠️ setup'
         if corner and corner.wns_hold_fast is not None and corner.wns_hold_fast < 0:
             status = '⚠️ hold' if status == '✅' else '⚠️ both'
+        if corner and corner.closed is not None:
+            status = '✅ closed' if corner.closed else f'❌ NOT CLOSED ({len(corner.failing)} required check(s) fail)'
         wns_cell = (f'{win.wns_ns:.3f}' if win and win.wns_ns is not None else '—')
         cells_s = f'{win.cells}' if win else '—'
         area_s = f'{win.area:.1f}' if win else '—'
@@ -2088,6 +2480,40 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
                 ss_ = corner.groups_setup_slow.get(g); hf = corner.groups_hold_fast.get(g)
                 grp_rows.append(f"| `{m}` | `{g}` | {ss_:+.3f} | {hf:+.3f} |" if ss_ is not None and hf is not None
                                 else f"| `{m}` | `{g}` | {'—' if ss_ is None else f'{ss_:+.3f}'} | {'—' if hf is None else f'{hf:+.3f}'} |")
+    # scenarios x corners x check types
+    sc_rows, unc_rows = [], []
+    for m, sel in selections.items():
+        corner = corners.get(m)
+        if not corner:
+            continue
+        for u in corner.uncertainty:
+            unc_rows.append(f"| `{m}` | `{u['clock']}` | {u['stage']} | {u['jitter_ps']:g} | {u['skew_ps']:g} | {u['setup_margin_ps']:g} / {u['hold_margin_ps']:g} | **{u['setup_ps']:g}** / **{u['hold_ps']:g}** |")
+        for c in corner.scenarios:
+            w = c.get('worst') or {}
+            f = lambda k: ('—' if w.get(k) is None else f"{w[k]:+.3f}")
+            gmin = [v for d in (c.get('groups') or {}).values() for v in d.values()]
+            grp = f"{min(gmin):+.3f}" if gmin else '—'
+            verdict = '❌ ' + '; '.join(x.split(': ', 1)[-1] for x in c.get('failures') or [])[:80] if c.get('failures') else ('✅' if c.get('ok') else f"⚠️ {c.get('error')}")
+            req = 'required' if cfg.scenarios.get(c['scenario'], {}).get('required', True) else 'info'
+            sc_rows.append(f"| `{m}` | `{c['scenario']}` ({req}) | {c['corner']} | {f('setup')} | {f('hold')} | {f('recovery')} | {f('removal')} | {grp} | {verdict} |")
+    if sc_rows:
+        md.append('### Scenario checks (sign-off)')
+        md.append('')
+        md.append('A module is *closed* when every required scenario passes at each of its corners for each check type and path group.')
+        md.append('')
+        md.append('| Module | Scenario | Corner | Setup | Hold | Recovery | Removal | Worst group | Verdict |')
+        md.append('|---|---|---|---|---|---|---|---|---|')
+        md.extend(sc_rows)
+        md.append('')
+    if unc_rows:
+        md.append('### Clock uncertainty budget')
+        md.append('')
+        md.append('setup = jitter + skew + setup margin; hold = skew + hold margin (post-CTS: skew = `skew_post_cts_ps`). Values in ps.')
+        md.append('')
+        md.append('| Module | Clock | Stage | Jitter | Skew | Margins setup / hold | Uncertainty setup / hold |')
+        md.append('|---|---|---|---|---|---|---|')
+        md.extend(unc_rows)
+        md.append('')
     if grp_rows:
         md.append('### Slack per path group')
         md.append('')
@@ -2275,6 +2701,10 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
         L.append(f'create_clock -name {cfg.clock_port_2} -period {cfg.period_ps_2 / 1000.0} '
                  f'[get_ports {cfg.clock_port_2}]')
         L.append(f'set_clock_groups -asynchronous -group {cfg.clock_port} -group {cfg.clock_port_2}')
+    for ck in [cfg.clock_port, cfg.clock_port_2]:
+        u = uncertainty_components(cfg, ck) if ck else None
+        if u:
+            L.append(f'# clock_budget {ck}: {u["formula"]}')
     L.append(f'set_clock_uncertainty -setup {cfg.clock_uncertainty_setup_ps / 1000.0} [all_clocks]')
     L.append(f'set_clock_uncertainty -hold {cfg.clock_uncertainty_hold_ps / 1000.0} [all_clocks]')
     L.append(f'set_driving_cell -lib_cell {cfg.driving_cell} [all_inputs -no_clocks]')
@@ -2308,14 +2738,106 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
     path.write_text('\n'.join(L) + '\n')
 
 
+_RESIZE_KEY_FIELDS = ('period_ps', 'clock_port', 'clock_port_2', 'period_ps_2', 'driving_cell', 'load_ff',
+                      'clock_uncertainty_setup_ps', 'clock_uncertainty_hold_ps', 'wire_load_model', 'io_delay_frac',
+                      'io_delay_min_frac', 'resize_iters', 'resize_wns_tol_ps', 'resize_final', 'resize_recover_area',
+                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget',
+                      'dont_use', 'repair_buffer_cell', 'repair_delay_cell', 'select_margin_ps')
+
+
+def _resize_key(cfg: Config, netlist_in: Path) -> str:
+    """Content key of a post-pass run: netlist text, every liberty (path, size,
+    mtime), the SDC text and the settings that change the result. Same key =
+    same answer, so a finished run is reused (checkpoint.json in its work dir)."""
+    h = hashlib.sha1()
+    h.update(netlist_in.read_bytes())
+    pl = _postpass_libs(cfg)
+    for lib in [pl['primary'], cfg.lib_slow or '', cfg.lib_fast or '', *pl['std'], *pl['std_fast'], *pl['macro'], *pl['macro_fast']]:
+        if lib and Path(lib).exists():
+            st = Path(lib).stat()
+            h.update(f'{lib}:{st.st_size}:{int(st.st_mtime)}'.encode())
+    if cfg.sdc and Path(cfg.sdc).exists():
+        h.update(Path(cfg.sdc).read_bytes())
+    h.update(json.dumps({k: getattr(cfg, k) for k in _RESIZE_KEY_FIELDS}, sort_keys=True, default=str).encode())
+    return h.hexdigest()
+
+
+def _acceptance_gate(cfg: Config, module: str, cands: list, sel, work_dir: Path, log) -> None:
+    """Timing-closed winner = smallest area among candidates that meet the
+    ranking scenario AND pass every required scenario x corner x check. Tries
+    rank-meeting candidates in area order (selected first), at most
+    scenario_check_candidates of them. If none passes, the fallback choice
+    stands and is marked NOT CLOSED with every failing check."""
+    combos = required_combos(cfg)
+    margin = cfg.select_margin_ps / 1000.0
+    meeting = sorted([c for c in cands if c.netlist and c.wns_ns is not None and c.wns_ns >= margin - 1e-9],
+                     key=lambda c: (c.area, -c.wns_ns))
+    order = [c for c in meeting if c.recipe == sel.winner] + [c for c in meeting if c.recipe != sel.winner]
+    evaluated: dict = {}
+    winner = None
+    for c in order[:max(1, cfg.scenario_check_candidates)]:
+        _, fails = check_required(cfg, module, Path(c.netlist), work_dir / c.recipe, 'gate', combos)
+        evaluated[c.recipe] = fails
+        if not fails:
+            winner = c
+            break
+        log.info(f"[accept] {module}/{c.recipe}: {len(fails)} failing required check(s): " + '; '.join(fails[:3]) + (' …' if len(fails) > 3 else ''))
+    if winner:
+        if winner.recipe != sel.winner:
+            log.info(f"[winner] {module}: {winner.recipe} replaces {sel.winner}: smallest area passing all "
+                     f"{len(combos)} required scenario/corner checks")
+        sel.winner = winner.recipe
+        sel.rationale += f' | CLOSED: passes {len(combos)} required scenario/corner checks'
+        closed = True
+    else:
+        if sel.winner not in evaluated:
+            c = next((x for x in cands if x.recipe == sel.winner), None)
+            if c and c.netlist:
+                _, fails = check_required(cfg, module, Path(c.netlist), work_dir / c.recipe, 'gate', combos)
+                evaluated[c.recipe] = fails
+        fails = evaluated.get(sel.winner, [])
+        sel.rationale += f' | NOT CLOSED: {len(fails)} required check(s) fail (' + '; '.join(fails[:3]) + (' …' if len(fails) > 3 else '') + ')'
+        log.warning(f"[winner] {module}: NOT CLOSED — {sel.winner} fails {len(fails)} required scenario/corner check(s); "
+                    f"see selection.json → acceptance")
+        closed = False
+    sel.acceptance = {'closed': closed, 'combos': [f'{s}@{c}' for s, c in combos], 'evaluated': evaluated}
+
+
+def _postpass_guard(cfg: Config, module: str, netlist_in: Path, work_dir: Path):
+    """Guard callable for resize(): the required checks that pass on the input
+    netlist must keep passing. None when scenarios are not explicit."""
+    if not cfg.scenarios_explicit:
+        return None
+    combos = required_combos(cfg)
+    if not combos:
+        return None
+    checks, _ = check_required(cfg, module, netlist_in, work_dir / 'guard', 'in', combos)
+    passing = [(c.scenario, c.corner) for c in checks if not c.failures]
+    if not passing:
+        return None
+    return functools.partial(_guard_check, cfg, module, passing, work_dir / 'guard')
+
+
 def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log) -> Optional[dict]:
     """Run resize.py (sizing / repairs per cfg) on one netlist. Returns the
-    result dict or None on failure; never raises."""
+    result dict or None on failure; never raises. A finished run with the same
+    content key (netlist, libraries, SDC, settings) is reused from
+    <work_dir>/checkpoint.json instead of being recomputed."""
     try:
         import resize as resize_mod
     except ImportError:
         log.warning('[resize] resize.py not found; skipping')
         return None
+    key = _resize_key(cfg, netlist_in)
+    ckpt = work_dir / 'checkpoint.json'
+    if ckpt.exists():
+        try:
+            saved = json.loads(ckpt.read_text())
+            if saved.get('key') == key and Path(saved['result']['output']).exists():
+                res = dict(saved['result']); res['reused_checkpoint'] = True
+                return res
+        except Exception:
+            pass
     sta_lib = cfg.lib_slow or cfg.lib_typ
     try:
         res = resize_mod.resize(
@@ -2329,6 +2851,10 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
+            hold_max_paths=cfg.repair_hold_max_paths, hold_sta_budget=cfg.repair_hold_sta_budget,
+            budget_section=_budget_section(cfg),
+            hook_section=_hook_section(cfg, rank_scenario(cfg), 'slow' if cfg.lib_slow else 'typ', module),
+            guard=_postpass_guard(cfg, module, netlist_in, work_dir),
             extra_libs=_postpass_libs(cfg)['std'], extra_libs_fast=_postpass_libs(cfg)['std_fast'],
             macro_libs=_postpass_libs(cfg)['macro'], macro_libs_fast=_postpass_libs(cfg)['macro_fast'],
             recover_area=cfg.resize_recover_area,
@@ -2337,6 +2863,10 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
     except Exception as e:
         log.warning(f'[resize] {module}: {netlist_in.name} failed ({e})')
         return None
+    try:
+        ckpt.write_text(json.dumps({'key': key, 'result': res}, indent=1))
+    except Exception:
+        pass
     return res
 
 
@@ -2358,6 +2888,8 @@ def _resize_winner(cfg: Config, module: str, mod_results: Path, work_dir: Path, 
 def _log_resize(module: str, res: dict, log) -> None:
     st = res.get('status', {})
     bad = {k: v for k, v in st.items() if v.startswith('failed')}
+    if res.get('reused_checkpoint'):
+        log.info(f'[resize] {module}: reused checkpoint (same netlist, libraries, SDC and settings)')
     log.info(f"[resize] {module}: WNS {res['start']['wns_ns']:+.3f} -> {res['end']['wns_ns']:+.3f}  "
              f"TNS {res['start']['tns_ns']:+.2f} -> {res['end']['tns_ns']:+.2f}  "
              f"area {res['start']['area']:.0f} -> {res['end']['area']:.0f}  cells {res.get('cells_start', '?')} -> {res.get('cells_end', '?')}  "
@@ -2392,8 +2924,24 @@ def _resize_candidates(cfg: Config, module: str, cands: list, sel, mod_results: 
     chosen = _postpass_candidates(cands, sel, cfg.resize_candidates)
     log.info(f"[resize] {module}: post-pass on {len(chosen)} candidates: {', '.join(c.recipe for c in chosen)}")
     post, records = [], {}
+    # independent post-passes run concurrently (each is OpenSTA/Yosys-bound)
+    workers = min(len(chosen), max(1, cfg.effective_parallel()))
+    results: dict[str, Optional[dict]] = {}
+    if workers > 1:
+        import concurrent.futures as _cf
+        with _cf.ProcessPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(_run_resize, cfg, module, Path(c.netlist), work_dir / c.recipe, log): c.recipe for c in chosen}
+            for fut in _cf.as_completed(futs):
+                try:
+                    results[futs[fut]] = fut.result()
+                except Exception as e:
+                    log.warning(f'[resize] {module}/{futs[fut]}: worker failed ({e})')
+                    results[futs[fut]] = None
+    else:
+        for c in chosen:
+            results[c.recipe] = _run_resize(cfg, module, Path(c.netlist), work_dir / c.recipe, log)
     for c in chosen:
-        res = _run_resize(cfg, module, Path(c.netlist), work_dir / c.recipe, log)
+        res = results.get(c.recipe)
         if res is None:
             records[c.recipe] = {'status': 'failed'}
             continue
@@ -2837,6 +3385,15 @@ def main() -> int:
                         timing[rec] = (wns, tns)
             log.info(f"  quick STA: {len(sta_jobs)} candidates in {time.time() - t0:.1f}s "
                      f"on {min(cfg.effective_parallel(), len(sta_jobs))} workers")
+        if cfg.constraint_hook:
+            for job in sta_jobs:
+                lp = Path(job['log'])
+                txt = lp.read_text() if lp.exists() else ''
+                m = re.search(r'^BINDING FAIL (\S+) (\d+)', txt, re.M)
+                if m:
+                    log.error(f"constraint hook {cfg.constraint_hook}: required binding '{m.group(1)}' resolved to "
+                              f"{m.group(2)} object(s) on {module}/{job['recipe']} (see {lp}); aborting")
+                    sys.exit(3)
         for rec, r in results_by_recipe.items():
             wns, tns = timing.get(rec, (None, None))
             cands.append(Candidate(
@@ -2849,6 +3406,8 @@ def main() -> int:
         sel = select_winner(cands, cfg.objective, cfg.select_margin_ps / 1000.0, cfg.fallback,
                             period_ns=cfg.period_ps / 1000.0)
         sel.module = module
+        if cfg.scenarios_explicit and cfg.run_sta and sel.winner:
+            _acceptance_gate(cfg, module, cands, sel, work / module / 'scenarios', log)
         selections[module] = sel
 
         if sel.winner:
@@ -2877,6 +3436,7 @@ def main() -> int:
                     'winner': sel.winner,
                     'rationale': sel.rationale,
                     'pareto_front': sel.pareto_front,
+                    'acceptance': sel.acceptance,
                     'candidates': [asdict(c) for c in cands],
                 }, indent=2)
             )

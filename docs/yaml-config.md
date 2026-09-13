@@ -171,6 +171,40 @@ These are required only when `run_gls: true` (the default). Set
 |---|---|---|---|
 | `dont_use` | list | `[]` | Liberty cell names or glob patterns passed as `-dont_use` to `abc` and `dfflibmap` (also `--dont-use`; SDC `set_dont_use` entries are merged in). Required with a full PDK liberty, e.g. `['sky130_fd_sc_hd__lpflow_*', 'sky130_fd_sc_hd__probe*', 'sky130_fd_sc_hd__dly*', 'sky130_fd_sc_hd__clkdly*', 'sky130_fd_sc_hd__sdlclkp*']`. The bundled `hd_120` subset already excludes them. |
 
+### Constraint scenarios, hook and clock budget
+
+```yaml
+scenarios:
+  func:  {sdc: sdc/func.sdc, rank: true}          # ranking uses this one
+  scan:  {sdc: sdc/scan.sdc, checks: [hold]}       # required, hold checks only
+  sleep: {sdc: sdc/sleep.sdc, corners: [slow]}     # checked at the slow corner only
+constraint_hook: sdc/post_map.tcl
+clock_budget:
+  clk: {jitter_ps: 50, skew_ps: 150, setup_margin_ps: 0, hold_margin_ps: 20, skew_post_cts_ps: 40}
+cts_stage: pre_cts
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `scenarios` | map | `{}` | Named constraint scenarios: `sdc` (file), `rank` (exactly one `true`: ranking and synthesis use it), `required` (default `true`: governs acceptance), `corners` (subset of `slow`/`typ`/`fast`; omitted = every configured corner), `checks` (subset of `setup`, `hold`, `recovery`, `removal`; default all). A bare string is the SDC path. `sdc:` alone is the single scenario `default`. |
+| `scenario_check_candidates` | int | `3` | How many rank-meeting candidates (smallest area first, the selected one first) are tried against the required checks before falling back. |
+| `constraint_hook` | path | — | Tcl sourced by OpenSTA in **every** STA (ranking, post-pass, sign-off) after `link_design` and the scenario SDC. It sees the linked design and applies constraints directly. Variables: `synth_scenario`, `synth_corner`, `synth_module`. Procs: `require_binding NAME OBJECTS [-count N] [-min N] [-max N]` (records what resolved; nothing or a wrong count **fails the run**, exit code 3) and `optional_binding NAME OBJECTS`. The hook copy and every resolved binding are written to `results/<module>/constraint_hook.tcl` and `bindings.json`. |
+| `clock_budget` | map | `{}` | Per clock (`'*'` = all): `jitter_ps`, `skew_ps`, `setup_margin_ps`, `hold_margin_ps`, `skew_post_cts_ps`. Uncertainty: **setup = jitter + skew + setup_margin**, **hold = skew + hold_margin**; with `cts_stage: post_cts` the skew term is `skew_post_cts_ps`. Applied per clock after the flat `clock_uncertainty_*_ps`; the components are written to `synth.sdc` and the summary. An SDC `set_clock_uncertainty` still wins (sourced later). |
+| `cts_stage` | string | `pre_cts` | `pre_cts` or `post_cts`; selects the skew term above. |
+
+**Acceptance rule.** With `scenarios:` given, the winner is the smallest-area
+candidate that meets the ranking scenario **and** passes every required
+scenario at each of its corners for each of its check types and path groups
+(fixed `set_max_delay` / `set_min_delay` bounds included). If none passes,
+`fallback` applies and the module is marked **NOT CLOSED** with every failing
+`scenario@corner: check slack` (log, `selection.json` → `acceptance`,
+summary). The same rule guards the post-pass: a sizing, buffering or hold
+move is rejected when a required check that passed on the input netlist
+would fail. Sign-off reports scenario × corner × check type (setup, hold,
+recovery, removal, worst path group) for every scenario, required or not.
+Ranking never uses the worst slack across scenarios: a fixed CDC bound and a
+functional clock-period violation are reported as what they are.
+
 ### Post-pass: winner sizing
 
 | Field | Type | Default | Notes |
@@ -179,6 +213,8 @@ These are required only when `run_gls: true` (the default). Set
 | `resize_iters` | int | `25` | Sizing iterations (STA calls) in the TNS phase. |
 | `resize_wns_tol_ps` | int | `150` | WNS regression tolerated for a TNS gain under the `tns` policy. |
 | `resize_candidates` | int | `1` | Run the post-pass on the N most promising candidates (the selected one, the fastest, then the Pareto front) and select again with the same rule on the post-pass numbers. Catches a fast candidate that only closes after sizing. Per-candidate before/after in `results/<module>/postpass.json`. Also `--resize-candidates N` (implies `--resize`). |
+| `repair_hold_max_paths` | int | `max_paths` (200) | Failing hold endpoints listed per STA in the hold phase. |
+| `repair_hold_sta_budget` | int | `60` | OpenSTA calls the hold phase may spend (two per trial batch); the phase stops with status `ok (budget)` when it is used up. |
 | `resize_recover_area` | bool | `false` | After timing is met: downsize off-critical cells, or with several libraries swap them to the slower one first, in batches accepted only while WNS stays at its floor and TNS does not drop. Also `--recover-area` (implies `--resize`). |
 | `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. Timing-clean states are always eligible. |
 
@@ -194,6 +230,18 @@ These are required only when `run_gls: true` (the default). Set
 
 Any of `resize_winner`, `repair_design`, `repair_hold` enables the post-pass on
 each module's winner; the input netlist is kept as `winner.presize.v`.
+The hold phase orders endpoints worst-first, keeps those on setup paths
+within 300 ps of the floor (synchronizers, CDC bounds) apart and tries them
+one at a time after the others, and on a rejected batch retries **both**
+halves (worklist bisection), so every feasible endpoint gets its chance.
+With `resize_candidates > 1` the candidates' post-passes run concurrently
+(`parallel` workers) and each finished run is checkpointed in
+`work/<module>/resize/<recipe>/checkpoint.json`, keyed by netlist text,
+liberty files, SDC text and settings; a rerun with the same inputs reuses it.
+`resize.json` → `timing` says whether setup and hold actually closed on the
+delivered netlist and whether the final state was rolled back; cell count,
+library mix and hold numbers are recomputed from that netlist.
+
 Every edited netlist passes a structural check before it is timed (one module,
 known cells, liberty pins, single driver per net) and is rejected otherwise.
 Each phase (buffering, sizing, recovery, hold) is a transaction: a failure in
