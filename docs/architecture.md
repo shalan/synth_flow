@@ -551,7 +551,13 @@ output port (vector bits included) or it is reported as unknown, and the
 rollback restores the inserted-buffer / delay-cell counters together with
 the netlist so the report describes what is delivered. The hold phase also
 no longer shadows the scenario-guard callable with its sensitivity band, a
-bug that made every accepted hold batch fail the phase since §2.15.
+bug that made every accepted hold batch fail the phase since §2.15. The
+area-recovery phase had the same shadowing (`guard = 0.3`), caught by the
+reviewer on uberSoC: both are renamed and a regression drives a guard
+callable through sizing, recovery and hold. Phase failures now exit 5, and
+`--strict` exits 6 on a NOT CLOSED module; after the post-pass the required
+checks run again on the repaired netlists so `postpass.json` never calls a
+failing candidate "meeting timing".
 
 ### 2.15 Named scenarios: rank on one, accept on all
 

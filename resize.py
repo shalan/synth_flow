@@ -863,12 +863,12 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     # drop, so timing never pays for area.
     try:
         if recover_area:
-            guard = 0.3
+            sens_band = 0.3          # ns; not `guard`: that name is the scenario-guard callable
             floor_wns = min(sta.wns, margin)
             tried3: set[str] = set()
             for rnd in range(recover_rounds):
                 near = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, f'near{rnd}', k=2000,
-                               slack_max=margin + guard, extra_libs=extra_libs)
+                               slack_max=margin + sens_band, extra_libs=extra_libs)
                 protected = {st.inst for pth in near.paths for st in pth.stages}
                 # off-critical cells: same cell in a slower (lower-leakage) library first, else one drive down
                 cands = {i: (fam.slower_variant(t) or prev_size(t, fam)) for i, t in types.items()

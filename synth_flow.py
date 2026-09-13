@@ -108,6 +108,9 @@ EXIT_SYNTH_FAIL = 1
 EXIT_TIMING_FAIL = 2
 EXIT_GLS_FAIL = 3
 EXIT_CONFIG_ERR = 4
+EXIT_POSTPASS_FAIL = 5     # a post-pass phase (sizing / buffering / recovery / hold) aborted on some module
+EXIT_NOT_CLOSED = 6        # --strict: a module fails a required scenario/corner check (or setup) at sign-off
+EXIT_HOOK_FAIL = 7         # constraint hook: a required binding did not resolve
 
 # ============================================================================
 # Configuration
@@ -345,6 +348,10 @@ class Config:
     run_sta: bool = True
     run_gls: bool = True
     fail_on_timing: bool = True
+    # --strict: non-zero exit (EXIT_NOT_CLOSED) when any module is NOT CLOSED
+    # under its required scenarios or misses setup at sign-off. A post-pass
+    # phase failure always exits EXIT_POSTPASS_FAIL, strict or not.
+    strict: bool = False
     hierarchical: bool = False
     depth_only: bool = False
     depth_gate_delay_ps: float = 80.0  # per-gate delay estimate (sky130 HD ~80ps)
@@ -2803,6 +2810,39 @@ def _acceptance_gate(cfg: Config, module: str, cands: list, sel, work_dir: Path,
     sel.acceptance = {'closed': closed, 'combos': [f'{s}@{c}' for s, c in combos], 'evaluated': evaluated}
 
 
+def _final_acceptance(cfg: Config, module: str, mod_results: Path, sel, work_dir: Path, log) -> None:
+    """Required scenario checks on the delivered winner.v after the post-pass;
+    recorded in selection.json -> acceptance.after_postpass and the rationale."""
+    if not (cfg.scenarios_explicit and required_combos(cfg)):
+        return
+    win = mod_results / 'winner.v'
+    if not win.exists():
+        return
+    _, fails = check_required(cfg, module, win, work_dir / 'final', 'final', required_combos(cfg))
+    sel.acceptance['after_postpass'] = {'closed': not fails, 'evaluated': {sel.winner: fails}}
+    if fails:
+        sel.rationale += f' | NOT CLOSED after the post-pass: {len(fails)} required check(s) fail (' + '; '.join(fails[:3]) + (' …' if len(fails) > 3 else '') + ')'
+        log.warning(f"[winner] {module}: NOT CLOSED after the post-pass — " + '; '.join(fails[:3]))
+    else:
+        sel.rationale += ' | CLOSED after the post-pass'
+
+
+def _postpass_failures(results_dir: Path, selections: dict) -> dict:
+    """{module: {phase: 'failed: ...'}} from every module's resize.json."""
+    out = {}
+    for m in selections:
+        rj = results_dir / m / 'resize.json'
+        if rj.exists():
+            try:
+                st = json.loads(rj.read_text()).get('status') or {}
+                bad = {k: v for k, v in st.items() if str(v).startswith('failed')}
+                if bad:
+                    out[m] = bad
+            except Exception:
+                pass
+    return out
+
+
 def _postpass_guard(cfg: Config, module: str, netlist_in: Path, work_dir: Path):
     """Guard callable for resize(): the required checks that pass on the input
     netlist must keep passing. None when scenarios are not explicit."""
@@ -2954,29 +2994,46 @@ def _resize_candidates(cfg: Config, module: str, cands: list, sel, mod_results: 
     if not post:
         log.warning(f'[resize] {module}: every candidate failed the post-pass; keeping the pre-pass winner')
         return sel
-    sel2 = select_winner(post, cfg.objective, cfg.select_margin_ps / 1000.0, cfg.fallback, period_ns=cfg.period_ps / 1000.0)
+    # acceptance after the post-pass: required scenario x corner x check on the
+    # repaired netlists; a candidate is eligible only when it meets the ranking
+    # scenario and every required check
+    closed_after: dict = {}
+    if cfg.scenarios_explicit and required_combos(cfg):
+        for c in post:
+            _, fails = check_required(cfg, module, Path(c.netlist), work_dir / c.recipe / 'accept', 'post', required_combos(cfg))
+            closed_after[c.recipe] = fails
+            records[c.recipe]['closed'] = not fails
+            records[c.recipe]['failing'] = fails
+        margin = cfg.select_margin_ps / 1000.0
+        eligible = [c for c in post if not closed_after[c.recipe] and c.wns_ns is not None and c.wns_ns >= margin - 1e-9]
+        if eligible:
+            sel2 = select_winner(eligible, cfg.objective, margin, cfg.fallback, period_ns=cfg.period_ps / 1000.0)
+            sel2.rationale += f' | CLOSED: passes {len(required_combos(cfg))} required scenario/corner checks after the post-pass'
+            closed = True
+        else:
+            sel2 = select_winner(post, cfg.objective, margin, cfg.fallback, period_ns=cfg.period_ps / 1000.0)
+            fails = closed_after.get(sel2.winner, [])
+            sel2.rationale += ' | NOT CLOSED after the post-pass: ' + (f'{len(fails)} required check(s) fail (' + '; '.join(fails[:3]) + (' …' if len(fails) > 3 else '') + ')' if fails else 'ranking scenario not met')
+            closed = False
+            log.warning(f"[winner] {module}: NOT CLOSED after the post-pass — {sel2.winner}: " + ('; '.join(fails[:3]) or 'ranking scenario not met'))
+        sel.acceptance['after_postpass'] = {'closed': closed, 'evaluated': closed_after}
+    else:
+        sel2 = select_winner(post, cfg.objective, cfg.select_margin_ps / 1000.0, cfg.fallback, period_ns=cfg.period_ps / 1000.0)
     win = next(c for c in post if c.recipe == sel2.winner)
     orig = next(c for c in cands if c.recipe == sel2.winner)
     shutil.copy(orig.netlist, mod_results / 'winner.presize.v')
     shutil.copy(win.netlist, mod_results / 'winner.v')
     shutil.copy(Path(win.netlist).parent / 'resize.json', mod_results / 'resize.json')
-    (mod_results / 'postpass.json').write_text(json.dumps({'winner': sel2.winner, 'rationale': sel2.rationale,
-                                                            'candidates': records}, indent=2))
+    (mod_results / 'postpass.json').write_text(json.dumps({
+        'winner': sel2.winner, 'rationale': sel2.rationale,
+        'closed': (sel.acceptance.get('after_postpass') or {}).get('closed'),
+        'failing': closed_after.get(sel2.winner, []) if closed_after else [],
+        'candidates': records}, indent=2))
     if sel2.winner != sel.winner:
         log.info(f"[winner] {module}: after the post-pass {sel2.winner} replaces {sel.winner} ({sel2.rationale})")
     sel.winner = sel2.winner
     sel.rationale = f'after post-pass over {len(post)} candidates: {sel2.rationale}'
     return sel
-    s0, s1 = res['start'], res['end']
-    extra = ''
-    if res.get('buffers_inserted'):
-        extra += f", {res['buffers_inserted']} buffers"
-    if res.get('hold_before') and res.get('hold_after'):
-        hb, ha = res['hold_before'], res['hold_after']
-        extra += f", hold@fast {hb[0]:+.3f} -> {ha[0]:+.3f} ({res.get('delay_cells_inserted', 0)} delay cells)"
-    log.info(f"[resize] {module}: WNS {s0['wns_ns']:+.3f} -> {s1['wns_ns']:+.3f}  "
-             f"TNS {s0['tns_ns']:+.2f} -> {s1['tns_ns']:+.2f}  area {s0['area']:.0f} -> {s1['area']:.0f}  "
-             f"({len(res['moves'])} moves{extra})")
 
 
 def parse_cli() -> argparse.Namespace:
@@ -3003,6 +3060,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
     p.add_argument('--repair-design', action='store_true', help='buffer trees on high-fanout nets of failing paths (needs OpenSTA)')
     p.add_argument('--resize-candidates', type=int, help='run the post-pass on the N best candidates and select again (default 1)')
+    p.add_argument('--strict', action='store_true', help=f'exit {EXIT_NOT_CLOSED} when any module is NOT CLOSED under its required scenarios or misses setup at sign-off (post-pass phase failures always exit {EXIT_POSTPASS_FAIL})')
     p.add_argument('--recover-area', action='store_true', help='after the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies --resize)')
     p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
     p.add_argument('--max-fanout', type=int, help='sink group size for repair_design (default 8; SDC set_max_fanout overrides)')
@@ -3072,6 +3130,8 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
     if getattr(args, 'resize_candidates', None):
         cfg.resize_candidates = args.resize_candidates
         cfg.resize_winner = True
+    if getattr(args, 'strict', False):
+        cfg.strict = True
     if getattr(args, 'recover_area', False):
         cfg.resize_recover_area = True
         cfg.resize_winner = True
@@ -3393,7 +3453,7 @@ def main() -> int:
                 if m:
                     log.error(f"constraint hook {cfg.constraint_hook}: required binding '{m.group(1)}' resolved to "
                               f"{m.group(2)} object(s) on {module}/{job['recipe']} (see {lp}); aborting")
-                    sys.exit(3)
+                    sys.exit(EXIT_HOOK_FAIL)
         for rec, r in results_by_recipe.items():
             wns, tns = timing.get(rec, (None, None))
             cands.append(Candidate(
@@ -3426,6 +3486,7 @@ def main() -> int:
                         selections[module] = sel
                     else:
                         _resize_winner(cfg, module, mod_results, work / module / 'resize', log)
+                        _final_acceptance(cfg, module, mod_results, sel, work / module / 'scenarios', log)
             write_derived_sdc(cfg, sdc_constraints, mod_results / 'synth.sdc', sdc_overrides,
                               groups=module_groups.get(module))
             win_groups = work / module / f'{sel.winner}.groups.json'
@@ -3545,10 +3606,21 @@ def main() -> int:
     # ----- exit code -----
     if any(sel.winner is None for sel in selections.values()):
         return EXIT_SYNTH_FAIL
-    if cfg.fail_on_timing:
+    pp_fail = _postpass_failures(results, selections)
+    if pp_fail:
+        for m, bad in pp_fail.items():
+            log.error(f"[resize] {m}: post-pass phase(s) failed: {bad}")
+        log.error(f"exit {EXIT_POSTPASS_FAIL}: a post-pass phase aborted (results are the last accepted netlists)")
+        return EXIT_POSTPASS_FAIL
+    not_closed = sorted({m for m, cr in corners.items() if cr.closed is False} |
+                        {m for m, sel in selections.items() if (sel.acceptance.get('after_postpass') or sel.acceptance or {}).get('closed') is False})
+    if cfg.strict and not_closed:
+        log.error(f"exit {EXIT_NOT_CLOSED} (--strict): NOT CLOSED under required scenarios: {not_closed}")
+        return EXIT_NOT_CLOSED
+    if cfg.fail_on_timing or cfg.strict:
         for cr in corners.values():
             if cr.wns_setup_slow is not None and cr.wns_setup_slow < 0:
-                return EXIT_TIMING_FAIL
+                return EXIT_NOT_CLOSED if cfg.strict else EXIT_TIMING_FAIL
     if gls_result is not None and not gls_result.success:
         return EXIT_GLS_FAIL
     return EXIT_OK

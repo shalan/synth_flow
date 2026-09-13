@@ -188,7 +188,7 @@ cts_stage: pre_cts
 |---|---|---|---|
 | `scenarios` | map | `{}` | Named constraint scenarios: `sdc` (file), `rank` (exactly one `true`: ranking and synthesis use it), `required` (default `true`: governs acceptance), `corners` (subset of `slow`/`typ`/`fast`; omitted = every configured corner), `checks` (subset of `setup`, `hold`, `recovery`, `removal`; default all). A bare string is the SDC path. `sdc:` alone is the single scenario `default`. |
 | `scenario_check_candidates` | int | `3` | How many rank-meeting candidates (smallest area first, the selected one first) are tried against the required checks before falling back. |
-| `constraint_hook` | path | — | Tcl sourced by OpenSTA in **every** STA (ranking, post-pass, sign-off) after `link_design` and the scenario SDC. It sees the linked design and applies constraints directly. Variables: `synth_scenario`, `synth_corner`, `synth_module`. Procs: `require_binding NAME OBJECTS [-count N] [-min N] [-max N]` (records what resolved; nothing or a wrong count **fails the run**, exit code 3) and `optional_binding NAME OBJECTS`. The hook copy and every resolved binding are written to `results/<module>/constraint_hook.tcl` and `bindings.json`. |
+| `constraint_hook` | path | — | Tcl sourced by OpenSTA in **every** STA (ranking, post-pass, sign-off) after `link_design` and the scenario SDC. It sees the linked design and applies constraints directly. Variables: `synth_scenario`, `synth_corner`, `synth_module`. Procs: `require_binding NAME OBJECTS [-count N] [-min N] [-max N]` (records what resolved; nothing or a wrong count **fails the run**, exit code 7) and `optional_binding NAME OBJECTS`. The hook copy and every resolved binding are written to `results/<module>/constraint_hook.tcl` and `bindings.json`. |
 | `clock_budget` | map | `{}` | Per clock (`'*'` = all): `jitter_ps`, `skew_ps`, `setup_margin_ps`, `hold_margin_ps`, `skew_post_cts_ps`. Uncertainty: **setup = jitter + skew + setup_margin**, **hold = skew + hold_margin**; with `cts_stage: post_cts` the skew term is `skew_post_cts_ps`. Applied per clock after the flat `clock_uncertainty_*_ps`; the components are written to `synth.sdc` and the summary. An SDC `set_clock_uncertainty` still wins (sourced later). |
 | `cts_stage` | string | `pre_cts` | `pre_cts` or `post_cts`; selects the skew term above. |
 
@@ -200,7 +200,12 @@ scenario at each of its corners for each of its check types and path groups
 `scenario@corner: check slack` (log, `selection.json` → `acceptance`,
 summary). The same rule guards the post-pass: a sizing, buffering or hold
 move is rejected when a required check that passed on the input netlist
-would fail. Sign-off reports scenario × corner × check type (setup, hold,
+would fail. After the post-pass the required checks run again on the
+repaired netlists: with `resize_candidates > 1` only candidates passing them
+are eligible for re-selection, and `postpass.json` carries `closed`,
+`failing` and per-candidate `closed` / `failing`; with a single winner the
+result lands in `selection.json` → `acceptance.after_postpass`. A module
+that fails is reported NOT CLOSED at every stage, never as "meeting timing". Sign-off reports scenario × corner × check type (setup, hold,
 recovery, removal, worst path group) for every scenario, required or not.
 Ranking never uses the worst slack across scenarios: a fixed CDC bound and a
 functional clock-period violation are reported as what they are.
@@ -305,6 +310,7 @@ uppercase (e.g. `YOSYS=/opt/yosys/bin/yosys`).
 |---|---|---|---|
 | `run_sta` | bool | `true` | Run corner STA (slow + fast) on winners. Set false to skip and avoid the `lib_fast`/`lib_slow` requirements. |
 | `run_gls` | bool | `true` | Run gate-level simulation. Set false to skip and avoid the `tb_files`/`tb_top`/`primitives_dir` requirements. |
+| `strict` | bool | `false` | Exit code 6 when any module is NOT CLOSED under its required scenarios or misses setup at sign-off. A post-pass phase failure always exits 5, strict or not. Also `--strict`. |
 | `fail_on_timing` | bool | `true` | When `true`, exit code 2 if any winner has setup violation at the slow corner. When `false`, timing violations are reported but exit code stays 0 (useful for early characterization runs). |
 | `sdf_back_annotate` | bool | `true` | When true, GLS uses SDF back-annotation. The script writes SDF during STA and passes `+sdf_<module>=<path>` plusargs to vvp. The testbench is responsible for `$sdf_annotate` calls. |
 

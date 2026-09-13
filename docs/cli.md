@@ -90,8 +90,13 @@ results/
     lec.log          # equivalence proof log                       (Phase 4)
 ```
 
-Exit codes: `0` success, `1` tool or configuration error, `2` a winner has a
-setup violation (`fail_on_timing: true`), `3` equivalence not proven.
+Exit codes: `0` success, `1` no winner for a module, `2` a winner misses setup at
+the slow corner (`fail_on_timing`), `3` gate-level simulation failed, `4`
+configuration error, `5` a post-pass phase (sizing, buffering, recovery,
+hold) aborted on some module (the delivered netlists are the last accepted
+ones; see `resize.json` → `status`), `6` `--strict`: a module is NOT CLOSED
+under its required scenarios or misses setup, `7` the constraint hook's
+`require_binding` did not resolve.
 
 `summary.json` gains `env` (yosys, abc, opensta versions; recipe hashes;
 synth_flow git SHA) in Phase 6.
