@@ -364,12 +364,12 @@ mapping; `lib-hs-recover.csv` is HS alone with the same recovery flags).
 The CSV gains `leakage_uw_before/after` and `lib_mix_before/after` from
 `resize.json`.
 
-| | HS alone + recovery | HS+LS fastest mapping | HS+LS union mapping |
-|---|---|---|---|
-| designs meeting timing | 16 / 16 | 16 / 16 | 16 / 16 |
-| mean WNS (ns) | +0.702 | +0.299 | +0.280 |
-| mean area vs HS alone | — | +2.1 % | +8.3 % |
-| cells in LS after the post-pass | 0 % | 38 % (20449 / 53337) | 55 % (33661 / 61245) |
+| | HS alone + recovery | HS+LS fastest mapping | HS+LS union mapping | HS+MS+LS+LP |
+|---|---|---|---|---|
+| designs meeting timing | 16 / 16 | 16 / 16 | 16 / 16 | 16 / 16 |
+| mean WNS (ns) | +0.702 | +0.299 | +0.280 | +0.225 |
+| mean area vs HS alone | — | +2.1 % | +8.3 % | +1.5 % |
+| cells outside HS after the post-pass | 0 % | 38 % (20449 / 53337) | 55 % (33661 / 61245) | 68 % (MS 27 %, LP 24 %, LS 17 %) |
 
 Per design the LS share tracks the slack: `uart` 305/323, `zxip` 11350/14700,
 `fir8` 839/1331 in LS; `rr_arbiter16` 2/293, `mul32_mac` 64/4990, `crc32_8`

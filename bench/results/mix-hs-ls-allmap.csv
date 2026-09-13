@@ -1,0 +1,81 @@
+design,category,top,recipe,is_winner,cells,area_um2,wns_ns,tns_ns,abc_delay_ps,runtime_s,status,error,final_wns_slow,final_tns_slow,final_area_um2,leakage_uw_before,leakage_uw_after,lib_mix_before,lib_mix_after
+alu32,datapath,alu32,delay_choice_deep_v3,0,1657,13993.99,-1.081,-5.547,5583.68,1.8,ok,,,,,,,,
+alu32,datapath,alu32,orfs_area,0,1546,16022.36,-1.865,-11.327,5640.05,2.3,ok,,,,,,,,
+alu32,datapath,alu32,delay_map,1,2187,17779.00,0.858,0.000,3791.97,2.4,ok,,0.040,0.000,17633.55,475.59,326.22,hs:1697 ls:490,hs:1092 ls:1095
+alu32,datapath,alu32,delay_map_resyn,0,1913,14602.98,-0.508,-2.219,5573.53,2.9,ok,,,,,,,,
+alu32,datapath,alu32,delay_syn2,0,1632,15619.56,-1.178,-3.369,4604.81,1.3,ok,,,,,,,,
+mul16_pipe,datapath,mul16_pipe,delay_choice_deep_v3,1,1406,17320.26,1.043,0.000,5765.60,1.0,ok,,0.031,0.000,17313.87,618.93,547.26,hs:1170 ls:236,hs:1035 ls:371
+mul16_pipe,datapath,mul16_pipe,orfs_area,0,1526,17991.59,0.595,0.000,6128.15,1.2,ok,,,,,,,,
+mul16_pipe,datapath,mul16_pipe,delay_map,0,3415,29506.46,1.679,0.000,4535.95,1.5,ok,,,,,,,,
+mul16_pipe,datapath,mul16_pipe,delay_map_resyn,0,2655,24068.71,1.526,0.000,4728.32,1.5,ok,,,,,,,,
+mul16_pipe,datapath,mul16_pipe,delay_syn2,0,1529,17817.36,-0.103,-0.103,6493.83,1.1,ok,,,,,,,,
+mul32_mac,datapath,mul32_mac,delay_choice_deep_v3,0,4990,54304.04,-0.048,-0.048,7354.12,1.7,ok,,,,,,,,
+mul32_mac,datapath,mul32_mac,orfs_area,0,4736,58387.95,-1.362,-1.362,8582.19,2.4,ok,,,,,,,,
+mul32_mac,datapath,mul32_mac,delay_map,0,12187,99455.64,0.075,0.000,5737.17,3.3,ok,,,,,,,,
+mul32_mac,datapath,mul32_mac,delay_map_resyn,1,9192,75692.23,0.424,0.000,6162.89,3.4,ok,,0.011,0.000,75679.44,2589.54,2553.85,hs:8652 ls:540,hs:8533 ls:659
+mul32_mac,datapath,mul32_mac,delay_syn2,0,4943,57420.92,-0.727,-0.727,8051.40,2.0,ok,,,,,,,,
+fir8,dsp,fir8,delay_choice_deep_v3,1,1331,17769.41,1.868,0.000,7195.13,0.9,ok,,0.030,0.000,17630.35,472.15,329.05,hs:1010 ls:321,hs:736 ls:595
+fir8,dsp,fir8,delay_map_resyn,0,2401,21778.20,3.390,0.000,6223.89,1.3,ok,,,,,,,,
+fir8,dsp,fir8,delay_map,0,3032,26097.08,2.137,0.000,6039.48,1.4,ok,,,,,,,,
+fir8,dsp,fir8,orfs_area,0,1911,22531.05,1.513,0.000,7022.71,1.4,ok,,,,,,,,
+fir8,dsp,fir8,delay_syn2,0,1757,20441.94,1.456,0.000,7103.02,1.0,ok,,,,,,,,
+aes_round,crypto,aes_round,orfs_area,0,8509,79999.92,-0.998,-91.738,3346.79,3.1,ok,,,,,,,,
+aes_round,crypto,aes_round,delay_choice_deep_v3,0,7161,71235.89,-0.725,-36.527,3800.77,3.2,ok,,,,,,,,
+aes_round,crypto,aes_round,delay_map_resyn,1,10849,87990.32,0.092,0.000,2947.34,4.7,ok,,0.031,0.000,87900.81,2247.79,1935.84,hs:8696 ls:2153,hs:7607 ls:3242
+aes_round,crypto,aes_round,delay_map,0,11855,98410.29,0.281,0.000,2904.36,5.0,ok,,,,,,,,
+aes_round,crypto,aes_round,delay_syn2,0,8022,74784.34,-3.080,-338.980,3315.40,2.7,ok,,,,,,,,
+sha256_core,crypto,sha256_core,delay_choice_deep_v3,0,7670,93054.05,-11.124,-9074.146,8831.54,2.1,ok,,,,,,,,
+sha256_core,crypto,sha256_core,orfs_area,0,7729,98608.49,-42.351,-37589.852,9221.39,3.0,ok,,,,,,,,
+sha256_core,crypto,sha256_core,delay_map,0,10163,104198.10,-5.689,-5312.022,7112.85,3.1,ok,,,,,,,,
+sha256_core,crypto,sha256_core,delay_map_resyn,1,10027,101017.28,2.336,0.000,7458.03,3.3,ok,,0.021,0.000,100150.95,1987.04,1380.11,hs:6434 ls:3593,hs:4634 ls:5393
+sha256_core,crypto,sha256_core,delay_syn2,0,7762,94099.41,-0.434,-1.471,9275.52,2.0,ok,,,,,,,,
+crc32_8,logic,crc32_8,delay_choice_deep_v3,1,195,3057.74,0.275,0.000,1933.35,0.6,ok,,0.024,0.000,3032.16,75.16,55.45,hs:159 ls:36,hs:122 ls:73
+crc32_8,logic,crc32_8,orfs_area,0,208,3032.16,-0.069,-0.138,2090.25,0.7,ok,,,,,,,,
+crc32_8,logic,crc32_8,delay_map,0,343,3944.85,0.481,0.000,1654.35,0.7,ok,,,,,,,,
+crc32_8,logic,crc32_8,delay_map_resyn,0,355,4002.39,0.587,0.000,1485.75,0.7,ok,,,,,,,,
+crc32_8,logic,crc32_8,delay_syn2,0,204,2851.55,-0.120,-0.120,2163.68,0.6,ok,,,,,,,,
+rr_arbiter16,logic,rr_arbiter16,delay_choice_deep_v3,1,293,4123.87,-0.967,-16.112,3764.30,0.7,ok,,0.002,0.000,4440.36,96.21,119.19,hs:210 ls:83,hs:215 ls:78
+rr_arbiter16,logic,rr_arbiter16,orfs_area,0,280,4050.35,-1.518,-24.726,3934.75,0.7,ok,,,,,,,,
+rr_arbiter16,logic,rr_arbiter16,delay_map,0,565,5351.44,-1.359,-27.037,2803.70,0.8,ok,,,,,,,,
+rr_arbiter16,logic,rr_arbiter16,delay_map_resyn,0,555,5340.25,-1.150,-21.411,2813.04,0.8,ok,,,,,,,,
+rr_arbiter16,logic,rr_arbiter16,delay_syn2,0,317,4358.84,-1.025,-15.847,3592.36,0.6,ok,,,,,,,,
+uart,control,uart,orfs_area,0,330,5127.67,0.443,0.000,1950.23,0.7,ok,,,,,,,,
+uart,control,uart,delay_choice_deep_v3,1,323,5046.15,0.187,0.000,2034.09,0.7,ok,,0.015,0.000,5025.37,72.15,27.08,hs:190 ls:133,hs:60 ls:263
+uart,control,uart,delay_map_resyn,0,386,5653.54,0.516,0.000,1824.78,0.7,ok,,,,,,,,
+uart,control,uart,delay_map,0,418,5883.71,0.642,0.000,1553.80,0.7,ok,,,,,,,,
+uart,control,uart,delay_syn2,0,311,5090.90,0.309,0.000,1933.35,0.6,ok,,,,,,,,
+spi_master,control,spi_master,orfs_area,0,370,6294.50,-0.498,-12.307,1932.24,0.7,ok,,,,,,,,
+spi_master,control,spi_master,delay_map_resyn,0,510,6588.60,-0.283,-4.353,1742.52,0.7,ok,,,,,,,,
+spi_master,control,spi_master,delay_choice_deep_v3,0,357,6155.44,-1.131,-48.817,2170.08,0.7,ok,,,,,,,,
+spi_master,control,spi_master,delay_map,1,539,7622.77,0.202,0.000,1563.65,0.9,ok,,0.019,0.000,7456.54,111.49,53.13,hs:337 ls:202,hs:176 ls:363
+spi_master,control,spi_master,delay_syn2,0,370,6540.65,-0.849,-21.779,1690.47,0.7,ok,,,,,,,,
+apb_timer,peripheral,apb_timer,delay_choice_deep_v3,1,973,14633.35,0.265,0.000,3285.64,0.8,ok,,0.018,0.000,14633.35,232.83,115.34,hs:643 ls:330,hs:360 ls:613
+apb_timer,peripheral,apb_timer,orfs_area,0,1040,15804.98,-2.167,-342.210,3084.00,0.8,ok,,,,,,,,
+apb_timer,peripheral,apb_timer,delay_map_resyn,0,1363,15892.89,0.659,0.000,2606.75,1.1,ok,,,,,,,,
+apb_timer,peripheral,apb_timer,delay_map,0,1393,16495.49,0.667,0.000,2306.22,1.3,ok,,,,,,,,
+apb_timer,peripheral,apb_timer,delay_syn2,0,975,15178.41,-1.746,-301.183,2613.80,0.8,ok,,,,,,,,
+fifo_sync,memory,fifo_sync,orfs_area,0,1750,34501.46,-2.156,-66.178,1944.71,0.8,ok,,,,,,,,
+fifo_sync,memory,fifo_sync,delay_choice_deep_v3,0,1654,32920.65,-0.003,-0.087,2445.27,1.0,ok,,,,,,,,
+fifo_sync,memory,fifo_sync,delay_map,1,2577,37570.39,0.348,0.000,1799.61,1.2,ok,,0.002,0.000,37552.81,483.85,473.05,hs:1359 ls:1218,hs:1335 ls:1242
+fifo_sync,memory,fifo_sync,delay_map_resyn,0,2708,38344.02,0.461,0.000,1752.98,1.4,ok,,,,,,,,
+fifo_sync,memory,fifo_sync,delay_syn2,0,1870,35834.53,-4.017,-124.131,2034.19,0.8,ok,,,,,,,,
+zx16_core_ahb,cpu,zx16_core_ahb,delay_choice_deep_v3,0,2196,27110.46,-0.800,-41.704,5303.24,1.5,ok,,,,,,,,
+zx16_core_ahb,cpu,zx16_core_ahb,orfs_area,0,2366,28870.30,-1.038,-111.732,4643.81,1.6,ok,,,,,,,,
+zx16_core_ahb,cpu,zx16_core_ahb,delay_map_resyn,1,2772,28042.33,0.740,0.000,4720.46,2.0,ok,,0.038,0.000,27738.63,580.98,330.44,hs:1886 ls:886,hs:1091 ls:1681
+zx16_core_ahb,cpu,zx16_core_ahb,delay_map,0,3035,30097.87,0.510,0.000,4283.09,2.1,ok,,,,,,,,
+zx16_core_ahb,cpu,zx16_core_ahb,delay_syn2,0,2395,27666.71,-1.108,-57.505,4963.30,1.4,ok,,,,,,,,
+zxip,soc_ip,zxip_top,orfs_area,0,15247,223135.04,-0.799,-37.420,4058.07,4.6,ok,,,,,,,,
+zxip,soc_ip,zxip_top,delay_choice_deep_v3,0,14697,218446.93,-0.386,-2.216,3846.00,5.1,ok,,,,,,,,
+zxip,soc_ip,zxip_top,delay_map_resyn,0,20755,228390.58,0.049,0.000,3130.46,8.6,ok,,,,,,,,
+zxip,soc_ip,zxip_top,delay_map,0,22533,240476.08,0.202,0.000,3170.24,9.2,ok,,,,,,,,
+zxip,soc_ip,zxip_top,delay_syn2,1,15138,220847.73,0.137,0.000,3797.16,4.9,ok,,0.137,0.000,219997.38,3280.98,305.06,hs:7237 ls:7901,hs:588 ls:14550
+ms_psram_ahb,soc_ip,ms_psram_ahb,orfs_area,0,2283,36809.55,-1.351,-4.054,2943.31,1.1,ok,,,,,,,,
+ms_psram_ahb,soc_ip,ms_psram_ahb,delay_choice_deep_v3,0,2261,35983.18,-0.382,-1.145,2731.82,1.2,ok,,,,,,,,
+ms_psram_ahb,soc_ip,ms_psram_ahb,delay_map_resyn,0,2764,35286.28,-1.373,-4.118,2672.24,1.4,ok,,,,,,,,
+ms_psram_ahb,soc_ip,ms_psram_ahb,delay_map,0,3102,36844.72,-1.923,-6.164,2642.70,1.7,ok,,,,,,,,
+ms_psram_ahb,soc_ip,ms_psram_ahb,delay_syn2,1,2126,35617.15,0.494,0.000,2698.98,1.1,ok,,0.117,0.000,34459.91,466.67,9.48,hs:1197 ls:929,ls:2126
+uart_apb_sys,soc_ip,uart_apb_sys,orfs_area,0,1435,23478.90,3.244,0.000,2070.02,1.1,ok,,,,,,,,
+uart_apb_sys,soc_ip,uart_apb_sys,delay_map_resyn,0,1869,24359.62,3.198,0.000,1909.36,1.2,ok,,,,,,,,
+uart_apb_sys,soc_ip,uart_apb_sys,delay_map,0,1805,23891.28,3.315,0.000,1775.78,1.3,ok,,,,,,,,
+uart_apb_sys,soc_ip,uart_apb_sys,delay_choice_deep_v3,1,1317,21301.88,4.548,0.000,2378.90,1.4,ok,,3.938,0.000,21014.16,307.98,5.97,hs:873 ls:444,ls:1317
+uart_apb_sys,soc_ip,uart_apb_sys,delay_syn2,0,1450,23052.12,4.361,0.000,2158.88,1.2,ok,,,,,,,,
