@@ -542,6 +542,31 @@ STA-call and path-count budgets; the report describes the delivered netlist
 parallel with content-keyed checkpoints (a rerun with unchanged inputs takes
 seconds).
 
+### 2.15 Named scenarios: rank on one, accept on all
+
+One SDC cannot describe a functional mode, a scan mode and a sleep mode at
+once, and one worst-slack number cannot tell a fixed CDC bound from a clock
+period violation. Scenarios fix both: the `rank: true` scenario drives
+synthesis and ranking exactly as `sdc:` did; every `required` scenario is
+then checked at each of its corners for each check type (setup, hold,
+recovery, removal, via `report_check_types -verbose`) and each path group
+(fixed bounds included). The smallest-area candidate passing everything is
+the winner; otherwise the fallback choice is delivered and marked NOT CLOSED
+with the failing `scenario@corner: check slack` list. The post-pass applies
+the same rule: a move is rejected when a required check that passed on the
+input netlist would fail. A Tcl constraint hook runs after `link_design` in
+every session, with `synth_scenario` / `synth_corner` / `synth_module` set
+and a binding audit (`require_binding`) that aborts the run (exit 3) when a
+required object is missing. Clock uncertainty can come from an explicit
+budget (setup = jitter + skew + margin, hold = skew + margin, pre/post-CTS
+skew) whose components are reported.
+
+On the SRAM wrapper with `func` (rank) and `sleep` (slow corner only):
+both candidates pass 4 required checks and the module is closed; with a
+0.5 ns `set_max_delay` in `sleep`, both fail by −4.3 ns, the winner is
+delivered NOT CLOSED with `sleep@slow: setup -4.256` listed, and a hook
+requiring a non-existent cell aborts the run before ranking.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

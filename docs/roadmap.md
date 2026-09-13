@@ -165,10 +165,7 @@ bench exists.
 
 - Resumable, content-addressed sweeps (skip recipes whose inputs did not
   change) and a final-netlist frequency check (`Fmax` from the sign-off STA).
-- Named constraint scenarios and an optional post-mapping constraint
-  generation hook, used consistently by ranking, repair and final STA; reset
-  states, CDC declarations and clock modes stay project-owned inputs.
-- Hold uncertainty tied to the clock budget and analysis stage (today:
-  `clock_uncertainty_hold_ps`, independent of setup).
+- ~~Named constraint scenarios, constraint hook, clock budget~~ — done
+  (`scenarios`, `constraint_hook`, `clock_budget`; architecture §2.15).
 - Regressions still to add: generated-clock endpoints in hold repair,
   rejected-repair rollback end to end.

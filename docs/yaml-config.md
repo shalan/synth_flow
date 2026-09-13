@@ -171,6 +171,40 @@ These are required only when `run_gls: true` (the default). Set
 |---|---|---|---|
 | `dont_use` | list | `[]` | Liberty cell names or glob patterns passed as `-dont_use` to `abc` and `dfflibmap` (also `--dont-use`; SDC `set_dont_use` entries are merged in). Required with a full PDK liberty, e.g. `['sky130_fd_sc_hd__lpflow_*', 'sky130_fd_sc_hd__probe*', 'sky130_fd_sc_hd__dly*', 'sky130_fd_sc_hd__clkdly*', 'sky130_fd_sc_hd__sdlclkp*']`. The bundled `hd_120` subset already excludes them. |
 
+### Constraint scenarios, hook and clock budget
+
+```yaml
+scenarios:
+  func:  {sdc: sdc/func.sdc, rank: true}          # ranking uses this one
+  scan:  {sdc: sdc/scan.sdc, checks: [hold]}       # required, hold checks only
+  sleep: {sdc: sdc/sleep.sdc, corners: [slow]}     # checked at the slow corner only
+constraint_hook: sdc/post_map.tcl
+clock_budget:
+  clk: {jitter_ps: 50, skew_ps: 150, setup_margin_ps: 0, hold_margin_ps: 20, skew_post_cts_ps: 40}
+cts_stage: pre_cts
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `scenarios` | map | `{}` | Named constraint scenarios: `sdc` (file), `rank` (exactly one `true`: ranking and synthesis use it), `required` (default `true`: governs acceptance), `corners` (subset of `slow`/`typ`/`fast`; omitted = every configured corner), `checks` (subset of `setup`, `hold`, `recovery`, `removal`; default all). A bare string is the SDC path. `sdc:` alone is the single scenario `default`. |
+| `scenario_check_candidates` | int | `3` | How many rank-meeting candidates (smallest area first, the selected one first) are tried against the required checks before falling back. |
+| `constraint_hook` | path | — | Tcl sourced by OpenSTA in **every** STA (ranking, post-pass, sign-off) after `link_design` and the scenario SDC. It sees the linked design and applies constraints directly. Variables: `synth_scenario`, `synth_corner`, `synth_module`. Procs: `require_binding NAME OBJECTS [-count N] [-min N] [-max N]` (records what resolved; nothing or a wrong count **fails the run**, exit code 3) and `optional_binding NAME OBJECTS`. The hook copy and every resolved binding are written to `results/<module>/constraint_hook.tcl` and `bindings.json`. |
+| `clock_budget` | map | `{}` | Per clock (`'*'` = all): `jitter_ps`, `skew_ps`, `setup_margin_ps`, `hold_margin_ps`, `skew_post_cts_ps`. Uncertainty: **setup = jitter + skew + setup_margin**, **hold = skew + hold_margin**; with `cts_stage: post_cts` the skew term is `skew_post_cts_ps`. Applied per clock after the flat `clock_uncertainty_*_ps`; the components are written to `synth.sdc` and the summary. An SDC `set_clock_uncertainty` still wins (sourced later). |
+| `cts_stage` | string | `pre_cts` | `pre_cts` or `post_cts`; selects the skew term above. |
+
+**Acceptance rule.** With `scenarios:` given, the winner is the smallest-area
+candidate that meets the ranking scenario **and** passes every required
+scenario at each of its corners for each of its check types and path groups
+(fixed `set_max_delay` / `set_min_delay` bounds included). If none passes,
+`fallback` applies and the module is marked **NOT CLOSED** with every failing
+`scenario@corner: check slack` (log, `selection.json` → `acceptance`,
+summary). The same rule guards the post-pass: a sizing, buffering or hold
+move is rejected when a required check that passed on the input netlist
+would fail. Sign-off reports scenario × corner × check type (setup, hold,
+recovery, removal, worst path group) for every scenario, required or not.
+Ranking never uses the worst slack across scenarios: a fixed CDC bound and a
+functional clock-period violation are reported as what they are.
+
 ### Post-pass: winner sizing
 
 | Field | Type | Default | Notes |
