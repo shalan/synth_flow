@@ -445,6 +445,58 @@ with tempfile.TemporaryDirectory() as td:
           _res['end']['wns_ns'] == 0.05 and 'buf_2 b1' in Path(_res['output']).read_text()
           and _res['status']['repair_hold'].startswith('failed') and _res['status']['sizing'] == 'ok',
           str((_res['end'], _res['status'])))
+# --- escaped identifiers: STA names map back to the netlist; ports are validated --
+from resize import sta_name, name_alias, output_ports, parse_sta_report
+_esc = ("module t(clk, a, y, \\yb[0] );\n  input clk; input a; output y; output \\yb[0] ;\n  output [1:0] z;\n  wire n1; wire \\n[2] ;\n"
+        "  sky130_fd_sc_hd__inv_1 \\cg[0] (\n    .A(a),\n    .Y(n1)\n  );\n"
+        "  sky130_fd_sc_hd__dfxtp_1 \\u_cg.lat[1] (\n    .CLK(clk),\n    .D(n1),\n    .Q(\\n[2] )\n  );\n"
+        "  sky130_fd_sc_hd__buf_1 plain (\n    .A(\\n[2] ),\n    .X(y)\n  );\nendmodule\n")
+_al = name_alias(_esc)
+check('name_alias maps OpenSTA spellings of escaped instances/nets/ports to the Verilog names', _al.get('u_cg.lat[1]') == '\\u_cg.lat[1]' and _al.get('cg[0]') == '\\cg[0]' and _al.get('yb[0]') == '\\yb[0]' and _al.get('n[2]') == '\\n[2]' and 'plain' not in _al, str(_al))
+check('output_ports lists scalar, escaped and vector-bit outputs', output_ports(_esc) == {'y', '\\yb[0]', 'z', 'z[0]', 'z[1]'}, str(output_ports(_esc)))
+_rep = ('Startpoint: a (input port clocked by clk)\nEndpoint: u_cg.lat[1] (rising edge-triggered flip-flop clocked by clk)\n'
+        '     1    0.0100    0.0200    0.0300    0.0172 ^ cg[0]/Y (sky130_fd_sc_hd__inv_1)\n'
+        '     1    0.0100    0.0200    0.0300    0.0172 ^ u_cg.lat[1]/D (sky130_fd_sc_hd__dfxtp_1)\n'
+        '         -0.1234   slack (VIOLATED)\nEndpoint: yb[0] (output port clocked by clk)\n         -0.0500   slack (VIOLATED)\nworst slack min -0.1234\ntns min -0.1734\n')
+_so = parse_sta_report(_rep, _al)
+check('STA report parser returns Verilog names for escaped endpoints and stages', [p.endpoint for p in _so.paths] == ['\\u_cg.lat[1]', '\\yb[0]'] and _so.paths[0].stages[-1].inst == '\\u_cg.lat[1]' and _so.paths[0].stages[0].inst == '\\cg[0]' and _so.wns == -0.1234, str([(p.endpoint, [s.inst for s in p.stages]) for p in _so.paths]))
+_nle = Netlist(_esc, liberty_output_pins(_lc))
+check('escaped instance is found in the netlist model and its output port validated', '\\u_cg.lat[1]' in _nle.inst and '\\yb[0]' in _nle.out_ports and 'u_cg.lat[1]' not in _nle.out_ports)
+
+# --- rollback restores the inserted-cell counters ------------------------------
+with tempfile.TemporaryDirectory() as td:
+    import resize as _rz
+    from resize import StaOut as _SO, PathInfo as _PI, Stage as _ST
+    _nlt = ("module top(clk, a, y);\n  input clk; input a; output y;\n  wire n1; wire n2;\n"
+            "  sky130_fd_sc_hd__inv_1 i1 (\n    .A(a),\n    .Y(n1)\n  );\n"
+            "  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(n2)\n  );\n"
+            "  sky130_fd_sc_hd__dfxtp_1 f1 (\n    .CLK(clk),\n    .D(n2),\n    .Q(y)\n  );\nendmodule\n")
+    _in = Path(td) / 'in.v'; _in.write_text(_nlt)
+    def _fake_sta2(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode='max', extra_libs=(), alias=None):
+        txt = Path(netlist).read_text()
+        has_delay = '_rd_' in txt
+        if mode == 'min':      # hold: violated until a delay cell is in
+            return _SO(ok=True, wns=0.1 if has_delay else -0.2, tns=0.0 if has_delay else -0.2,
+                       paths=[] if has_delay else [_PI(endpoint='f1', slack=-0.2, stages=[_ST('f1', 'D', 'sky130_fd_sc_hd__dfxtp_1', 0.1, 1, 0.01, 0.1)])])
+        if has_delay:          # the delay cell costs setup TNS (within the hold phase's 0.05 tolerance)
+            return _SO(ok=True, wns=0.05, tns=-0.04, paths=[])
+        if 'buf_2 b1' in txt:
+            return _SO(ok=True, wns=0.05, tns=0.0, paths=[])
+        return _SO(ok=True, wns=-0.10, tns=-0.10,
+                   paths=[_PI(endpoint='f1', slack=-0.10, stages=[_ST('b1', 'X', 'sky130_fd_sc_hd__buf_1', 0.30, 1, 0.01, 0.1)])])
+    _orig = (_rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section)
+    _rz.run_sta = _fake_sta2; _rz.area_of = lambda *a, **k: 100.0
+    _rz.sf._sta_constraints = lambda **k: ''; _rz.sf._wire_load_section = lambda *a, **k: ''
+    try:
+        _res = _rz.resize(_in, 'top', str(LIB_SS), str(LIB_SS), 1000, 'clk', Path(td) / 'out', iters=3,
+                          repair_hold=True, lib_fast=str(LIB_SS), log=lambda *x: None)
+    finally:
+        _rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section = _orig
+    _out = Path(_res['output']).read_text()
+    check('rollback to the best-TNS state restores counters and cell count to the delivered netlist',
+          _res['timing']['rolled_back'] and '_rd_' not in _out and _res['delay_cells_inserted'] == 0
+          and _res['cells_end'] == 3 and _res['end']['tns_ns'] == 0.0 and _res['status']['repair_hold'] == 'ok',
+          str((_res['timing'], _res['delay_cells_inserted'], _res['cells_end'], _res['end'], _res['status'])))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
