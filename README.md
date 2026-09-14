@@ -204,6 +204,7 @@ Precedence and the full list: [docs/sdc-support.md](docs/sdc-support.md).
 | `--resize-candidates N` | Post-pass on the N best candidates (selected, fastest, Pareto front), then select again (implies `--resize`) |
 | `--strict` | Exit 6 when a module is NOT CLOSED under its required scenarios or misses setup (a post-pass phase failure always exits 5) |
 | `--sta-session` | Post-pass: one persistent OpenSTA process per corner (liberties read once) instead of a process per trial |
+| `--recover-power` | Recovery scored by total power (`report_power`): swap/downsize off-critical cells while power drops, area does not grow and WNS holds |
 | `--yosys-opts T...` | Front-end options: `booth`, `adder=kogge-stone\|han-carlson\|sklansky`, `noshare`, `hieropt`, `opt_dff_sat`, `opt_full`. Sweep several, globally or per module, with `yosys_opts_sweep` in YAML |
 | `--objective OBJ` | Recipe subset to run: `delay`, `area`, `balanced` (default). Selection is always min-area-meeting-timing |
 | `--full-sweep` | Run every recipe instead of the objective subset |
