@@ -70,7 +70,8 @@ COLUMNS = ['design', 'category', 'top', 'recipe', 'is_winner', 'cells', 'area_um
            # post-pass extras when a resize.json exists: leakage (uW, from the liberty) and cells per library
            'leakage_uw_before', 'leakage_uw_after', 'lib_mix_before', 'lib_mix_after',
            # OpenSTA report_power at sign-off (winner only): dynamic = internal + switching, static = leakage
-           'power_dynamic_uw', 'power_static_uw', 'power_total_uw']
+           'power_dynamic_uw', 'power_static_uw', 'power_total_uw',
+           'drc_violations']
 
 
 # --------------------------------------------------------------------------
@@ -227,6 +228,9 @@ def run_design(d: dict, args, run_sta: bool) -> list[dict]:
 
     corner = mod.get('corner') or {}
     power = {}
+    drc = corner.get('drc') or {}
+    if drc:
+        power['drc_violations'] = sum(drc.get(k, 0) for k in ('max_slew', 'max_capacitance', 'max_fanout'))
     tot = (corner.get('power') or {}).get('total')
     if tot:
         power = {'power_dynamic_uw': f"{(tot['internal_w'] + tot['switching_w']) * 1e6:.2f}",

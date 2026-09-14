@@ -646,6 +646,25 @@ same 91 swaps to LS and the measured total drops 1210 → 1094 µW (−9.6 %) at
 power (a library whose liberty reports zero leakage looks free to the area
 score) or when a batch has to be bisected.
 
+### 2.19 Electrical checks and their repair
+
+OpenSTA checks max transition, max capacitance and max fanout against the
+liberty pin limits and the SDC, and the SRAM wrapper showed what an
+unrepaired netlist looks like: the reset input driving 40 async pins at
+2.5 ns transition against a 1.5 ns limit, an SRAM output bit with 7 sinks
+against a fanout limit of 4. Sign-off now lists those per module
+(`report_check_types -violators` at the slow corner), and `repair_drc: true`
+fixes them in the post-pass with the machinery the timing repairs already
+have: the violating net's driver is upsized when a stronger variant exists
+(slew and capacitance), else the net is split into buffer trees sized from
+the fanout limit or the limit/actual ratio; a batch is kept when the summed
+DRC slack improves and setup stays within the hold-phase tolerance, bisected
+otherwise. SRAM wrapper: 121 violations → 8 with 37 buffers and 22 driver
+upsizes (`dfrtp_1` → `dfrtp_2` on the flops feeding the wide nets), setup
++0.794 → +0.621 ns, netlist simulation-equivalent; the 8 that remain are
+SRAM address pins whose 40 ps transition limit no standard-cell driver
+meets.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

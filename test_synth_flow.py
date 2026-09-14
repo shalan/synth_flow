@@ -533,7 +533,7 @@ with tempfile.TemporaryDirectory() as td:
         _rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section = _orig
     _ok_txt = Path(_ok['output']).read_text(); _no_txt = Path(_no['output']).read_text()
     check('guard callable is consulted by sizing, area recovery and hold repair (no phase failure)',
-          _ok['status'] == {'repair_design': 'skipped', 'recover_area': 'ok', 'repair_hold': 'ok', 'sizing': 'ok'} and _n_yes >= 3
+          {k: _ok['status'][k] for k in ('repair_design', 'recover_area', 'repair_hold', 'sizing')} == {'repair_design': 'skipped', 'recover_area': 'ok', 'repair_hold': 'ok', 'sizing': 'ok'} and _n_yes >= 3
           and 'inv_1 i1' in _ok_txt and '_rd_' in _ok_txt, str((_ok['status'], _n_yes, 'inv_1 i1' in _ok_txt, '_rd_' in _ok_txt)))
     check('a refusing guard rejects recovery and hold moves and keeps the phases healthy',
           _no['status']['recover_area'] == 'ok' and _no['status']['repair_hold'] == 'ok' and 'inv_2 i1' in _no_txt
@@ -650,6 +650,57 @@ with tempfile.TemporaryDirectory() as td:
           'inv_1 i1' in _pt and 'buf_2 b1' in _pt and _pw['start']['power_w'] == 1.0e-3 and _pw['end']['power_w'] == 8.0e-4
           and _pw['recover_objective'] == 'power' and _pw['status']['recover_area'] == 'ok' and 'i1' in _seen.get('insts', []),
           str((_pw['start'].get('power_w'), _pw['end'].get('power_w'), _pw['status'], _seen)))
+# --- electrical checks: parser and repair phase -----------------------------------
+from resize import parse_drc, drc_summary
+_drc_txt = '''>>> DRC_BEGIN
+max slew
+
+Pin                                      Limit      Slew     Slack
+------------------------------------------------------------------
+rst_n                                   1.4983    2.5420   -1.0437 (VIOLATED)
+u_cg.lat[1]/RESET_B                     1.5000    2.5420   -1.0420 (VIOLATED)
+
+max fanout
+
+Pin                                   Limit Fanout  Slack
+---------------------------------------------------------
+u_sram/dout0[31]                          4      7     -3 (VIOLATED)
+
+max capacitance
+
+Pin                                      Limit       Cap     Slack
+------------------------------------------------------------------
+rst_n                                   0.2097    0.3592   -0.1495 (VIOLATED)
+>>> DRC_END'''
+_v = parse_drc(_drc_txt, {'u_cg.lat[1]': '\\u_cg.lat[1]'})
+check('DRC violator parser: kinds, values, escaped instance names mapped back', _v['max_slew'][1][0] == '\\u_cg.lat[1]/RESET_B' and _v['max_fanout'] == [('u_sram/dout0[31]', 4.0, 7.0, -3.0)] and _v['max_capacitance'][0][3] == -0.1495 and drc_summary(_v) == {'max_slew': 2, 'max_capacitance': 1, 'max_fanout': 1, 'total_slack': -5.2352}, str((_v, drc_summary(_v))))
+with tempfile.TemporaryDirectory() as td:
+    import resize as _rz
+    from resize import StaOut as _SO
+    _nl5 = ("module top(clk, a, y0, y1, y2, y3, y4);\n  input clk; input a; output y0; output y1; output y2; output y3; output y4;\n  wire n1;\n"
+            "  sky130_fd_sc_hd__inv_1 i1 (\n    .A(a),\n    .Y(n1)\n  );\n"
+            + ''.join(f"  sky130_fd_sc_hd__buf_1 b{k} (\n    .A(n1),\n    .X(y{k})\n  );\n" for k in range(5)) + "endmodule\n")
+    _in = Path(td) / 'in.v'; _in.write_text(_nl5)
+    def _fake_sta5(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode='max', extra_libs=(), alias=None, power=False, **kw):
+        return _SO(ok=True, wns=0.3, tns=0.0, paths=[])
+    def _fake_drc(opensta, liberty, netlist, top, constraints, out_dir, tag, extra_libs=()):
+        txt = Path(netlist).read_text()
+        # n1 (driven by i1) violates max fanout 3 with 5 sinks until it is split
+        if txt.count('.A(n1)') > 3:
+            return {'max_slew': [], 'max_capacitance': [], 'max_fanout': [('i1/Y', 3.0, 5.0, -2.0)]}
+        return {'max_slew': [], 'max_capacitance': [], 'max_fanout': []}
+    _orig = (_rz.run_sta, _rz.run_drc, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section)
+    _rz.run_sta = _fake_sta5; _rz.run_drc = _fake_drc; _rz.area_of = lambda *a, **k: 100.0
+    _rz.sf._sta_constraints = lambda **k: ''; _rz.sf._wire_load_section = lambda *a, **k: ''
+    try:
+        _dr = _rz.resize(_in, 'top', str(LIB_SS), str(LIB_SS), 1000, 'clk', Path(td) / 'drc', iters=1, repair_drc=True, log=lambda *x: None)
+    finally:
+        _rz.run_sta, _rz.run_drc, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section = _orig
+    _dt = Path(_dr['output']).read_text()
+    check('DRC repair: a max-fanout violation is fixed with a buffer tree of the limit size; counts before/after recorded',
+          _dr['status']['repair_drc'] == 'ok' and _dr['drc_before']['max_fanout'] == 1 and _dr['drc_after']['max_fanout'] == 0
+          and _dr['drc_buffers'] == 2 and _dt.count('buf_2 _rd_') == 2 and _dt.count('.A(n1)') == 2,
+          str((_dr['status'], _dr['drc_before'], _dr['drc_after'], _dr['drc_buffers'], _dt.count('.A(n1)'))))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

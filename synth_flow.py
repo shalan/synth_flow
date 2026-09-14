@@ -310,7 +310,14 @@ class Config:
     # Any of resize_winner / repair_design / repair_hold enables the pass.
     repair_design: bool = False
     repair_hold: bool = False
-    max_fanout: int = 8                # SDC set_max_fanout overrides
+    max_fanout: int = 8
+    # electrical checks: fix max transition / capacitance / fanout violations
+    # (limits from the liberty or the SDC) by upsizing the driver, else buffer
+    # trees sized from the limit/actual ratio; kept only if the summed DRC
+    # slack improves and setup stays. Also --repair-drc. Counts in resize.json
+    # (drc_before / drc_after) and the sign-off summary.
+    repair_drc: bool = False
+    drc_iters: int = 4                # SDC set_max_fanout overrides
     repair_buffer_cell: Optional[str] = None   # default: second-weakest buffer of the liberty
     repair_delay_cell: Optional[str] = None    # default: slowest buffer (dlygate when present)
     resize_iters: int = 25
@@ -2178,9 +2185,12 @@ puts "GROUPS HOLD"
 report_checks -path_delay min -group_path_count 1 -format slack_only -digits 4
 puts ">>> GROUPS_END"
 {power_section}
+{drc_section}
 {sdf_line}
 exit
 """
+
+DRC_SECTION_TCL = 'puts ">>> DRC_BEGIN"\nreport_check_types -max_slew -max_capacitance -max_fanout -violators -digits 4\nputs ">>> DRC_END"\n'
 
 POWER_TCL = """\
 puts ">>> POWER_BEGIN"
@@ -2269,6 +2279,8 @@ class CornerResult:
     # OpenSTA report_power at the nominal corner: {sequential|combinational|clock|macro|pad|total: {internal_w, switching_w, leakage_w, total_w}}
     power: dict = field(default_factory=dict)
     power_note: str = ''
+    # electrical checks at the slow corner: {max_slew|max_capacitance|max_fanout: count, worst: {kind: (pin, limit, actual, slack)}}
+    drc: dict = field(default_factory=dict)
 
 def run_corner_sta(cfg: Config, module: str, netlist: Path,
                    results_dir: Path) -> CornerResult:
@@ -2313,6 +2325,7 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
             netlist=netlist, module=module, constraints=constraints,
             sdf_line=(f'write_sdf {sdf}' if name == 'slow' else ''),
             power_section=(_power_section(cfg) if name == power_corner else ''),
+            drc_section=(DRC_SECTION_TCL if name == 'slow' else ''),
         ))
         try:
             r = subprocess.run([cfg.opensta, '-no_init', '-exit', str(tcl)],
@@ -2329,6 +2342,11 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         setup = out[out.find('>>> SETUP_BEGIN'):out.find('>>> SETUP_END')]
         hold = out[out.find('>>> HOLD_BEGIN'):out.find('>>> HOLD_END')]
         groups = _parse_group_slacks(out[out.find('>>> GROUPS_BEGIN'):out.find('>>> GROUPS_END')])
+        if name == 'slow' and '>>> DRC_BEGIN' in out:
+            import resize as _rz
+            v = _rz.parse_drc(out)
+            res.drc = {k: len(v[k]) for k in _rz.DRC_KINDS}
+            res.drc['worst'] = {k: min(v[k], key=lambda x: x[3]) for k in _rz.DRC_KINDS if v[k]}
         if name == power_corner and '>>> POWER_BEGIN' in out:
             res.power = _parse_power(out[out.find('>>> POWER_BEGIN'):out.find('>>> POWER_END')])
             res.power_note = (f'{name} corner, ' + (f"activities from {Path(cfg.power_activity_file).name}" if cfg.power_activity_file
@@ -2601,6 +2619,23 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
                 p_ = corner.power.get(g)
                 if p_ and (g == 'total' or p_['total_w'] > 0):
                     pw_rows.append(f"| `{m}` | {g} | {p_['internal_w'] * 1e6:.2f} | {p_['switching_w'] * 1e6:.2f} | {p_['leakage_w'] * 1e6:.3f} | **{p_['total_w'] * 1e6:.2f}** |")
+    drc_rows = []
+    for m, sel in selections.items():
+        corner = corners.get(m)
+        if corner and corner.drc:
+            d = corner.drc
+            w = d.get('worst', {})
+            fmt = lambda k: (f"`{w[k][0]}` {w[k][2]:.3g} > {w[k][1]:.3g}" if k in w else '—')
+            drc_rows.append(f"| `{m}` | {d.get('max_slew', 0)} | {fmt('max_slew')} | {d.get('max_capacitance', 0)} | {fmt('max_capacitance')} | {d.get('max_fanout', 0)} | {fmt('max_fanout')} |")
+    if drc_rows:
+        md.append('### Electrical checks (slow corner)')
+        md.append('')
+        md.append('Max transition / capacitance / fanout violations against the liberty and SDC limits (`report_check_types -violators`); `repair_drc: true` fixes them in the post-pass.')
+        md.append('')
+        md.append('| Module | Slew viol. | Worst slew | Cap viol. | Worst cap | Fanout viol. | Worst fanout |')
+        md.append('|---|---|---|---|---|---|---|')
+        md.extend(drc_rows)
+        md.append('')
     if pw_rows:
         md.append('### Power (OpenSTA `report_power`, µW)')
         md.append('')
@@ -2846,7 +2881,7 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
 _RESIZE_KEY_FIELDS = ('period_ps', 'clock_port', 'clock_port_2', 'period_ps_2', 'driving_cell', 'load_ff',
                       'clock_uncertainty_setup_ps', 'clock_uncertainty_hold_ps', 'wire_load_model', 'io_delay_frac',
                       'io_delay_min_frac', 'resize_iters', 'resize_wns_tol_ps', 'resize_final', 'resize_recover_area',
-                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget', 'resize_time_budget_s', 'sta_session', 'resize_recover_objective', 'power_activity', 'power_duty', 'power_activity_file',
+                      'repair_design', 'max_fanout', 'repair_hold', 'repair_drc', 'drc_iters', 'repair_hold_max_paths', 'repair_hold_sta_budget', 'resize_time_budget_s', 'sta_session', 'resize_recover_objective', 'power_activity', 'power_duty', 'power_activity_file',
                       'dont_use', 'repair_buffer_cell', 'repair_delay_cell', 'select_margin_ps')
 
 
@@ -2988,7 +3023,7 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
             clock_port_2=cfg.clock_port_2, period_ps_2=cfg.period_ps_2,
             wns_tol=cfg.resize_wns_tol_ps / 1000.0, final=cfg.resize_final,
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
-            repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
+            repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast, repair_drc=cfg.repair_drc, drc_iters=cfg.drc_iters,
             hold_max_paths=cfg.repair_hold_max_paths, hold_sta_budget=cfg.repair_hold_sta_budget,
             time_budget_s=cfg.resize_time_budget_s, sta_session=cfg.sta_session, sta_session_verify=cfg.sta_session_verify,
             budget_section=_budget_section(cfg),
@@ -3030,6 +3065,10 @@ def _log_resize(module: str, res: dict, log) -> None:
     bad = {k: v for k, v in st.items() if v.startswith('failed')}
     if res.get('reused_checkpoint'):
         log.info(f'[resize] {module}: reused checkpoint (same netlist, libraries, SDC and settings)')
+    if res.get('drc_before') is not None and res.get('drc_after') is not None:
+        b, a = res['drc_before'], res['drc_after']
+        log.info(f"[resize] {module}: electrical violations slew/cap/fanout {b['max_slew']}/{b['max_capacitance']}/{b['max_fanout']} -> "
+                 f"{a['max_slew']}/{a['max_capacitance']}/{a['max_fanout']} ({res.get('drc_buffers', 0)} buffers)")
     p0, p1 = res['start'].get('power_w'), res['end'].get('power_w')
     if p0 and p1:
         log.info(f"[resize] {module}: power {p0 * 1e6:.1f} -> {p1 * 1e6:.1f} uW ({(p1 / p0 - 1) * 100:+.1f}%) at the recovery activity")
@@ -3170,6 +3209,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--strict', action='store_true', help=f'exit {EXIT_NOT_CLOSED} when any module is NOT CLOSED under its required scenarios or misses setup at sign-off (post-pass phase failures always exit {EXIT_POSTPASS_FAIL})')
     p.add_argument('--recover-power', action='store_true', help='recovery with total power (report_power) as the objective: swap/downsize off-critical cells while power drops, area does not grow and WNS holds')
     p.add_argument('--recover-area', action='store_true', help='after the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies --resize)')
+    p.add_argument('--repair-drc', action='store_true', help='fix max transition / capacitance / fanout violations on the winner (driver upsize, else buffer trees; needs OpenSTA)')
     p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
     p.add_argument('--max-fanout', type=int, help='sink group size for repair_design (default 8; SDC set_max_fanout overrides)')
     p.add_argument('--yosys-opts', nargs='+', help='front-end options: booth, adder=kogge-stone|han-carlson|sklansky, noshare, hieropt')
@@ -3250,6 +3290,8 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.resize_winner = True
     if getattr(args, 'repair_hold', False):
         cfg.repair_hold = True
+    if getattr(args, 'repair_drc', False):
+        cfg.repair_drc = True
     if getattr(args, 'max_fanout', None):
         cfg.max_fanout = args.max_fanout
     if getattr(args, 'yosys_opts', None):
@@ -3593,7 +3635,7 @@ def main() -> int:
             if win.netlist:
                 shutil.copy(win.netlist, mod_results / 'winner.v')
                 winner_netlists[module] = str(mod_results / 'winner.v')
-                if (cfg.resize_winner or cfg.repair_design or cfg.repair_hold) and cfg.run_sta:
+                if (cfg.resize_winner or cfg.repair_design or cfg.repair_hold or cfg.repair_drc) and cfg.run_sta:
                     if cfg.resize_candidates > 1:
                         sel = _resize_candidates(cfg, module, cands, sel, mod_results, work / module / 'resize', log)
                         selections[module] = sel

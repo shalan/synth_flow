@@ -70,6 +70,10 @@ Notes:
   library's `inv_1` (same-named cell) and logs it; STA sources the adapted
   copy `results/<top>/constraints.libadapted.sdc`. `--lib-dir` can be
   repeated to synthesise with several libraries at once (first = primary).
+- Result CSV columns beyond timing and area: `leakage_uw_*`, `lib_mix_*`
+  (post-pass), `power_dynamic_uw` / `power_static_uw` / `power_total_uw`
+  (sign-off `report_power`), `drc_violations` (slew + cap + fanout at the
+  slow corner).
 - The tool derives async-reset false paths from register async pins, so the
   `set_false_path -from` lines above are confirmations, not requirements.
 - `ms_psram_ahb`'s SDC also sets `set_input_transition` and min loads; those
