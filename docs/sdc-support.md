@@ -86,9 +86,12 @@ The SDC runs in a real Tcl interpreter (`tclsh`) with stub procs, so
 variables, `expr`, `foreach`, wildcards, `get_ports`, `get_clocks`,
 `all_inputs [-no_clocks]`, `all_outputs` and `all_registers` behave normally.
 
-`get_pins` and `get_cells` on **registers** work: register names survive
-synthesis. Internal combinational net and cell names do not, so a `-through`
-on one of those is honored by STA only, and the tool lists those lines.
+`get_pins` and `get_cells` on **registers** work when `keep_names: true`
+names the flops after their RTL wires (`acc[3]_reg`); without it, flattened
+flops come out as `_889_` and only ports, macro instances and kept-hierarchy
+instances have stable names. Internal combinational net and cell names never
+survive, so a `-through` on one of those is honored by STA only, and the
+tool lists those lines.
 
 ### Precedence
 
@@ -127,8 +130,11 @@ The hook applies constraints directly on the mapped design:
 puts "hook: $synth_scenario @ $synth_corner ($synth_module)"
 require_binding sram      [get_cells u_sram] -count 1
 require_binding din_pins  [get_pins u_sram/din0*] -count 32
+require_binding acc_regs  [get_cells acc*] -min 32          ;# needs keep_names: true
 optional_binding debug    [get_cells dbg*]
 set_false_path -from [get_ports rst_n]
+set_multicycle_path -setup 2 -from [get_cells key_r*] -to [get_cells acc*]
+set_multicycle_path -hold  1 -from [get_cells key_r*] -to [get_cells acc*]
 if {$synth_scenario eq "scan"} { set_case_analysis 1 [get_ports scan_en] }
 ```
 

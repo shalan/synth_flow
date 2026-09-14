@@ -630,6 +630,55 @@ delivered netlists are identical. One lesson from the verify mode: an
 with a half-sourced SDC and reports numbers a fresh process would never
 produce; `link()` now checks for that.
 
+### 2.18 Power as the recovery objective
+
+The recovery pass scored area: downsize, or move to a slower library, while
+WNS holds. With `report_power` available (§2.16) `resize_recover_objective:
+power` makes total power the score. Candidates are the same off-critical
+cells; they are ordered by their own consumption (`report_power -instances`,
+biggest first, so a bisected batch keeps the large consumers), and a batch is
+kept only if total power drops and area does not grow. Every trial's power
+comes from the same OpenSTA run that times it (`report_power` appended to
+the report; the switching activity travels with the constraints, so sessions
+and fresh processes agree). On `spi_master` HS+LS both objectives accept the
+same 91 swaps to LS and the measured total drops 1210 → 1094 µW (−9.6 %) at
+0.1 toggles/cycle; the objectives diverge when a swap saves area but not
+power (a library whose liberty reports zero leakage looks free to the area
+score) or when a batch has to be bisected.
+
+### 2.19 Electrical checks and their repair
+
+OpenSTA checks max transition, max capacitance and max fanout against the
+liberty pin limits and the SDC, and the SRAM wrapper showed what an
+unrepaired netlist looks like: the reset input driving 40 async pins at
+2.5 ns transition against a 1.5 ns limit, an SRAM output bit with 7 sinks
+against a fanout limit of 4. Sign-off now lists those per module
+(`report_check_types -violators` at the slow corner), and `repair_drc: true`
+fixes them in the post-pass with the machinery the timing repairs already
+have: the violating net's driver is upsized when a stronger variant exists
+(slew and capacitance), else the net is split into buffer trees sized from
+the fanout limit or the limit/actual ratio; a batch is kept when the summed
+DRC slack improves and setup stays within the hold-phase tolerance, bisected
+otherwise. SRAM wrapper: 121 violations → 8 with 37 buffers and 22 driver
+upsizes (`dfrtp_1` → `dfrtp_2` on the flops feeding the wide nets), setup
++0.794 → +0.621 ns, netlist simulation-equivalent; the 8 that remain are
+SRAM address pins whose 40 ps transition limit no standard-cell driver
+meets.
+
+### 2.20 Register names through flattening
+
+Flattened flops came out of Yosys as `_889_`, so a hook binding
+`get_cells acc*` failed, STA reports were unreadable and the post-pass log
+named moves by numbers. `keep_names: true` runs `rename -wire -suffix _reg`
+on Yosys's flop and latch cell types after `synth`, before `dfflibmap`: each
+register instance takes the name of the wire it drives plus `_reg`
+(`acc[3]_reg`); `dfflibmap` and ABC keep the instance names, combinational
+cells stay auto-named, timing and area are unchanged. On the SRAM wrapper
+the hook bindings `acc*` and `key_r*` resolve to 32 registers each and the
+sign-off report reads `u_sram → acc[23]_reg`. The escaped-name mapping of
+§2.14 is what makes OpenSTA's `acc[23]_reg` and the netlist's
+`\\acc[23]_reg` the same object to the resizer.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

@@ -579,14 +579,18 @@ class StaOut:
     tns: Optional[float] = None
     paths: list[PathInfo] = field(default_factory=list)
     log: str = ''
+    power: Optional[dict] = None      # report_power groups when the run asked for power (see run_sta(power=True))
 
 
 STA_STATS = {'calls': 0, 'seconds': 0.0}     # every OpenSTA run of this process (resize() reports per phase)
 
 
+POWER_REPORT_TCL = 'puts ">>> POWER_BEGIN"\nreport_power -digits 6\nputs ">>> POWER_END"\n'
+
+
 def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, tag, k=200, slack_max=0.0,
-            mode='max', extra_libs=(), alias=None) -> StaOut:
-    report = REPORT_TCL.format(k=k, slack_max=slack_max, mode=mode)
+            mode='max', extra_libs=(), alias=None, power=False) -> StaOut:
+    report = REPORT_TCL.format(k=k, slack_max=slack_max, mode=mode) + (POWER_REPORT_TCL if power else '')
     t0 = time.time()
     if USE_SESSION:
         # persistent process: liberties already read; re-link only when the
@@ -633,7 +637,8 @@ def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, ta
         tcl = out_dir / f'{tag}.tcl'
         tcl.write_text(PATHS_TCL.format(liberty=liberty, netlist=netlist, top=top, constraints=constraints,
                                         k=k, slack_max=slack_max, mode=mode,
-                                        extra_libs='\n'.join(f'read_liberty {l}' for l in (extra_libs or []))))
+                                        extra_libs='\n'.join(f'read_liberty {l}' for l in (extra_libs or [])))
+                       .replace('\nexit\n', '\n' + (POWER_REPORT_TCL if power else '') + 'exit\n'))
         r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
         text, ok_run = r.stdout + r.stderr, (r.returncode == 0)
     STA_STATS['calls'] += 1
@@ -677,7 +682,118 @@ def parse_sta_report(text: str, alias: Optional[dict] = None, ok: bool = True, s
         if m and res.tns is None:
             res.tns = float(m.group(1))
     res.paths = [p for p in res.paths if p.slack < slack_max + 1e-9]
+    if '>>> POWER_BEGIN' in text:
+        res.power = sf._parse_power(text[text.find('>>> POWER_BEGIN'):text.find('>>> POWER_END')])
     return res
+
+
+def _power_w(r: StaOut) -> Optional[float]:
+    return r.power['total']['total_w'] if r and r.power and 'total' in r.power else None
+
+
+def _report_text(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, tag, report: str, extra_libs=()) -> str:
+    """Output of an arbitrary report Tcl on the linked netlist: through the
+    persistent session when enabled (linking only if needed), else a fresh process."""
+    if USE_SESSION:
+        from sta_session import StaSessionError
+        try:
+            ses = _session_for(opensta, liberty, extra_libs)
+            if ses.current is None or Path(ses.current) != Path(netlist) or ses.top != top:
+                ses.link(Path(netlist), top, constraints)
+            return ses.report(report)
+        except StaSessionError as e:
+            SESSION_LOG(f'sta session: {e}; report from a fresh process')
+    tcl = out_dir / f'{tag}.tcl'
+    tcl.write_text(f"read_liberty {liberty}\n" + '\n'.join(f'read_liberty {l}' for l in (extra_libs or []))
+                   + f"\nread_verilog {netlist}\nlink_design {top}\n{constraints}\n{report}exit\n")
+    r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
+    STA_STATS['calls'] += 1
+    return r.stdout + r.stderr
+
+
+DRC_TCL = 'puts ">>> DRC_BEGIN"\nreport_check_types -max_slew -max_capacitance -max_fanout -violators -digits 4\nputs ">>> DRC_END"\n'
+DRC_KINDS = ('max_slew', 'max_capacitance', 'max_fanout')
+
+
+def parse_drc(text: str, alias: Optional[dict] = None) -> dict:
+    """`report_check_types -violators` -> {kind: [(pin, limit, actual, slack)]} with
+    instance names in their Verilog spelling. Pins are `inst/pin` or a port."""
+    alias = alias or {}
+    out = {k: [] for k in DRC_KINDS}
+    kind = None
+    sec = text[text.find('>>> DRC_BEGIN'):text.find('>>> DRC_END')] if '>>> DRC_BEGIN' in text else text
+    for line in sec.splitlines():
+        s = line.strip()
+        if s in ('max slew', 'max capacitance', 'max fanout'):
+            kind = s.replace(' ', '_')
+            continue
+        parts = s.split()
+        if kind and len(parts) >= 4 and parts[-1].startswith('(') and parts[0] not in ('Pin', 'Group'):
+            try:
+                limit, actual, slack = float(parts[-4]), float(parts[-3]), float(parts[-2])
+            except ValueError:
+                continue
+            pin = parts[0]
+            if '/' in pin:
+                inst, p = pin.rsplit('/', 1)
+                pin = f'{alias.get(inst, inst)}/{p}'
+            else:
+                pin = alias.get(pin, pin)
+            out[kind].append((pin, limit, actual, slack))
+    return out
+
+
+def drc_summary(v: dict) -> dict:
+    """{kind: count}, plus 'total_slack' (sum of negative slacks; fanout in sinks, slew in ns, cap in pF)."""
+    s = {k: len(v.get(k, [])) for k in DRC_KINDS}
+    s['total_slack'] = round(sum(x[3] for k in DRC_KINDS for x in v.get(k, []) if x[3] < 0), 4)
+    return s
+
+
+def run_drc(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, tag, extra_libs=()) -> dict:
+    text = _report_text(opensta, liberty, netlist, top, constraints, out_dir, tag, DRC_TCL, extra_libs)
+    (out_dir / f'{tag}.drc.log').write_text(text)
+    return parse_drc(text, name_alias(Path(netlist).read_text()))
+
+
+def instance_power(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, tag, insts, extra_libs=()) -> dict:
+    """Total power per instance (W) from `report_power -instances`, in chunks;
+    uses the persistent session when enabled. Names are Verilog spellings."""
+    out: dict = {}
+    insts = list(insts)
+    for c0 in range(0, len(insts), 1000):
+        chunk = insts[c0:c0 + 1000]
+        names = ' '.join('{' + sta_name(n) + '}' for n in chunk)
+        report = f'puts ">>> IPOWER_BEGIN"\nreport_power -instances [get_cells [list {names}]] -digits 6\nputs ">>> IPOWER_END"\n'
+        text = None
+        if USE_SESSION:
+            from sta_session import StaSessionError
+            try:
+                ses = _session_for(opensta, liberty, extra_libs)
+                if ses.current is None or Path(ses.current) != Path(netlist) or ses.top != top:
+                    ses.link(Path(netlist), top, constraints)
+                text = ses.report(report)
+            except StaSessionError as e:
+                SESSION_LOG(f'sta session: {e}; instance power from a fresh process')
+        if text is None:
+            tcl = out_dir / f'{tag}_{c0}.tcl'
+            tcl.write_text(PATHS_TCL.split('\n' + REPORT_TCL.splitlines()[0])[0] if False else
+                           f"read_liberty {liberty}\n" + '\n'.join(f'read_liberty {l}' for l in (extra_libs or []))
+                           + f"\nread_verilog {netlist}\nlink_design {top}\n{constraints}\n{report}exit\n")
+            r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
+            text = r.stdout + r.stderr
+        alias = name_alias(Path(netlist).read_text())
+        sec = text[text.find('>>> IPOWER_BEGIN'):text.find('>>> IPOWER_END')]
+        for line in sec.splitlines():
+            parts = line.split()
+            if len(parts) >= 5:
+                try:
+                    vals = [float(x) for x in parts[-4:]]
+                except ValueError:
+                    continue
+                name = ' '.join(parts[:-4]) if len(parts) > 5 else parts[0]
+                out[alias.get(name, name)] = vals[3]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -745,7 +861,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            extra_libs=(), extra_libs_fast=None, macro_libs=(), macro_libs_fast=None,
            dont_use=(), buffer_cell=None, delay_cell=None,
            budget_section='', hook_section='', guard=None, time_budget_s=None, sta_session=False,
-           sta_session_verify=False, log=print) -> dict:
+           sta_session_verify=False, recover_objective='area', power_activity_tcl='',
+           repair_drc=False, drc_iters=4, log=print) -> dict:
     global USE_SESSION, SESSION_LOG, VERIFY_SESSION
     USE_SESSION, SESSION_LOG, VERIFY_SESSION = bool(sta_session), log, bool(sta_session_verify)
     PENDING['base'], PENDING['ops'] = None, None
@@ -761,7 +878,9 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                        hold_max_paths=hold_max_paths, hold_sta_budget=hold_sta_budget, extra_libs=extra_libs,
                        extra_libs_fast=extra_libs_fast, macro_libs=macro_libs, macro_libs_fast=macro_libs_fast,
                        dont_use=dont_use, buffer_cell=buffer_cell, delay_cell=delay_cell, budget_section=budget_section,
-                       hook_section=hook_section, guard=guard, time_budget_s=time_budget_s, log=log)
+                       hook_section=hook_section, guard=guard, time_budget_s=time_budget_s,
+                       recover_objective=recover_objective, power_activity_tcl=power_activity_tcl,
+                       repair_drc=repair_drc, drc_iters=drc_iters, log=log)
     finally:
         if SESSIONS:
             st = close_sessions()
@@ -782,8 +901,9 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
             extra_libs=(), extra_libs_fast=None, macro_libs=(), macro_libs_fast=None,
             dont_use=(), buffer_cell=None, delay_cell=None,
             budget_section='', hook_section='', guard=None, time_budget_s=None,
-            log=print) -> dict:
+            recover_objective='area', power_activity_tcl='', repair_drc=False, drc_iters=4, log=print) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
+    want_power = recover_objective == 'power'
     constraints = sf._sta_constraints(
         clock_port=clock_port, period_ns=period_ps / 1000.0, clock_port_2=clock_port_2,
         period_2_ns=(period_ps_2 / 1000.0) if (clock_port_2 and period_ps_2) else None,
@@ -791,6 +911,8 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
         driving_cell=driving_cell, load_pf=load_ff / 1000.0,
         wire_load_section=sf._wire_load_section(wire_load_model, sta_liberty), io_delay_frac=io_delay_frac,
         io_delay_min_frac=io_delay_min_frac, budget_section=budget_section, hook_section=hook_section)
+    if want_power and power_activity_tcl:
+        constraints += '\n# switching activity for report_power (recover_objective: power)\n' + power_activity_tcl.strip() + '\n'
 
     def _guarded(ok: bool, path) -> bool:
         """Acceptance rule across scenarios: a move that passes the ranking
@@ -820,7 +942,12 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
     sf._strip_signed_decls(cur)
     text = cur.read_text()
     types = instance_types(text)
-    sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'it0', k=max_paths, slack_max=margin, extra_libs=extra_libs)
+    sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'it0', k=max_paths, slack_max=margin, extra_libs=extra_libs, power=want_power)
+    power0 = _power_w(sta)
+    if want_power:
+        log(f'power objective: start {power0 * 1e6:.1f} uW (total, report_power)' if power0 is not None else 'power objective: report_power gave no total; falling back to area')
+        if power0 is None:
+            want_power = False
     if not sta.ok:
         raise RuntimeError(f'OpenSTA failed, see {sta.log}')
     area0 = area_of(yosys, liberty, cur, top, std_extra, read_only=macro_libs)
@@ -952,13 +1079,17 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
         phase_status['repair_design'] = f'failed: {e}'
         log(f'repair_design: phase aborted ({e}); continuing with the last accepted netlist')
     _mark('repair_design')
-    def evaluate(moves: dict[str, str], tag: str):
+    def evaluate(moves: dict[str, str], tag: str, power: bool = False):
         new_text = retype(text, moves)
         new = out_dir / f'{tag}.v'
         new.write_text(new_text)
         _trial_begin(cur, [('replace_cell', i, c, types.get(i, '')) for i, c in moves.items()])
-        r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin, extra_libs=extra_libs)
+        r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin, extra_libs=extra_libs, power=power)
         return new, new_text, r
+
+    def _delta_area(moves: dict) -> float:
+        return sum((fam.cells[c].area if c in fam else 0.0) - (fam.cells[types.get(i, '')].area if types.get(i, '') in fam else 0.0)
+                   for i, c in moves.items())
 
     def accept(old: StaOut, new: StaOut) -> bool:
         """TNS is the objective. A WNS regression up to wns_tol is tolerated
@@ -1053,6 +1184,7 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
             sens_band = 0.3          # ns; not `guard`: that name is the scenario-guard callable
             floor_wns = min(sta.wns, margin)
             tried3: set[str] = set()
+            power_cur = power0
             for rnd in range(recover_rounds):
                 if _over_budget():
                     break
@@ -1063,23 +1195,36 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
                 cands = {i: (fam.slower_variant(t) or prev_size(t, fam)) for i, t in types.items()
                          if i not in protected and i not in tried3 and (fam.slower_variant(t) or prev_size(t, fam))}
                 if not cands:
-                    log('area recovery: no downsizing/swap candidates; done')
+                    log(f'{recover_objective} recovery: no downsizing/swap candidates; done')
                     break
-                batch = sorted(cands)
+                if want_power:
+                    # biggest consumers first: the batch is bisected from the front on rejection
+                    ipw = instance_power(opensta, sta_liberty, cur, top, constraints, out_dir, f'ipower{rnd}', cands, extra_libs)
+                    batch = sorted(cands, key=lambda i: -ipw.get(i, 0.0))
+                else:
+                    batch = sorted(cands)
                 done_round = False
                 while batch and it < iters + recover_rounds * 8:
                     it += 1
                     sub = {i: cands[i] for i in batch}
-                    new, new_text, sta_new = evaluate(sub, f'it{it}')
+                    new, new_text, sta_new = evaluate(sub, f'it{it}', power=want_power)
                     ok = (sta_new.ok and sta_new.wns >= floor_wns - 1e-6 and sta_new.tns >= sta.tns - 1e-6)
+                    pw_new = _power_w(sta_new)
+                    if want_power:
+                        # the objective is power: it must drop, and area must not grow
+                        ok = ok and pw_new is not None and power_cur is not None and pw_new < power_cur * (1 - 1e-6) and _delta_area(sub) <= 1e-9
                     ok = _guarded(ok, new)
                     _trial_end(ok, new)
                     steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
                                       wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
-                    log(f'it{it} (area): {len(sub)} downsizes/swaps -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
-                        f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f} {"ACCEPT" if ok else "reject"}')
+                    log(f'it{it} ({recover_objective}): {len(sub)} downsizes/swaps -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
+                        f'TNS {sta.tns:+.2f}->{sta_new.tns:+.2f}'
+                        + (f' power {power_cur * 1e6:.1f}->{pw_new * 1e6:.1f} uW' if want_power and pw_new is not None and power_cur is not None else '')
+                        + f' {"ACCEPT" if ok else "reject"}')
                     if ok:
                         cur, text, sta = new, new_text, sta_new
+                        if want_power:
+                            power_cur = pw_new
                         types.update(sub)
                         total_moves.update(sub)
                         states.append((cur, sta.wns, sta.tns, dict(total_moves), {'buffers': buffers_inserted, 'delay': delay_cells}))
@@ -1097,6 +1242,117 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
         log(f'recover_area: phase aborted ({e}); continuing with the last accepted netlist')
 
     _mark('recover_area')
+    # Phase 3b (optional): repair_drc. Electrical checks from the liberty / SDC
+    # limits (max transition, max capacitance, max fanout): the violating net's
+    # driver is upsized when it can be, else the net is split into buffer trees
+    # sized from the limit/actual ratio. A batch is kept when the summed DRC
+    # slack improves and setup WNS/TNS stay within the hold-phase tolerance.
+    drc_before = drc_after = None
+    drc_buffers = 0
+    if repair_drc:
+      try:
+        drc = run_drc(opensta, sta_liberty, cur, top, constraints, out_dir, 'drc0', extra_libs)
+        drc_before = drc_summary(drc)
+        log(f"drc: slew {drc_before['max_slew']}, cap {drc_before['max_capacitance']}, fanout {drc_before['max_fanout']} violations (sum slack {drc_before['total_slack']})")
+        if buffer_cell and buffer_cell in fam:
+            c = fam.cells[buffer_cell]
+            dbuf, dbuf_in, dbuf_out = buffer_cell, c.inputs[0], c.outputs[0]
+        else:
+            dbuf, dbuf_in, dbuf_out = fam.buffer_cell()
+        floor_d = min(sta.wns, margin)
+        tried_drc: set[str] = set()
+        for rnd in range(drc_iters):
+            if drc_before is None or sum(drc_summary(drc)[k] for k in DRC_KINDS) == 0 or _over_budget():
+                break
+            nl0 = Netlist(text, out_pins, bus_ranges)
+            in_ports = set(re.findall(r'\binput\s+(?:(?:wire|reg)\s+)?(?:\[[^\]]+\]\s*)?(\\?[\w$\.\[\]]+)\s*;', text))
+            # violations -> nets: {net: {'kinds', 'worst', 'ratio'}}
+            nets: dict = {}
+            for kind in DRC_KINDS:
+                for pin, limit, actual, slack in drc[kind]:
+                    if '/' in pin:
+                        inst, p = pin.rsplit('/', 1)
+                        if inst not in nl0.inst:
+                            continue
+                        net = nl0.pin_net(inst, p)
+                    else:
+                        net = pin if pin in in_ports else None
+                    if not net or re.match(r"\d+'", net) or net in tried_drc:
+                        continue
+                    d = nets.setdefault(net, {'kinds': set(), 'worst': 0.0, 'ratio': 1.0, 'fanout_limit': None})
+                    d['kinds'].add(kind)
+                    d['worst'] = min(d['worst'], slack)
+                    if limit > 0 and actual > limit:
+                        d['ratio'] = min(d['ratio'], limit / actual)
+                    if kind == 'max_fanout':
+                        d['fanout_limit'] = int(limit) if d['fanout_limit'] is None else min(d['fanout_limit'], int(limit))
+            if not nets:
+                log('drc: no repairable net left; done')
+                break
+            order = sorted(nets, key=lambda n: nets[n]['worst'])
+            batch = list(order)
+            progressed = False
+            while batch:
+                nl = Netlist(text, out_pins, bus_ranges)
+                moves: dict = {}
+                nb = 0
+                for net in batch:
+                    d = nets[net]
+                    drv = nl.driver(net)
+                    up = fam.next_size(nl.inst[drv[0]]['type']) if drv else None
+                    if drv and up and 'max_fanout' not in d['kinds'] and drv[0] not in moves:
+                        moves[drv[0]] = up                               # a stronger driver fixes slew / cap
+                    else:
+                        n_sinks = len(nl.sinks(net))
+                        if d['fanout_limit']:
+                            group = max(2, d['fanout_limit'])                       # the SDC / liberty fanout limit
+                        else:
+                            group = max(2, min(max_fanout, int(n_sinks * d['ratio'])))   # load per buffer within the limit
+                        nb += nl.buffer_tree(net, dbuf, group, in_pin=dbuf_in, out_pin=dbuf_out)
+                if not moves and nb == 0:
+                    tried_drc.update(batch)
+                    break
+                new_text = retype(nl.render(), moves)
+                ops = list(nl.ops) + [('replace_cell', i, c, nl.inst[i]['type']) for i, c in moves.items()]
+                it += 1
+                new, sta_new = evaluate_text(new_text, f'it{it}', ops=ops)
+                drc_new = run_drc(opensta, sta_liberty, new, top, constraints, out_dir, f'drc{it}', extra_libs) if sta_new.ok else drc
+                s_old, s_new = drc_summary(drc), drc_summary(drc_new)
+                ok = (sta_new.ok and s_new['total_slack'] > s_old['total_slack'] + 1e-6
+                      and sta_new.wns >= floor_d - 1e-6 and sta_new.tns >= sta.tns - 0.05)
+                ok = _guarded(ok, new)
+                _trial_end(ok, new)
+                steps.append(Step(it=it, moves={**{f'drc:{n}': 'buffer_tree' for n in batch if n not in moves}, **moves}, wns_before=sta.wns, tns_before=sta.tns,
+                                  wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
+                log(f'it{it} (drc): {len(batch)} nets, {len(moves)} driver upsizes, {nb} buffers -> violations '
+                    f"{sum(s_old[k] for k in DRC_KINDS)}->{sum(s_new[k] for k in DRC_KINDS)} (sum slack {s_old['total_slack']}->{s_new['total_slack']}); "
+                    f'setup WNS {_f(sta.wns)}->{_f(sta_new.wns)} {"ACCEPT" if ok else "reject"}')
+                if ok:
+                    cur, text, sta, drc = new, new_text, sta_new, drc_new
+                    types = instance_types(text)
+                    total_moves.update(moves)
+                    for n in batch:
+                        if n not in moves:
+                            total_moves[f'drc_buffer_tree:{n}'] = dbuf
+                    drc_buffers += nb
+                    buffers_inserted += nb
+                    states.append((cur, sta.wns, sta.tns, dict(total_moves), {'buffers': buffers_inserted, 'delay': delay_cells}))
+                    progressed = True
+                    break
+                if len(batch) == 1:
+                    tried_drc.add(batch[0])
+                    break
+                batch = batch[:len(batch) // 2]
+            if not progressed and all(n in tried_drc for n in nets):
+                break
+        drc_after = drc_summary(drc)
+        log(f"drc: {sum(drc_before[k] for k in DRC_KINDS)} -> {sum(drc_after[k] for k in DRC_KINDS)} violations, {drc_buffers} buffers")
+        phase_status['repair_drc'] = 'ok'
+      except Exception as e:
+        phase_status['repair_drc'] = f'failed: {e}'
+        log(f'repair_drc: phase aborted ({e}); continuing with the last accepted netlist')
+        log(traceback.format_exc())
+    _mark('repair_drc')
     # Phase 4 (optional): repair_hold. Min-delay STA at the fast corner lists
     # failing hold endpoints; each gets one delay element in front of its
     # data pin (dlygate if the library has one, else buf_1). A round is kept
@@ -1273,7 +1529,7 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
         buffers_inserted, delay_cells = best[4]['buffers'], best[4]['delay']   # counters describe the delivered netlist
         text = cur.read_text()
         types = instance_types(text)
-        sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'final', k=max_paths, slack_max=margin, extra_libs=extra_libs)
+        sta = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'final', k=max_paths, slack_max=margin, extra_libs=extra_libs, power=want_power)
         log(f'final state rolled back to {cur.name}: WNS={_f(sta.wns)} TNS={_f(sta.tns, "+.2f")}')
         if repair_hold and hold_before is not None:
             # hold numbers must describe the delivered netlist, not the last trial
@@ -1292,6 +1548,12 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
         log(f'leakage {leak0 / 1000:.2f} -> {leak1 / 1000:.2f} uW ({(leak1 / leak0 - 1) * 100 if leak0 else 0:+.1f}%); mix {mix1}')
     phase_status.setdefault('sizing', 'ok')
     phase_status.setdefault('repair_hold', 'skipped')
+    phase_status.setdefault('repair_drc', 'skipped')
+    power1 = _power_w(sta) if want_power else None
+    if want_power and power1 is None:       # the delivered state was timed without power (e.g. a hold step): measure it
+        power1 = _power_w(run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, 'final_power', k=1, slack_max=margin, extra_libs=extra_libs, power=True))
+    if want_power and power0 is not None and power1 is not None:
+        log(f'power: {power0 * 1e6:.1f} -> {power1 * 1e6:.1f} uW ({(power1 / power0 - 1) * 100:+.1f}%) at the recovery activity')
     _mark('final')
     phases = {}
     for (n0, c0, s0_, t0_), (n1, c1, s1_, t1_) in zip(marks, marks[1:]):
@@ -1308,8 +1570,10 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
     res = {'input': str(netlist), 'output': str(final), 'top': top, 'status': phase_status,
            'cells_start': len(instance_types(netlist.read_text())), 'cells_end': len(types),
            'start': {'wns_ns': start_wns, 'tns_ns': start_tns, 'area': area0,
-                     'leakage_nw': leak0, 'lib_mix': mix0},
-           'end': {'wns_ns': sta.wns, 'tns_ns': sta.tns, 'area': area, 'failing': len(sta.paths), 'leakage_nw': leak1, 'lib_mix': mix1},
+                     'leakage_nw': leak0, 'lib_mix': mix0, 'power_w': power0},
+           'end': {'wns_ns': sta.wns, 'tns_ns': sta.tns, 'area': area, 'failing': len(sta.paths), 'leakage_nw': leak1, 'lib_mix': mix1, 'power_w': power1},
+           'recover_objective': recover_objective if recover_area else None,
+           'drc_before': drc_before, 'drc_after': drc_after, 'drc_buffers': drc_buffers,
            'moves': total_moves, 'steps': [asdict(s) for s in steps], 'wns_regressed': wns_regressed,
            'buffers_inserted': buffers_inserted, 'delay_cells_inserted': delay_cells,
            'hold_before': hold_before, 'hold_after': hold_after, 'runtime': runtime,
@@ -1331,6 +1595,10 @@ def main() -> int:
     ap.add_argument('--margin-ps', type=int, default=0); ap.add_argument('--per-path', type=int, default=1)
     ap.add_argument('--max-paths', type=int, default=200)
     ap.add_argument('--wns-tol', type=float, default=0.15, help='ns of WNS regression tolerated when TNS improves')
+    ap.add_argument('--repair-drc', action='store_true', help='fix max transition / capacitance / fanout violations (driver upsize, else buffer trees)')
+    ap.add_argument('--drc-iters', type=int, default=4)
+    ap.add_argument('--recover-power', action='store_true', help='recovery with total power (report_power, uniform activity) as the objective instead of area')
+    ap.add_argument('--power-activity', type=float, default=0.1); ap.add_argument('--power-duty', type=float, default=0.5)
     ap.add_argument('--recover-area', action='store_true', help='after timing, downsize off-critical cells while WNS holds')
     ap.add_argument('--repair-design', action='store_true', help='split high-fanout nets on failing paths with buffer trees')
     ap.add_argument('--max-fanout', type=int, default=8)
@@ -1361,7 +1629,7 @@ def main() -> int:
                  driving_cell=drv, load_ff=a.load_ff, wire_load_model=a.wire_load_model,
                  clock_port_2=a.clock_port_2, period_ps_2=a.period_ps_2, per_path=a.per_path,
                  max_paths=a.max_paths, wns_tol=a.wns_tol, final=a.final,
-                 recover_area=a.recover_area, recover_rounds=a.recover_rounds,
+                 repair_drc=a.repair_drc, drc_iters=a.drc_iters, recover_area=a.recover_area or a.recover_power, recover_rounds=a.recover_rounds, recover_objective='power' if a.recover_power else 'area', power_activity_tcl=f'set_power_activity -input -activity {a.power_activity} -duty {a.power_duty}',
                  repair_design=a.repair_design, max_fanout=a.max_fanout,
                  repair_hold=a.repair_hold, lib_fast=a.lib_fast,
                  hold_max_paths=a.hold_max_paths, hold_sta_budget=a.hold_sta_budget, time_budget_s=a.time_budget_s, sta_session=a.sta_session, sta_session_verify=a.sta_session_verify, extra_libs=a.extra_lib, macro_libs=a.macro_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
