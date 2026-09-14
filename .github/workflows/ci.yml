@@ -39,9 +39,22 @@ jobs:
           yosys-abc -q version | head -1
           sta -version || echo "opensta not in this OSS CAD Suite build; bench falls back to ABC proxy"
       - run: sudo apt-get install -y -qq tcl >/dev/null
+      - name: Unit tests with OpenSTA present (session and incremental-trial regressions run)
+        run: python3 test_synth_flow.py
       - name: Two-design smoke bench
         working-directory: bench
         run: ./bench.py --designs uart alu32 --recipes orfs_speed area_classic --tag ci
+      - name: Post-pass smoke (persistent session, sizing, hold and DRC repair, Fmax, resume)
+        working-directory: bench
+        run: |
+          ./bench.py --use-sdc --designs uart apb_timer --recipes orfs_speed delay_map --tag ci-postpass \
+            --set resize_winner=true --set repair_hold=true --set repair_drc=true --set sta_session=true \
+            --set sta_session_verify=true --set fmax_search=true --set keep_names=true
+          # a second run must reuse the mapped netlists and ranking STA
+          ./bench.py --use-sdc --designs uart --recipes orfs_speed --tag ci-resume --keep-work --set resume=true \
+            --set resize_winner=true --set sta_session=true
+          grep -l "reused" work/uart/bench.log >/dev/null || (echo "resume did not reuse the mapping" && exit 1)
+          ! grep -rl "VERIFY MISMATCH" work/*/work/*/resize 2>/dev/null || (echo "session verify mismatch" && exit 1)
       - name: Every in-house design must synthesize with the reference recipe
         working-directory: bench
         run: |
