@@ -629,13 +629,14 @@ with tempfile.TemporaryDirectory() as td:
         txt = Path(netlist).read_text()
         if mode == 'min':
             return _SO(ok=True, wns=0.1, tns=0.0, paths=[])
-        if 'buf_1 b1' in txt:      # b1 must stay buf_2 or the path fails
-            return _SO(ok=True, wns=-0.10, tns=-0.10, paths=[_PI(endpoint='f1', slack=-0.10, stages=[_ST('b1', 'X', 'sky130_fd_sc_hd__buf_1', 0.30, 1, 0.01, 0.1)])])
         pw = 1.0e-3 - (2.0e-4 if 'inv_1 i1' in txt else 0.0)      # downsizing i1 saves power; nothing else does
-        return _SO(ok=True, wns=0.05, tns=0.0, paths=[], power={'total': {'internal_w': pw, 'switching_w': 0.0, 'leakage_w': 0.0, 'total_w': pw}} if power else None)
+        pwd = {'total': {'internal_w': pw, 'switching_w': 0.0, 'leakage_w': 0.0, 'total_w': pw}} if power else None
+        if 'buf_1 b1' in txt:      # b1 must be buf_2 or the path fails (the input netlist starts that way)
+            return _SO(ok=True, wns=-0.10, tns=-0.10, paths=[_PI(endpoint='f1', slack=-0.10, stages=[_ST('b1', 'X', 'sky130_fd_sc_hd__buf_1', 0.30, 1, 0.01, 0.1)])], power=pwd)
+        return _SO(ok=True, wns=0.05, tns=0.0, paths=[], power=pwd)
     _seen = {}
     def _fake_ipower(opensta, liberty, netlist, top, constraints, out_dir, tag, insts, extra_libs=()):
-        _seen['insts'] = sorted(insts); return {'i1': 5e-4, 'b1': 1e-4}
+        _seen.setdefault('insts', set()).update(insts); return {'i1': 5e-4, 'b1': 1e-4}
     _orig = (_rz.run_sta, _rz.area_of, _rz.instance_power, _rz.sf._sta_constraints, _rz.sf._wire_load_section)
     _rz.run_sta = _fake_sta4; _rz.area_of = lambda *a, **k: 100.0; _rz.instance_power = _fake_ipower
     _rz.sf._sta_constraints = lambda **k: ''; _rz.sf._wire_load_section = lambda *a, **k: ''
