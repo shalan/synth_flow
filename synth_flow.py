@@ -371,6 +371,14 @@ class Config:
     run_sta: bool = True
     run_gls: bool = True
     fail_on_timing: bool = True
+    # --resume: reuse a recipe's mapped netlist and its ranking STA when nothing
+    # that feeds them changed (RTL, liberties, recipe, constraints, settings,
+    # tool binary): work/<module>/<recipe>.ckpt.json / .qsta.json carry the keys.
+    resume: bool = False
+    # --fmax: after sign-off, find the fastest clock the delivered winner meets
+    # at the slow corner (ranking scenario; I/O delays scale with the period).
+    fmax_search: bool = False
+    fmax_iters: int = 6
     # --- power report (OpenSTA report_power at the nominal corner, sign-off) ---
     # Without a VCD/SAIF every input toggles `power_activity` times per clock
     # cycle at `power_duty`; propagation gives internal (short-circuit +
@@ -990,6 +998,7 @@ class RecipeResult:
     area: float = 0.0
     error: Optional[str] = None
     groups: Optional[list] = None   # path-group stats when path_groups is on
+    reused: bool = False            # --resume: taken from <recipe>.ckpt.json, Yosys not run
 
 # Standard flow: dfflibmap first, then ABC sees only combinational logic.
 # This is what OpenLane does and what produces formally-verifiable netlists
@@ -1736,6 +1745,48 @@ def _materialize_recipe(recipe_path: str | Path, d_ps: int, out_dir: Path, wire_
     return out
 
 
+_RECIPE_KEY_FIELDS = ('yosys_opts', 'dont_use', 'params', 'verilog_defines', 'verilog_includes', 'abc_d_ps', 'keep_names',
+                      'keep_hierarchy_modules', 'abc_wire_load', 'abc_sequential', 'dual_clock_synthesis', 'path_groups',
+                      'relaxed_factor', 'lib_synth', 'lib_synth_extra', 'lib_extra', 'lib_slow', 'lib_typ', 'mixed_map',
+                      'macro_libs', 'clock_port', 'clock_port_2', 'period_ps', 'period_ps_2', 'cell_blackbox', 'yosys')
+
+
+def _file_sig(h, path) -> None:
+    """Feed a file's content (small text inputs) or path/size/mtime (liberties, binaries) into the hash."""
+    p = Path(path)
+    if not p.exists():
+        h.update(f'missing:{path}'.encode())
+    elif p.suffix.lower() in ('.lib', '') or p.stat().st_size > 4_000_000:
+        st = p.stat()
+        h.update(f'{path}:{st.st_size}:{int(st.st_mtime)}'.encode())
+    else:
+        h.update(p.read_bytes())
+
+
+def _recipe_key(args: dict) -> str:
+    """Content key of one (module, recipe) mapping: RTL and pre-read files,
+    dependency netlists, synthesis liberties, recipe text, ABC constraint file,
+    the settings that shape the Yosys script, and the yosys binary."""
+    cfg = args['cfg']
+    h = hashlib.sha1()
+    h.update(f"{args['module']}|{args['recipe']}|{args.get('recipe_path')}".encode())
+    for f in list(cfg.get('rtl_files') or []) + list(cfg.get('pre_read_files') or []):
+        _file_sig(h, f)
+    for f in sorted((args.get('dep_netlists') or {}).values()):
+        _file_sig(h, f)
+    for f in _synth_libs(cfg):
+        if f:
+            _file_sig(h, f)
+    for f in (args.get('recipe_path'), args.get('constr')):
+        if f:
+            _file_sig(h, f)
+    ybin = shutil.which(cfg.get('yosys') or 'yosys')
+    if ybin:
+        _file_sig(h, ybin)
+    h.update(json.dumps({k: cfg.get(k) for k in _RECIPE_KEY_FIELDS}, sort_keys=True, default=str).encode())
+    return h.hexdigest()
+
+
 def run_recipe(args: dict) -> RecipeResult:
     """Worker function — runs Yosys for one (module, recipe) pair.
     Must be top-level for multiprocessing pickling."""
@@ -1750,6 +1801,17 @@ def run_recipe(args: dict) -> RecipeResult:
 
     workdir.mkdir(parents=True, exist_ok=True)
     netlist = workdir / f'{recipe}.v'
+    ckpt = workdir / f'{recipe}.ckpt.json'
+    key = _recipe_key(args)
+    if cfg.get('resume') and ckpt.exists():
+        try:
+            saved = json.loads(ckpt.read_text())
+            if saved.get('key') == key and saved['result'].get('netlist') and Path(saved['result']['netlist']).exists():
+                res = RecipeResult(**{k: v for k, v in saved['result'].items() if k in RecipeResult.__dataclass_fields__})
+                res.reused = True
+                return res
+        except Exception:
+            pass
     syn_nl  = workdir / f'{recipe}.syn.v'
     stats   = workdir / f'{recipe}.json'
     log     = workdir / f'{recipe}.synth.log'
@@ -1855,12 +1917,17 @@ def run_recipe(args: dict) -> RecipeResult:
             (workdir / f'{recipe}.groups.json').write_text(json.dumps(
                 {'period_ps': groups_spec['period_ps'], 'notes': groups_spec['notes'],
                  'groups': gstats}, indent=2))
-        return RecipeResult(
+        res = RecipeResult(
             module=module, recipe=recipe, success=True,
             runtime_s=runtime, netlist=str(netlist),
             stats_json=str(stats), log=str(log),
             cells=cells, area=area, groups=gstats,
         )
+        try:
+            ckpt.write_text(json.dumps({'key': key, 'result': asdict(res)}, indent=1))
+        except Exception:
+            pass
+        return res
     except subprocess.TimeoutExpired:
         return RecipeResult(
             module=module, recipe=recipe, success=False,
@@ -2049,10 +2116,42 @@ def _quick_sta(opensta: str, liberty: str, netlist: str, module: str,
     finally:
         os.unlink(tcl)
 
-def _quick_sta_job(args: dict) -> tuple[str, Optional[float], Optional[float]]:
-    """Pool worker: one quick STA. Returns (recipe, wns_ns, tns_ns)."""
+_QSTA_KEY_FIELDS = ('period_ps', 'clock_port', 'clock_port_2', 'period_ps_2', 'clock_uncertainty_setup_ps',
+                    'clock_uncertainty_hold_ps', 'driving_cell', 'load_ff', 'wire_load_model', 'io_delay_frac',
+                    'io_delay_min_frac', 'clock_budget', 'cts_stage', 'scenarios', 'opensta')
+
+
+def _qsta_key(args: dict) -> str:
     cfg = args['cfg']
     corner = 'slow' if cfg.get('lib_slow') else 'typ'
+    h = hashlib.sha1()
+    _file_sig(h, args['netlist'])
+    for f in [cfg.get('lib_slow') or cfg.get('lib_typ'), *_extra_libs(cfg, corner)]:
+        if f:
+            _file_sig(h, f)
+    for f in (cfg.get('sdc'), cfg.get('constraint_hook')):
+        if f:
+            _file_sig(h, f)
+    sbin = shutil.which(cfg.get('opensta') or 'sta')
+    if sbin:
+        _file_sig(h, sbin)
+    h.update(json.dumps({k: cfg.get(k) for k in _QSTA_KEY_FIELDS}, sort_keys=True, default=str).encode())
+    return h.hexdigest()
+
+
+def _quick_sta_job(args: dict) -> tuple[str, Optional[float], Optional[float], bool]:
+    """Pool worker: one quick STA. Returns (recipe, wns_ns, tns_ns, reused)."""
+    cfg = args['cfg']
+    corner = 'slow' if cfg.get('lib_slow') else 'typ'
+    cache = Path(args['log']).with_suffix('.qsta.json')
+    key = _qsta_key(args)
+    if cfg.get('resume') and cache.exists():
+        try:
+            saved = json.loads(cache.read_text())
+            if saved.get('key') == key:
+                return args['recipe'], saved.get('wns'), saved.get('tns'), True
+        except Exception:
+            pass
     wns, tns = _quick_sta(
         cfg['opensta'], cfg.get('lib_slow') or cfg['lib_typ'], args['netlist'], args['module'],
         cfg['period_ps'], cfg['clock_port'], Path(args['log']),
@@ -2063,7 +2162,11 @@ def _quick_sta_job(args: dict) -> tuple[str, Optional[float], Optional[float]]:
         wire_load_model=cfg['wire_load_model'], io_delay_frac=cfg['io_delay_frac'],
         io_delay_min_frac=cfg.get('io_delay_min_frac', 0.4),
         budget_section=_budget_section(cfg), hook_section=_hook_section(cfg, rank_scenario(cfg), corner, args['module']))
-    return args['recipe'], wns, tns
+    try:
+        cache.write_text(json.dumps({'key': key, 'wns': wns, 'tns': tns}))
+    except Exception:
+        pass
+    return args['recipe'], wns, tns, False
 
 
 # ============================================================================
@@ -2305,6 +2408,50 @@ class CornerResult:
     # electrical checks at the slow corner: {max_slew|max_capacitance|max_fanout: count, worst: {kind: (pin, limit, actual, slack)}}
     drc: dict = field(default_factory=dict)
 
+def find_fmax(cfg: Config, module: str, netlist: Path, out_dir: Path, log, iters: Optional[int] = None) -> dict:
+    """Fastest clock period the netlist meets at the slow corner under the
+    ranking scenario. Setup slack moves about one-for-one with the period
+    (I/O delays scale with it), so each step sets period <- period - WNS and
+    the search converges in a few STA runs; the reported period is the last
+    one that met timing (WNS >= 0)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lib = cfg.lib_slow or cfg.lib_typ
+    corner = 'slow' if cfg.lib_slow else 'typ'
+    period = float(cfg.period_ps)
+    best_pass = None
+    history = []
+    slope = 1e-3          # ns of slack per ps of period; 1:1 until two points give a better estimate
+    for i in range(iters or cfg.fmax_iters):
+        wns, tns = _quick_sta(cfg.opensta, lib, str(netlist), module, int(round(period)), cfg.clock_port,
+                              out_dir / f'fmax_{i}.log', clock_port_2=cfg.clock_port_2, period_ps_2=cfg.period_ps_2,
+                              macro_libs=_extra_libs(cfg, corner), sdc=cfg.sdc, driving_cell=cfg.driving_cell,
+                              load_ff=cfg.load_ff, unc_setup_ps=cfg.clock_uncertainty_setup_ps,
+                              unc_hold_ps=cfg.clock_uncertainty_hold_ps, wire_load_model=cfg.wire_load_model,
+                              io_delay_frac=cfg.io_delay_frac, io_delay_min_frac=cfg.io_delay_min_frac,
+                              budget_section=_budget_section(cfg), hook_section=_hook_section(cfg, rank_scenario(cfg), corner, module))
+        if wns is None:
+            break
+        history.append({'period_ps': int(round(period)), 'wns_ns': wns})
+        if wns >= 0 and (best_pass is None or period < best_pass[0]):
+            best_pass = (period, wns)
+        if 0 <= wns * 1000 < 5:
+            break                                   # meets with less than 5 ps to spare: done
+        if len(history) >= 2 and history[-1]['period_ps'] != history[-2]['period_ps']:
+            dw = history[-1]['wns_ns'] - history[-2]['wns_ns']
+            dp = history[-1]['period_ps'] - history[-2]['period_ps']
+            if dw / dp > 1e-4:                      # I/O delays scale with the period, so the slope is < 1:1
+                slope = dw / dp
+        step = wns / slope                          # ps to remove (wns > 0) or add (wns < 0)
+        period = max(50.0, period - step + (0.0 if wns > 0 else 10.0))   # a few ps past the crossing when failing
+    if best_pass is None:
+        return {'period_ps': None, 'fmax_mhz': None, 'corner': corner, 'history': history, 'note': 'no period met timing within the search'}
+    p_ps = int(round(best_pass[0]))
+    res = {'period_ps': p_ps, 'fmax_mhz': round(1e6 / p_ps, 2), 'wns_ns_at_period': best_pass[1], 'corner': corner,
+           'iterations': len(history), 'history': history}
+    log.info(f"[fmax] {module}: {res['fmax_mhz']} MHz (period {p_ps} ps, WNS {best_pass[1]:+.3f} ns at the {corner} corner, {len(history)} STA runs)")
+    return res
+
+
 def run_corner_sta(cfg: Config, module: str, netlist: Path,
                    results_dir: Path) -> CornerResult:
     """Multi-corner STA as three single-library sessions (slow: setup + SDF,
@@ -2483,7 +2630,7 @@ def run_gls(cfg: Config, assembled_netlist: Path, sdf_paths: dict[str, str],
 def write_reports(cfg: Config, selections: dict[str, Selection],
                   corners: dict[str, CornerResult],
                   gls: Optional[GLSResult],
-                  results_dir: Path) -> None:
+                  results_dir: Path, fmax: Optional[dict] = None) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
 
     # ----- summary.json (full data) -----
@@ -2514,6 +2661,7 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
                 'pareto_front': sel.pareto_front,
                 'candidates': [asdict(c) for c in sel.candidates],
                 'corner': asdict(corners[m]) if m in corners else None,
+                'fmax': (fmax or {}).get(m),
             }
             for m, sel in selections.items()
         },
@@ -2642,6 +2790,17 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
                 p_ = corner.power.get(g)
                 if p_ and (g == 'total' or p_['total_w'] > 0):
                     pw_rows.append(f"| `{m}` | {g} | {p_['internal_w'] * 1e6:.2f} | {p_['switching_w'] * 1e6:.2f} | {p_['leakage_w'] * 1e6:.3f} | **{p_['total_w'] * 1e6:.2f}** |")
+    if fmax:
+        md.append('### Fmax (slow corner, ranking scenario)')
+        md.append('')
+        md.append('| Module | Fmax (MHz) | Period (ps) | WNS at period (ns) | STA runs |')
+        md.append('|---|---|---|---|---|')
+        for m, f in fmax.items():
+            if f.get('fmax_mhz'):
+                md.append(f"| `{m}` | **{f['fmax_mhz']}** | {f['period_ps']} | {f['wns_ns_at_period']:+.3f} | {f['iterations']} |")
+            else:
+                md.append(f"| `{m}` | — | — | — | {f.get('note', '')} |")
+        md.append('')
     drc_rows = []
     for m, sel in selections.items():
         corner = corners.get(m)
@@ -3232,6 +3391,8 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--strict', action='store_true', help=f'exit {EXIT_NOT_CLOSED} when any module is NOT CLOSED under its required scenarios or misses setup at sign-off (post-pass phase failures always exit {EXIT_POSTPASS_FAIL})')
     p.add_argument('--recover-power', action='store_true', help='recovery with total power (report_power) as the objective: swap/downsize off-critical cells while power drops, area does not grow and WNS holds')
     p.add_argument('--recover-area', action='store_true', help='after the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies --resize)')
+    p.add_argument('--resume', action='store_true', help='reuse mapped netlists and ranking STA whose inputs (RTL, liberties, recipe, constraints, settings, tools) did not change')
+    p.add_argument('--fmax', action='store_true', help='after sign-off, search the fastest clock period the delivered winner meets at the slow corner')
     p.add_argument('--keep-names', action='store_true', help='name register instances after their RTL wire (+_reg) so they survive flattening into STA reports and hook bindings')
     p.add_argument('--repair-drc', action='store_true', help='fix max transition / capacitance / fanout violations on the winner (driver upsize, else buffer trees; needs OpenSTA)')
     p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
@@ -3318,6 +3479,10 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.repair_drc = True
     if getattr(args, 'keep_names', False):
         cfg.keep_names = True
+    if getattr(args, 'resume', False):
+        cfg.resume = True
+    if getattr(args, 'fmax', False):
+        cfg.fmax_search = True
     if getattr(args, 'max_fanout', None):
         cfg.max_fanout = args.max_fanout
     if getattr(args, 'yosys_opts', None):
@@ -3588,6 +3753,8 @@ def main() -> int:
     def _log_recipe(res: RecipeResult):
         nonlocal any_synth_failed
         status = '✓' if res.success else '✗'
+        if res.reused:
+            status += ' reused'
         log.info(f"  [{status}] {res.module}/{res.recipe}  "
                  f"runtime={res.runtime_s:.1f}s  "
                  f"cells={res.cells}  area={res.area:.1f}"
@@ -3616,16 +3783,19 @@ def main() -> int:
         timing: dict[str, tuple[Optional[float], Optional[float]]] = {}
         if sta_jobs and cfg.run_sta:
             t0 = time.time()
+            n_reused = 0
             if cfg.effective_parallel() == 1 or len(sta_jobs) == 1:
                 for job in sta_jobs:
-                    rec, wns, tns = _quick_sta_job(job)
+                    rec, wns, tns, reused = _quick_sta_job(job)
                     timing[rec] = (wns, tns)
+                    n_reused += reused
             else:
                 with mp.Pool(min(cfg.effective_parallel(), len(sta_jobs))) as pool:
-                    for rec, wns, tns in pool.imap_unordered(_quick_sta_job, sta_jobs):
+                    for rec, wns, tns, reused in pool.imap_unordered(_quick_sta_job, sta_jobs):
                         timing[rec] = (wns, tns)
+                        n_reused += reused
             log.info(f"  quick STA: {len(sta_jobs)} candidates in {time.time() - t0:.1f}s "
-                     f"on {min(cfg.effective_parallel(), len(sta_jobs))} workers")
+                     f"on {min(cfg.effective_parallel(), len(sta_jobs))} workers" + (f" ({n_reused} reused)" if n_reused else ''))
         if cfg.constraint_hook:
             for job in sta_jobs:
                 lp = Path(job['log'])
@@ -3750,6 +3920,7 @@ def main() -> int:
 
     # ----- corner STA on winners -----
     corners: dict[str, CornerResult] = {}
+    fmax: dict[str, dict] = {}
     if cfg.run_sta:
         for module, sel in selections.items():
             if sel.winner is None:
@@ -3758,6 +3929,8 @@ def main() -> int:
             log.info(f"[sta] {module}  fast={Path(cfg.lib_fast).name}  typ={Path(cfg.lib_typ).name}  slow={Path(cfg.lib_slow).name}")
             cr = run_corner_sta(cfg, module, netlist, results)
             corners[module] = cr
+            if cfg.fmax_search:
+                fmax[module] = find_fmax(cfg, module, netlist, work / module / 'fmax', log)
             if cr.success:
                 log.info(f"  setup_slow={cr.wns_setup_slow}  setup_typ={cr.wns_setup_typ}  hold_fast={cr.wns_hold_fast}  hold_typ={cr.wns_hold_typ}")
             else:
@@ -3781,7 +3954,7 @@ def main() -> int:
             log.error(f"[gls] FAILED — {gls_result.error}")
 
     # ----- reports -----
-    write_reports(cfg, selections, corners, gls_result, results)
+    write_reports(cfg, selections, corners, gls_result, results, fmax=fmax)
     log.info(f"reports written to {results}/summary.{{md,json,csv}}")
 
     # ----- exit code -----

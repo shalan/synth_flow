@@ -202,6 +202,8 @@ Precedence and the full list: [docs/sdc-support.md](docs/sdc-support.md).
 | `--repair-hold` | Delay cells on failing hold endpoints at the fast corner, kept only while slow-corner setup holds |
 | `--repair-drc` | Fix max transition / capacitance / fanout violations on the winner: stronger driver, else buffer trees; kept only if the DRC slack improves and setup stays |
 | `--keep-names` | Name register instances after their RTL wires (`acc[3]_reg`) so they survive flattening into STA reports and hook bindings |
+| `--resume` | Reuse mapped netlists and ranking STA whose inputs did not change (content-keyed checkpoints in the work dir) |
+| `--fmax` | After sign-off, search the fastest clock period the delivered winner meets at the slow corner |
 | `--recover-area` | After the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies `--resize`) |
 | `--resize-candidates N` | Post-pass on the N best candidates (selected, fastest, Pareto front), then select again (implies `--resize`) |
 | `--strict` | Exit 6 when a module is NOT CLOSED under its required scenarios or misses setup (a post-pass phase failure always exits 5) |

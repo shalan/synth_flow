@@ -679,6 +679,23 @@ sign-off report reads `u_sram → acc[23]_reg`. The escaped-name mapping of
 §2.14 is what makes OpenSTA's `acc[23]_reg` and the netlist's
 `\\acc[23]_reg` the same object to the resizer.
 
+### 2.21 Resumable sweeps and a final Fmax
+
+`resume: true` keys every mapping on what feeds it (RTL and pre-read files,
+dependency netlists, synthesis liberties, recipe text, ABC constraint file,
+the settings that shape the Yosys script, the `yosys` binary) and every
+ranking STA on the netlist, liberties, SDC, hook and timing settings; a
+rerun with unchanged inputs takes the mapped netlist and its WNS/TNS from
+`work/<module>/<recipe>.ckpt.json` / `.qsta.json` instead of running Yosys
+and OpenSTA again (the arbiter's five-recipe sweep: 5.1 s → 1.2 s, all
+five reused). The post-pass had the same mechanism since §2.14. `fmax_search:
+true` answers the question the bench periods hide: at the slow corner, under
+the ranking scenario, what is the fastest clock this netlist meets? Setup
+slack moves with the period at a slope below 1:1 (the I/O delays scale with
+it), so the search uses a secant step `period ← period − WNS/slope` and
+reports the last period that met timing, within 5 ps, in four to six STA
+runs.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```
