@@ -330,7 +330,10 @@ class Config:
     # wall-clock budget (s) for one candidate's post-pass; the remaining phases
     # stop when it is spent and the phase status reads 'ok (time budget)'.
     # resize.json -> runtime gives OpenSTA calls and seconds per phase.
-    resize_time_budget_s: Optional[int] = None          # tns | wns (never regress WNS)
+    resize_time_budget_s: Optional[int] = None
+    # one persistent OpenSTA process per corner for the whole post-pass instead
+    # of a fresh `sta` (liberty re-read + relink) per trial. Also --sta-session.
+    sta_session: bool = False          # tns | wns (never regress WNS)
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -2832,7 +2835,7 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
 _RESIZE_KEY_FIELDS = ('period_ps', 'clock_port', 'clock_port_2', 'period_ps_2', 'driving_cell', 'load_ff',
                       'clock_uncertainty_setup_ps', 'clock_uncertainty_hold_ps', 'wire_load_model', 'io_delay_frac',
                       'io_delay_min_frac', 'resize_iters', 'resize_wns_tol_ps', 'resize_final', 'resize_recover_area',
-                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget', 'resize_time_budget_s',
+                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget', 'resize_time_budget_s', 'sta_session',
                       'dont_use', 'repair_buffer_cell', 'repair_delay_cell', 'select_margin_ps')
 
 
@@ -2976,7 +2979,7 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
             hold_max_paths=cfg.repair_hold_max_paths, hold_sta_budget=cfg.repair_hold_sta_budget,
-            time_budget_s=cfg.resize_time_budget_s,
+            time_budget_s=cfg.resize_time_budget_s, sta_session=cfg.sta_session,
             budget_section=_budget_section(cfg),
             hook_section=_hook_section(cfg, rank_scenario(cfg), 'slow' if cfg.lib_slow else 'typ', module),
             guard=_postpass_guard(cfg, module, netlist_in, work_dir),
@@ -3148,6 +3151,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--resize', action='store_true', help='OpenSTA-guided drive-strength sizing of each winner (needs OpenSTA)')
     p.add_argument('--repair-design', action='store_true', help='buffer trees on high-fanout nets of failing paths (needs OpenSTA)')
     p.add_argument('--resize-candidates', type=int, help='run the post-pass on the N best candidates and select again (default 1)')
+    p.add_argument('--sta-session', action='store_true', help='post-pass: one persistent OpenSTA process per corner (liberties read once) instead of a process per trial')
     p.add_argument('--strict', action='store_true', help=f'exit {EXIT_NOT_CLOSED} when any module is NOT CLOSED under its required scenarios or misses setup at sign-off (post-pass phase failures always exit {EXIT_POSTPASS_FAIL})')
     p.add_argument('--recover-area', action='store_true', help='after the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies --resize)')
     p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
@@ -3220,6 +3224,8 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.resize_winner = True
     if getattr(args, 'strict', False):
         cfg.strict = True
+    if getattr(args, 'sta_session', False):
+        cfg.sta_session = True
     if getattr(args, 'recover_area', False):
         cfg.resize_recover_area = True
         cfg.resize_winner = True

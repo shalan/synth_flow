@@ -464,17 +464,49 @@ def structural_problems(text: str, fam: LibCells, limit: int = 5) -> list[str]:
 # OpenSTA: worst path per failing endpoint with stage details
 # --------------------------------------------------------------------------
 
+REPORT_TCL = """\
+report_checks -path_delay {mode} -group_path_count {k} -endpoint_path_count 1 -slack_max {slack_max} -format full_clock_expanded -fields {{fanout cap slew}} -digits 4
+report_worst_slack -{mode} -digits 4
+report_tns -{mode} -digits 4
+"""
+
 PATHS_TCL = """\
 read_liberty {liberty}
 {extra_libs}
 read_verilog {netlist}
 link_design {top}
 {constraints}
-report_checks -path_delay {mode} -group_path_count {k} -endpoint_path_count 1 -slack_max {slack_max} -format full_clock_expanded -fields {{fanout cap slew}} -digits 4
-report_worst_slack -{mode} -digits 4
-report_tns -{mode} -digits 4
-exit
-"""
+""" + REPORT_TCL + 'exit\n'
+
+# --- persistent OpenSTA sessions (sta_session: true) -----------------------
+# One interactive `sta` per liberty set, alive for the whole post-pass: the
+# liberties are read once and each trial re-links the netlist (or, with a
+# pending incremental edit, re-times only what changed). Off by default.
+USE_SESSION = False
+SESSIONS: dict = {}
+SESSION_LOG = print
+
+
+def _session_for(opensta, liberty, extra_libs):
+    from sta_session import StaSession
+    key = (str(liberty), tuple(str(l) for l in (extra_libs or [])))
+    s = SESSIONS.get(key)
+    if s is None or not s.alive():
+        s = StaSession(opensta, [liberty, *(extra_libs or [])], log=SESSION_LOG)
+        s.start()
+        SESSIONS[key] = s
+    return s
+
+
+def close_sessions() -> dict:
+    """Close every session; returns their combined statistics."""
+    tot = {'relinks': 0, 'incremental': 0, 'commands': 0, 'seconds': 0.0, 'sessions': len(SESSIONS)}
+    for s in SESSIONS.values():
+        for k in ('relinks', 'incremental', 'commands', 'seconds'):
+            tot[k] += s.stats[k]
+        s.close()
+    SESSIONS.clear()
+    return tot
 
 _STAGE_RE = re.compile(
     r'^\s*(?:(\d+)\s+)?([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([v^])\s+(\S+)\s+\((\S+)\)\s*$')
@@ -512,19 +544,38 @@ STA_STATS = {'calls': 0, 'seconds': 0.0}     # every OpenSTA run of this process
 
 def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, tag, k=200, slack_max=0.0,
             mode='max', extra_libs=(), alias=None) -> StaOut:
-    tcl = out_dir / f'{tag}.tcl'
-    tcl.write_text(PATHS_TCL.format(liberty=liberty, netlist=netlist, top=top, constraints=constraints,
-                                    k=k, slack_max=slack_max, mode=mode,
-                                    extra_libs='\n'.join(f'read_liberty {l}' for l in (extra_libs or []))))
+    report = REPORT_TCL.format(k=k, slack_max=slack_max, mode=mode)
     t0 = time.time()
-    r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
+    if USE_SESSION:
+        # persistent process: liberties already read; re-link only when the
+        # linked design is not this netlist (incremental trials keep it in step)
+        from sta_session import StaSessionError
+        try:
+            ses = _session_for(opensta, liberty, extra_libs)
+            if ses.current is None or Path(ses.current) != Path(netlist) or ses.top != top:
+                ses.link(Path(netlist), top, constraints)
+            text = ses.report(report)
+            ok_run = True
+        except StaSessionError as e:
+            SESSION_LOG(f'sta session: {e}; falling back to a fresh OpenSTA process for {tag}')
+            text, ok_run = None, False
+        if text is None:
+            ok_run = None
+    else:
+        text, ok_run = None, None
+    if text is None:
+        tcl = out_dir / f'{tag}.tcl'
+        tcl.write_text(PATHS_TCL.format(liberty=liberty, netlist=netlist, top=top, constraints=constraints,
+                                        k=k, slack_max=slack_max, mode=mode,
+                                        extra_libs='\n'.join(f'read_liberty {l}' for l in (extra_libs or []))))
+        r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
+        text, ok_run = r.stdout + r.stderr, (r.returncode == 0)
     STA_STATS['calls'] += 1
     STA_STATS['seconds'] += time.time() - t0
-    text = r.stdout + r.stderr
     (out_dir / f'{tag}.log').write_text(text)
     if alias is None:
         alias = name_alias(Path(netlist).read_text())
-    res = parse_sta_report(text, alias, ok=(r.returncode == 0), slack_max=slack_max)
+    res = parse_sta_report(text, alias, ok=bool(ok_run), slack_max=slack_max)
     res.log = str(out_dir / f'{tag}.log')
     return res
 
@@ -627,8 +678,43 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            repair_hold=False, lib_fast=None, hold_iters=10, hold_max_paths=None, hold_sta_budget=60,
            extra_libs=(), extra_libs_fast=None, macro_libs=(), macro_libs_fast=None,
            dont_use=(), buffer_cell=None, delay_cell=None,
-           budget_section='', hook_section='', guard=None, time_budget_s=None,
+           budget_section='', hook_section='', guard=None, time_budget_s=None, sta_session=False,
            log=print) -> dict:
+    global USE_SESSION, SESSION_LOG
+    USE_SESSION, SESSION_LOG = bool(sta_session), log
+    try:
+        return _resize(netlist, top, liberty, sta_liberty, period_ps, clock_port, out_dir, sdc=sdc, iters=iters,
+                       margin_ps=margin_ps, yosys=yosys, opensta=opensta, driving_cell=driving_cell, load_ff=load_ff,
+                       unc_setup_ps=unc_setup_ps, unc_hold_ps=unc_hold_ps, wire_load_model=wire_load_model,
+                       io_delay_frac=io_delay_frac, io_delay_min_frac=io_delay_min_frac, clock_port_2=clock_port_2,
+                       period_ps_2=period_ps_2, per_path=per_path, max_paths=max_paths, wns_tol=wns_tol,
+                       wns_repair_iters=wns_repair_iters, final=final, recover_area=recover_area,
+                       recover_rounds=recover_rounds, repair_design=repair_design, max_fanout=max_fanout,
+                       buffer_iters=buffer_iters, repair_hold=repair_hold, lib_fast=lib_fast, hold_iters=hold_iters,
+                       hold_max_paths=hold_max_paths, hold_sta_budget=hold_sta_budget, extra_libs=extra_libs,
+                       extra_libs_fast=extra_libs_fast, macro_libs=macro_libs, macro_libs_fast=macro_libs_fast,
+                       dont_use=dont_use, buffer_cell=buffer_cell, delay_cell=delay_cell, budget_section=budget_section,
+                       hook_section=hook_section, guard=guard, time_budget_s=time_budget_s, log=log)
+    finally:
+        if SESSIONS:
+            st = close_sessions()
+            log(f"sta sessions: {st['sessions']} process(es), {st['relinks']} relinks, {st['incremental']} incremental trials, "
+                f"{st['commands']} commands, {st['seconds']:.1f}s")
+        USE_SESSION = False
+
+
+def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: int, clock_port: str,
+            out_dir: Path, *, sdc=None, iters=10, margin_ps=0, yosys='yosys', opensta='sta',
+            driving_cell=None, load_ff=17.65, unc_setup_ps=250, unc_hold_ps=100,
+            wire_load_model='auto', io_delay_frac=0.2, io_delay_min_frac=0.4, clock_port_2=None, period_ps_2=None,
+            per_path=1, max_paths=200, wns_tol=0.15, wns_repair_iters=8, final='tns',
+            recover_area=False, recover_rounds=6,
+            repair_design=False, max_fanout=8, buffer_iters=6,
+            repair_hold=False, lib_fast=None, hold_iters=10, hold_max_paths=None, hold_sta_budget=60,
+            extra_libs=(), extra_libs_fast=None, macro_libs=(), macro_libs_fast=None,
+            dont_use=(), buffer_cell=None, delay_cell=None,
+            budget_section='', hook_section='', guard=None, time_budget_s=None,
+            log=print) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     constraints = sf._sta_constraints(
         clock_port=clock_port, period_ns=period_ps / 1000.0, clock_port_2=clock_port_2,
@@ -1174,6 +1260,7 @@ def main() -> int:
     ap.add_argument('--max-fanout', type=int, default=8)
     ap.add_argument('--repair-hold', action='store_true', help='insert delay cells on failing hold endpoints (fast corner) while setup holds')
     ap.add_argument('--lib-fast', help='fast-corner liberty for hold analysis (default: --lib-sta)')
+    ap.add_argument('--sta-session', action='store_true', help='one persistent OpenSTA process per corner for the whole pass (liberties read once)')
     ap.add_argument('--time-budget-s', type=int, help='wall-clock budget for the whole post-pass; remaining phases stop when spent')
     ap.add_argument('--hold-max-paths', type=int, help='failing hold endpoints per STA (default: --max-paths)')
     ap.add_argument('--hold-sta-budget', type=int, default=60, help='max OpenSTA calls in the hold phase (default 60)')
@@ -1200,7 +1287,7 @@ def main() -> int:
                  recover_area=a.recover_area, recover_rounds=a.recover_rounds,
                  repair_design=a.repair_design, max_fanout=a.max_fanout,
                  repair_hold=a.repair_hold, lib_fast=a.lib_fast,
-                 hold_max_paths=a.hold_max_paths, hold_sta_budget=a.hold_sta_budget, time_budget_s=a.time_budget_s, extra_libs=a.extra_lib, macro_libs=a.macro_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
+                 hold_max_paths=a.hold_max_paths, hold_sta_budget=a.hold_sta_budget, time_budget_s=a.time_budget_s, sta_session=a.sta_session, extra_libs=a.extra_lib, macro_libs=a.macro_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
     if a.json:
         print(json.dumps(res, indent=2))
     return 0

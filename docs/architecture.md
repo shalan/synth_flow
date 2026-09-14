@@ -602,6 +602,21 @@ switching (net capacitance) and leakage power per group; `summary.md` shows
 it in µW, `summary.json` keeps watts, the bench CSV carries dynamic, static
 and total. On the SRAM wrapper the macro is 92 % of the total, which is the
 kind of fact the area and slack tables could not show.
+### 2.17 A persistent OpenSTA process for the post-pass
+
+Every trial of the post-pass started `sta`, read every liberty and linked
+the netlist: on the reviewer's 350k-cell uberSoC that was minutes per call
+and 45–60 minutes per candidate; even on `rr_arbiter16` with the full HS+LS
+liberties the 57 calls of one post-pass took 37.5 s, of which almost all was
+liberty parsing. `sta_session: true` keeps one interactive `sta` per corner
+alive for the whole pass (commands over stdin, a marker `puts` closes each
+reply): the liberties are read once and each trial is `read_verilog` +
+`link_design` + the constraints in that process. Same moves, same WNS and
+area, 2.7 s instead of 37.5 s. A failing session falls back to a fresh
+process for that trial. The next step (incremental trials: `replace_cell`,
+`make_instance`, `connect_pin` with undo on rejection, so OpenSTA re-times
+only what changed) is what makes the linking cost disappear as well; the
+session already implements `apply` / `undo` / `commit` for it.
 
 ## 3. Target architecture (revised after §2.5)
 
