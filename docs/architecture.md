@@ -630,6 +630,22 @@ delivered netlists are identical. One lesson from the verify mode: an
 with a half-sourced SDC and reports numbers a fresh process would never
 produce; `link()` now checks for that.
 
+### 2.18 Power as the recovery objective
+
+The recovery pass scored area: downsize, or move to a slower library, while
+WNS holds. With `report_power` available (§2.16) `resize_recover_objective:
+power` makes total power the score. Candidates are the same off-critical
+cells; they are ordered by their own consumption (`report_power -instances`,
+biggest first, so a bisected batch keeps the large consumers), and a batch is
+kept only if total power drops and area does not grow. Every trial's power
+comes from the same OpenSTA run that times it (`report_power` appended to
+the report; the switching activity travels with the constraints, so sessions
+and fresh processes agree). On `spi_master` HS+LS both objectives accept the
+same 91 swaps to LS and the measured total drops 1210 → 1094 µW (−9.6 %) at
+0.1 toggles/cycle; the objectives diverge when a swap saves area but not
+power (a library whose liberty reports zero leakage looks free to the area
+score) or when a batch has to be bisected.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

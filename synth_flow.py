@@ -319,6 +319,11 @@ class Config:
     # after timing: downsize / swap to a slower library off-critical cells while
     # WNS holds (resize.py --recover-area). Also --recover-area.
     resize_recover_area: bool = False
+    # recovery objective: 'area' (downsize / slower library, area is the score) or
+    # 'power' (OpenSTA report_power at the configured activity is the score: a batch
+    # is kept only if total power drops and area does not grow; biggest consumers
+    # first). Also --recover-power.
+    resize_recover_objective: str = 'area'
     # post-pass on the N most promising candidates (selected, fastest, Pareto
     # front), then select again: a fast candidate that only closes after
     # sizing is not missed. 1 = the selected winner only. Also --resize-candidates.
@@ -476,6 +481,8 @@ class Config:
                     errs.append(f"scenarios[{n}].checks: unknown {sorted(bad)} ({'|'.join(SCENARIO_CHECKS)})")
         if self.constraint_hook and not Path(self.constraint_hook).exists():
             errs.append(f"constraint_hook missing: {self.constraint_hook}")
+        if self.resize_recover_objective not in ('area', 'power'):
+            errs.append(f"resize_recover_objective must be area|power, got {self.resize_recover_objective}")
         if self.cts_stage not in ('pre_cts', 'post_cts'):
             errs.append(f"cts_stage must be pre_cts|post_cts, got {self.cts_stage}")
         if self.objective not in ('delay', 'area', 'balanced', 'fastest', 'pareto'):
@@ -2191,14 +2198,17 @@ def _power_section(cfg) -> str:
     toggle rate (`power_activity`, `power_duty`) on every input."""
     if not _cfg_get(cfg, 'report_power', True):
         return ''
+    return POWER_TCL.format(activity=_power_activity_tcl(cfg))
+
+
+def _power_activity_tcl(cfg) -> str:
+    """The switching-activity command(s) for report_power: VCD/SAIF when given, else uniform."""
     f = _cfg_get(cfg, 'power_activity_file')
     if f:
         kind = '-saif' if str(f).lower().endswith('.saif') else '-vcd'
         scope = _cfg_get(cfg, 'power_scope')
-        act = f'read_power_activities {kind} {f}' + (f' -scope {scope}' if scope else '')
-    else:
-        act = f"set_power_activity -input -activity {_cfg_get(cfg, 'power_activity', 0.1)} -duty {_cfg_get(cfg, 'power_duty', 0.5)}"
-    return POWER_TCL.format(activity=act)
+        return f'read_power_activities {kind} {f}' + (f' -scope {scope}' if scope else '')
+    return f"set_power_activity -input -activity {_cfg_get(cfg, 'power_activity', 0.1)} -duty {_cfg_get(cfg, 'power_duty', 0.5)}"
 
 
 def _parse_power(section: str) -> dict:
@@ -2836,7 +2846,7 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
 _RESIZE_KEY_FIELDS = ('period_ps', 'clock_port', 'clock_port_2', 'period_ps_2', 'driving_cell', 'load_ff',
                       'clock_uncertainty_setup_ps', 'clock_uncertainty_hold_ps', 'wire_load_model', 'io_delay_frac',
                       'io_delay_min_frac', 'resize_iters', 'resize_wns_tol_ps', 'resize_final', 'resize_recover_area',
-                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget', 'resize_time_budget_s', 'sta_session',
+                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget', 'resize_time_budget_s', 'sta_session', 'resize_recover_objective', 'power_activity', 'power_duty', 'power_activity_file',
                       'dont_use', 'repair_buffer_cell', 'repair_delay_cell', 'select_margin_ps')
 
 
@@ -2986,7 +2996,8 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
             guard=_postpass_guard(cfg, module, netlist_in, work_dir),
             extra_libs=_postpass_libs(cfg)['std'], extra_libs_fast=_postpass_libs(cfg)['std_fast'],
             macro_libs=_postpass_libs(cfg)['macro'], macro_libs_fast=_postpass_libs(cfg)['macro_fast'],
-            recover_area=cfg.resize_recover_area,
+            recover_area=cfg.resize_recover_area, recover_objective=cfg.resize_recover_objective,
+            power_activity_tcl=_power_activity_tcl(cfg),
             dont_use=cfg.dont_use, buffer_cell=cfg.repair_buffer_cell, delay_cell=cfg.repair_delay_cell,
             log=lambda *x: log.debug('[resize] ' + ' '.join(str(v) for v in x)))
     except Exception as e:
@@ -3019,6 +3030,9 @@ def _log_resize(module: str, res: dict, log) -> None:
     bad = {k: v for k, v in st.items() if v.startswith('failed')}
     if res.get('reused_checkpoint'):
         log.info(f'[resize] {module}: reused checkpoint (same netlist, libraries, SDC and settings)')
+    p0, p1 = res['start'].get('power_w'), res['end'].get('power_w')
+    if p0 and p1:
+        log.info(f"[resize] {module}: power {p0 * 1e6:.1f} -> {p1 * 1e6:.1f} uW ({(p1 / p0 - 1) * 100:+.1f}%) at the recovery activity")
     log.info(f"[resize] {module}: WNS {res['start']['wns_ns']:+.3f} -> {res['end']['wns_ns']:+.3f}  "
              f"TNS {res['start']['tns_ns']:+.2f} -> {res['end']['tns_ns']:+.2f}  "
              f"area {res['start']['area']:.0f} -> {res['end']['area']:.0f}  cells {res.get('cells_start', '?')} -> {res.get('cells_end', '?')}  "
@@ -3154,6 +3168,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--resize-candidates', type=int, help='run the post-pass on the N best candidates and select again (default 1)')
     p.add_argument('--sta-session', action='store_true', help='post-pass: one persistent OpenSTA process per corner (liberties read once) instead of a process per trial')
     p.add_argument('--strict', action='store_true', help=f'exit {EXIT_NOT_CLOSED} when any module is NOT CLOSED under its required scenarios or misses setup at sign-off (post-pass phase failures always exit {EXIT_POSTPASS_FAIL})')
+    p.add_argument('--recover-power', action='store_true', help='recovery with total power (report_power) as the objective: swap/downsize off-critical cells while power drops, area does not grow and WNS holds')
     p.add_argument('--recover-area', action='store_true', help='after the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies --resize)')
     p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
     p.add_argument('--max-fanout', type=int, help='sink group size for repair_design (default 8; SDC set_max_fanout overrides)')
@@ -3229,6 +3244,9 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.sta_session = True
     if getattr(args, 'recover_area', False):
         cfg.resize_recover_area = True
+    if getattr(args, 'recover_power', False):
+        cfg.resize_recover_area = True
+        cfg.resize_recover_objective = 'power'
         cfg.resize_winner = True
     if getattr(args, 'repair_hold', False):
         cfg.repair_hold = True

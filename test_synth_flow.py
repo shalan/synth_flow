@@ -422,7 +422,7 @@ with tempfile.TemporaryDirectory() as td:
             "  sky130_fd_sc_hd__dfxtp_1 f1 (\n    .CLK(clk),\n    .D(n2),\n    .Q(y)\n  );\nendmodule\n")
     _in = Path(td) / 'in.v'; _in.write_text(_nlt)
     _calls = {'n': 0}
-    def _fake_sta(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode='max', extra_libs=()):
+    def _fake_sta(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode="max", extra_libs=(), **kw):
         _calls['n'] += 1
         if mode == 'min':
             raise RuntimeError('simulated OpenSTA crash in the hold phase')
@@ -473,7 +473,7 @@ with tempfile.TemporaryDirectory() as td:
             "  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(n2)\n  );\n"
             "  sky130_fd_sc_hd__dfxtp_1 f1 (\n    .CLK(clk),\n    .D(n2),\n    .Q(y)\n  );\nendmodule\n")
     _in = Path(td) / 'in.v'; _in.write_text(_nlt)
-    def _fake_sta2(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode='max', extra_libs=(), alias=None):
+    def _fake_sta2(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode="max", extra_libs=(), alias=None, **kw):
         txt = Path(netlist).read_text()
         has_delay = '_rd_' in txt
         if mode == 'min':      # hold: violated until a delay cell is in
@@ -507,7 +507,7 @@ with tempfile.TemporaryDirectory() as td:
             "  sky130_fd_sc_hd__buf_1 b1 (\n    .A(n1),\n    .X(n2)\n  );\n"
             "  sky130_fd_sc_hd__dfxtp_1 f1 (\n    .CLK(clk),\n    .D(n2),\n    .Q(y)\n  );\nendmodule\n")
     _in = Path(td) / 'in.v'; _in.write_text(_nlt)
-    def _fake_sta3(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode='max', extra_libs=(), alias=None):
+    def _fake_sta3(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode="max", extra_libs=(), alias=None, **kw):
         txt = Path(netlist).read_text(); has_delay = '_rd_' in txt
         if mode == 'min':
             return _SO(ok=True, wns=0.1 if has_delay else -0.2, tns=0.0 if has_delay else -0.2,
@@ -622,6 +622,34 @@ if _shutil.which('sta'):
         _tcl.write_text(f'read_liberty {LIB_SS}\nread_verilog {_ed}\nlink_design s\n{_con}report_worst_slack -min -digits 4\nexit\n')
         _ref = _sp.run(['sta', '-no_init', '-exit', str(_tcl)], capture_output=True, text=True).stdout
         check('incremental make_instance/reconnect trial times like the rendered netlist in a fresh process', abs(_w(_inc) - _w(_ref)) < 1e-4, str((_inc.strip(), _ref.strip()[-40:])))
+# --- power-objective recovery: biggest consumers first, power must drop, area must not grow --
+with tempfile.TemporaryDirectory() as td:
+    _in = Path(td) / 'in.v'; _in.write_text(_nlt)          # i1 inv_2, b1 buf_1, f1
+    def _fake_sta4(opensta, liberty, netlist, top, constraints, out_dir, tag, k=200, slack_max=0.0, mode='max', extra_libs=(), alias=None, power=False, **kw):
+        txt = Path(netlist).read_text()
+        if mode == 'min':
+            return _SO(ok=True, wns=0.1, tns=0.0, paths=[])
+        pw = 1.0e-3 - (2.0e-4 if 'inv_1 i1' in txt else 0.0)      # downsizing i1 saves power; nothing else does
+        pwd = {'total': {'internal_w': pw, 'switching_w': 0.0, 'leakage_w': 0.0, 'total_w': pw}} if power else None
+        if 'buf_1 b1' in txt:      # b1 must be buf_2 or the path fails (the input netlist starts that way)
+            return _SO(ok=True, wns=-0.10, tns=-0.10, paths=[_PI(endpoint='f1', slack=-0.10, stages=[_ST('b1', 'X', 'sky130_fd_sc_hd__buf_1', 0.30, 1, 0.01, 0.1)])], power=pwd)
+        return _SO(ok=True, wns=0.05, tns=0.0, paths=[], power=pwd)
+    _seen = {}
+    def _fake_ipower(opensta, liberty, netlist, top, constraints, out_dir, tag, insts, extra_libs=()):
+        _seen.setdefault('insts', set()).update(insts); return {'i1': 5e-4, 'b1': 1e-4}
+    _orig = (_rz.run_sta, _rz.area_of, _rz.instance_power, _rz.sf._sta_constraints, _rz.sf._wire_load_section)
+    _rz.run_sta = _fake_sta4; _rz.area_of = lambda *a, **k: 100.0; _rz.instance_power = _fake_ipower
+    _rz.sf._sta_constraints = lambda **k: ''; _rz.sf._wire_load_section = lambda *a, **k: ''
+    try:
+        _pw = _rz.resize(_in, 'top', str(LIB_SS), str(LIB_SS), 1000, 'clk', Path(td) / 'pw', iters=3, recover_area=True,
+                         recover_objective='power', power_activity_tcl='set_power_activity -input -activity 0.1 -duty 0.5', log=lambda *x: None)
+    finally:
+        _rz.run_sta, _rz.area_of, _rz.instance_power, _rz.sf._sta_constraints, _rz.sf._wire_load_section = _orig
+    _pt = Path(_pw['output']).read_text()
+    check('power recovery: i1 downsized (power drops), b1 kept (timing), power recorded start -> end',
+          'inv_1 i1' in _pt and 'buf_2 b1' in _pt and _pw['start']['power_w'] == 1.0e-3 and _pw['end']['power_w'] == 8.0e-4
+          and _pw['recover_objective'] == 'power' and _pw['status']['recover_area'] == 'ok' and 'i1' in _seen.get('insts', []),
+          str((_pw['start'].get('power_w'), _pw['end'].get('power_w'), _pw['status'], _seen)))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
