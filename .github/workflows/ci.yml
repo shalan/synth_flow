@@ -44,9 +44,9 @@ jobs:
       - name: Build OpenSTA (cache miss only)
         if: steps.sta-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get install -y -qq cmake swig bison flex tcl-dev tcl8.6-dev libeigen3-dev zlib1g-dev >/dev/null
+          sudo apt-get install -y -qq cmake swig bison flex tcl-dev tcl8.6-dev libeigen3-dev zlib1g-dev autoconf automake libtool >/dev/null
           git clone -q --depth 1 https://github.com/ivmai/cudd "$HOME/cudd-src"
-          (cd "$HOME/cudd-src" && ./configure --prefix="$HOME/cudd" >/dev/null && make -j4 >/dev/null && make install >/dev/null)
+          (cd "$HOME/cudd-src" && autoreconf -fi >/dev/null 2>&1 && ./configure --prefix="$HOME/cudd" >/dev/null && make -j4 >/dev/null && make install >/dev/null)
           git clone -q https://github.com/parallaxsw/OpenSTA "$HOME/opensta-src"
           (cd "$HOME/opensta-src" && git checkout -q "$OPENSTA_REF" && mkdir -p build && cd build \
              && cmake .. -DCUDD_DIR="$HOME/cudd" -DCMAKE_INSTALL_PREFIX="$HOME/opensta" -DCMAKE_BUILD_TYPE=Release >/dev/null \
