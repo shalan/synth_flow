@@ -220,6 +220,7 @@ functional clock-period violation are reported as what they are.
 | `resize_candidates` | int | `1` | Run the post-pass on the N most promising candidates (the selected one, the fastest, then the Pareto front) and select again with the same rule on the post-pass numbers. Catches a fast candidate that only closes after sizing. Per-candidate before/after in `results/<module>/postpass.json`. Also `--resize-candidates N` (implies `--resize`). |
 | `repair_hold_max_paths` | int | `max_paths` (200) | Failing hold endpoints listed per STA in the hold phase. |
 | `repair_hold_sta_budget` | int | `60` | OpenSTA calls the hold phase may spend (two per trial batch); the phase stops with status `ok (budget)` when it is used up. |
+| `resize_time_budget_s` | int | — | Wall-clock budget for one candidate's post-pass. When spent, the remaining phases stop and their status reads `ok (time budget)`; the delivered netlist is the last accepted one. `resize.json` → `runtime` reports total seconds, OpenSTA calls and seconds per phase (buffering, sizing, recovery, hold); the flow log prints the same after each candidate. |
 | `resize_recover_area` | bool | `false` | After timing is met: downsize off-critical cells, or with several libraries swap them to the slower one first, in batches accepted only while WNS stays at its floor and TNS does not drop. Also `--recover-area` (implies `--resize`). |
 | `resize_final` | string | `tns` | `tns`: best TNS within the tolerance; `wns`: never return a netlist with worse WNS than the input. Timing-clean states are always eligible. |
 
@@ -246,6 +247,17 @@ liberty files, SDC text and settings; a rerun with the same inputs reuses it.
 `resize.json` → `timing` says whether setup and hold actually closed on the
 delivered netlist and whether the final state was rolled back; cell count,
 library mix and hold numbers are recomputed from that netlist.
+
+**Runtime.** Every trial is a fresh OpenSTA process that re-reads the
+liberties and re-links the netlist, so on a 350k-cell design one call is
+minutes and a candidate's post-pass is dozens of calls (hold search up to
+`repair_hold_sta_budget`, plus one scenario check per required
+scenario × corner at each accepted batch). The required scenario checks now
+run side by side, `resize_time_budget_s` bounds a candidate, and the
+`runtime` block shows where the time went. The structural fix, a persistent
+OpenSTA session with incremental edits (`replace_cell`, `insert_buffer`,
+`make_net` / `connect_pin`) instead of a process per trial, is on the
+roadmap.
 
 Every edited netlist passes a structural check before it is timed (one module,
 known cells, liberty pins, single driver per net) and is rejected otherwise.

@@ -557,7 +557,13 @@ reviewer on uberSoC: both are renamed and a regression drives a guard
 callable through sizing, recovery and hold. Phase failures now exit 5, and
 `--strict` exits 6 on a NOT CLOSED module; after the post-pass the required
 checks run again on the repaired netlists so `postpass.json` never calls a
-failing candidate "meeting timing".
+failing candidate "meeting timing" (the rationale now says "meeting the
+ranking-scenario setup", which is what it measures). Runtime on uberSoC
+(350k cells): 57 min HD / 44 min HS for three candidates in parallel, all of
+it OpenSTA process start-up and linking; `resize.json` → `runtime` now
+breaks OpenSTA calls and seconds down per phase, required scenario checks
+run concurrently, and `resize_time_budget_s` bounds a candidate. The real
+fix is a persistent OpenSTA session with incremental edits (roadmap).
 
 ### 2.15 Named scenarios: rank on one, accept on all
 

@@ -326,7 +326,11 @@ class Config:
     # hold repair search budgets (resize.py): failing endpoints per STA and the
     # number of OpenSTA calls the hold phase may spend
     repair_hold_max_paths: Optional[int] = None
-    repair_hold_sta_budget: int = 60          # tns | wns (never regress WNS)
+    repair_hold_sta_budget: int = 60
+    # wall-clock budget (s) for one candidate's post-pass; the remaining phases
+    # stop when it is spent and the phase status reads 'ok (time budget)'.
+    # resize.json -> runtime gives OpenSTA calls and seconds per phase.
+    resize_time_budget_s: Optional[int] = None          # tns | wns (never regress WNS)
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -785,9 +789,13 @@ def check_required(cfg, module: str, netlist: Path, out_dir: Path, tag: str, com
     """Run every required (scenario, corner) check on `netlist`; returns the
     checks and the flat list of failures ('scenario@corner: what')."""
     sc = _cfg_get(cfg, 'scenarios') or {}
+    todo = list(combos if combos is not None else required_combos(cfg))
+    # one OpenSTA process per (scenario, corner); they are independent, so run them side by side
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=max(1, min(len(todo), 8))) as ex:
+        results = list(ex.map(lambda sc_c: run_scenario_check(cfg, module, netlist, sc_c[0], sc_c[1], out_dir, f'{tag}_{sc_c[0]}_{sc_c[1]}'), todo))
     checks, fails = [], []
-    for s, c in (combos if combos is not None else required_combos(cfg)):
-        chk = run_scenario_check(cfg, module, netlist, s, c, out_dir, f'{tag}_{s}_{c}')
+    for (s, c), chk in zip(todo, results):
         chk.failures = [f'{s}@{c}: {x}' for x in scenario_failures(chk, sc.get(s, {}).get('checks') or list(SCENARIO_CHECKS))]
         checks.append(chk)
         fails += chk.failures
@@ -2103,7 +2111,7 @@ def select_winner(cands: list[Candidate], objective: str = 'balanced',
     meeting = [c for c in valid if c.wns_ns >= margin_ns]
     if meeting:
         winner = min(meeting, key=lambda c: (c.area, -c.wns_ns, _stability_idx(c.recipe)))
-        rationale = (f'min area among {len(meeting)}/{len(valid)} candidates meeting timing '
+        rationale = (f'min area among {len(meeting)}/{len(valid)} candidates meeting the ranking-scenario setup '
                      f'(WNS={winner.wns_ns:+.3f} ns, margin {margin_ns} ns): {winner.area:.1f} um²')
     else:
         best = max(valid, key=lambda c: (c.wns_ns, -c.area, -_stability_idx(c.recipe)))
@@ -2748,7 +2756,7 @@ def write_derived_sdc(cfg: Config, c, path: Path, overrides: list[str], groups: 
 _RESIZE_KEY_FIELDS = ('period_ps', 'clock_port', 'clock_port_2', 'period_ps_2', 'driving_cell', 'load_ff',
                       'clock_uncertainty_setup_ps', 'clock_uncertainty_hold_ps', 'wire_load_model', 'io_delay_frac',
                       'io_delay_min_frac', 'resize_iters', 'resize_wns_tol_ps', 'resize_final', 'resize_recover_area',
-                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget',
+                      'repair_design', 'max_fanout', 'repair_hold', 'repair_hold_max_paths', 'repair_hold_sta_budget', 'resize_time_budget_s',
                       'dont_use', 'repair_buffer_cell', 'repair_delay_cell', 'select_margin_ps')
 
 
@@ -2892,6 +2900,7 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
             hold_max_paths=cfg.repair_hold_max_paths, hold_sta_budget=cfg.repair_hold_sta_budget,
+            time_budget_s=cfg.resize_time_budget_s,
             budget_section=_budget_section(cfg),
             hook_section=_hook_section(cfg, rank_scenario(cfg), 'slow' if cfg.lib_slow else 'typ', module),
             guard=_postpass_guard(cfg, module, netlist_in, work_dir),
@@ -2935,7 +2944,10 @@ def _log_resize(module: str, res: dict, log) -> None:
              f"area {res['start']['area']:.0f} -> {res['end']['area']:.0f}  cells {res.get('cells_start', '?')} -> {res.get('cells_end', '?')}  "
              f"({len(res['moves'])} moves, {res['buffers_inserted']} buffers, {res['delay_cells_inserted']} delay cells"
              + (f"; hold@fast {res['hold_before'][0]:+.3f} -> {res['hold_after'][0]:+.3f}" if res.get('hold_before') and res['hold_before'][0] is not None and res.get('hold_after') and res['hold_after'][0] is not None else '')
-             + ')' + (f"  PHASES FAILED: {bad}" if bad else ''))
+             + ')' + (f"  PHASES FAILED: {bad}" if bad else '')
+             + (f"  [{res['runtime']['total_seconds']:.0f}s, {res['runtime']['sta_calls']} STA calls: "
+                + ', '.join(f"{k} {v['sta_calls']}/{v['seconds']:.0f}s" for k, v in res['runtime']['phases'].items() if v['sta_calls']) + ']'
+                if res.get('runtime') else ''))
 
 
 def _postpass_candidates(cands: list, sel, n: int) -> list:

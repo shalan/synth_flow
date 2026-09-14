@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -506,13 +507,19 @@ class StaOut:
     log: str = ''
 
 
+STA_STATS = {'calls': 0, 'seconds': 0.0}     # every OpenSTA run of this process (resize() reports per phase)
+
+
 def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, tag, k=200, slack_max=0.0,
             mode='max', extra_libs=(), alias=None) -> StaOut:
     tcl = out_dir / f'{tag}.tcl'
     tcl.write_text(PATHS_TCL.format(liberty=liberty, netlist=netlist, top=top, constraints=constraints,
                                     k=k, slack_max=slack_max, mode=mode,
                                     extra_libs='\n'.join(f'read_liberty {l}' for l in (extra_libs or []))))
+    t0 = time.time()
     r = subprocess.run([opensta, '-no_init', '-exit', str(tcl)], capture_output=True, text=True, timeout=1800)
+    STA_STATS['calls'] += 1
+    STA_STATS['seconds'] += time.time() - t0
     text = r.stdout + r.stderr
     (out_dir / f'{tag}.log').write_text(text)
     if alias is None:
@@ -620,7 +627,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            repair_hold=False, lib_fast=None, hold_iters=10, hold_max_paths=None, hold_sta_budget=60,
            extra_libs=(), extra_libs_fast=None, macro_libs=(), macro_libs_fast=None,
            dont_use=(), buffer_cell=None, delay_cell=None,
-           budget_section='', hook_section='', guard=None,
+           budget_section='', hook_section='', guard=None, time_budget_s=None,
            log=print) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     constraints = sf._sta_constraints(
@@ -663,6 +670,23 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     if not sta.ok:
         raise RuntimeError(f'OpenSTA failed, see {sta.log}')
     area0 = area_of(yosys, liberty, cur, top, std_extra, read_only=macro_libs)
+    # runtime accounting: OpenSTA calls / seconds per phase, and an optional
+    # wall-clock budget after which the remaining phases stop (status 'ok (time budget)')
+    t_start = time.time()
+    marks: list[tuple[str, int, float, float]] = [('start', STA_STATS['calls'], STA_STATS['seconds'], t_start)]
+
+    def _mark(name):
+        marks.append((name, STA_STATS['calls'], STA_STATS['seconds'], time.time()))
+
+    budget_stop = {'hit': False}
+
+    def _over_budget() -> bool:
+        if time_budget_s is not None and time.time() - t_start > time_budget_s:
+            if not budget_stop['hit']:
+                log(f'time budget of {time_budget_s}s spent after {time.time() - t_start:.0f}s; stopping the remaining phases')
+            budget_stop['hit'] = True
+            return True
+        return False
     leak0, mix0 = fam.leakage_total(types), fam.lib_mix(types)
     if fam.is_multi_lib():
         log(f'libraries by speed: ' + ', '.join(Path(l).stem for l, _ in sorted(fam.lib_speed.items(), key=lambda x: x[1]))
@@ -714,7 +738,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                 buf_cell, buf_in, buf_out = fam.buffer_cell()
             buffered: set[str] = set()
             for rnd in range(buffer_iters):
-                if not sta.paths:
+                if not sta.paths or _over_budget():
                     break
                 nl = Netlist(text, out_pins, bus_ranges)
                 cands: list[tuple[float, str]] = []
@@ -771,6 +795,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     except Exception as e:      # keep the last accepted netlist; never lose earlier gains
         phase_status['repair_design'] = f'failed: {e}'
         log(f'repair_design: phase aborted ({e}); continuing with the last accepted netlist')
+    _mark('repair_design')
     def evaluate(moves: dict[str, str], tag: str):
         new_text = retype(text, moves)
         new = out_dir / f'{tag}.v'
@@ -790,7 +815,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
 
     stall = 0
     iters = iters + it          # buffering iterations do not eat the upsizing budget
-    while it < iters:
+    while it < iters and not _over_budget():
         if not sta.paths:
             log('no failing endpoints; done')
             break
@@ -837,6 +862,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
     wns_tol = 0.0
     tried2: set[str] = set()
     for rep in range(wns_repair_iters):
+        if _over_budget():
+            break
         if not sta.paths or (start_wns is not None and sta.wns >= start_wns - 1e-6 and sta.wns >= 0):
             break
         worst = sorted(sta.paths, key=lambda pth: pth.slack)[:3]
@@ -857,6 +884,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             types.update(moves)
             total_moves.update(moves)
             states.append((cur, sta.wns, sta.tns, dict(total_moves), {'buffers': buffers_inserted, 'delay': delay_cells}))
+    _mark('sizing')
     # Phase 3 (optional): area recovery. Downsize cells that are not on any
     # path within `guard` of the margin, in batches bisected on rejection.
     # Accepted only while WNS stays >= min(start WNS, margin) and TNS does not
@@ -867,6 +895,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             floor_wns = min(sta.wns, margin)
             tried3: set[str] = set()
             for rnd in range(recover_rounds):
+                if _over_budget():
+                    break
                 near = run_sta(opensta, sta_liberty, cur, top, constraints, out_dir, f'near{rnd}', k=2000,
                                slack_max=margin + sens_band, extra_libs=extra_libs)
                 protected = {st.inst for pth in near.paths for st in pth.stages}
@@ -906,6 +936,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         phase_status['recover_area'] = f'failed: {e}'
         log(f'recover_area: phase aborted ({e}); continuing with the last accepted netlist')
 
+    _mark('recover_area')
     # Phase 4 (optional): repair_hold. Min-delay STA at the fast corner lists
     # failing hold endpoints; each gets one delay element in front of its
     # data pin (dlygate if the library has one, else buf_1). A round is kept
@@ -972,7 +1003,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
             """Insert one delay cell per target; accept on hold TNS gain with setup intact.
             Returns True/False (None when the budget is spent)."""
             nonlocal cur, text, hold, sta, types, delay_cells, it, sta_calls
-            if sta_calls + 2 > hold_sta_budget:
+            if sta_calls + 2 > hold_sta_budget or _over_budget():
                 return None
             nl = Netlist(text, out_pins, bus_ranges)
             n = 0
@@ -1034,7 +1065,8 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
                 batch = [t for t in batch if t not in tried_hold]
                 res_b = try_batch(batch, rnd + 1)
                 if res_b is None:
-                    log(f'hold: STA budget of {hold_sta_budget} calls spent; stopping')
+                    if not budget_stop['hit']:
+                        log(f'hold: STA budget of {hold_sta_budget} calls spent; stopping')
                     budget_hit = True
                     break
                 if res_b:
@@ -1055,6 +1087,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         log(f'repair_hold: phase aborted ({e}); continuing with the last accepted netlist')
         log(traceback.format_exc())
 
+    _mark('repair_hold')
     # Final state: best TNS among accepted states that did not regress WNS;
     # if every improvement moved the worst path, best TNS overall (reported).
     # States that meet timing (WNS >= margin) are always eligible: area
@@ -1097,6 +1130,19 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         log(f'leakage {leak0 / 1000:.2f} -> {leak1 / 1000:.2f} uW ({(leak1 / leak0 - 1) * 100 if leak0 else 0:+.1f}%); mix {mix1}')
     phase_status.setdefault('sizing', 'ok')
     phase_status.setdefault('repair_hold', 'skipped')
+    _mark('final')
+    phases = {}
+    for (n0, c0, s0_, t0_), (n1, c1, s1_, t1_) in zip(marks, marks[1:]):
+        phases[n1] = {'sta_calls': c1 - c0, 'sta_seconds': round(s1_ - s0_, 1), 'seconds': round(t1_ - t0_, 1)}
+    runtime = {'total_seconds': round(time.time() - t_start, 1), 'sta_calls': marks[-1][1] - marks[0][1],
+               'sta_seconds': round(marks[-1][2] - marks[0][2], 1), 'time_budget_s': time_budget_s,
+               'budget_hit': budget_stop['hit'], 'phases': phases}
+    if budget_stop['hit']:
+        for k in ('sizing', 'recover_area', 'repair_hold', 'repair_design'):
+            if phase_status.get(k) == 'ok':
+                phase_status[k] = 'ok (time budget)'
+    log('runtime: ' + f"{runtime['total_seconds']}s, {runtime['sta_calls']} OpenSTA calls ({runtime['sta_seconds']}s); "
+        + ', '.join(f"{k} {v['sta_calls']} calls/{v['seconds']}s" for k, v in phases.items() if v['sta_calls'] or v['seconds'] > 1))
     res = {'input': str(netlist), 'output': str(final), 'top': top, 'status': phase_status,
            'cells_start': len(instance_types(netlist.read_text())), 'cells_end': len(types),
            'start': {'wns_ns': start_wns, 'tns_ns': start_tns, 'area': area0,
@@ -1104,7 +1150,7 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            'end': {'wns_ns': sta.wns, 'tns_ns': sta.tns, 'area': area, 'failing': len(sta.paths), 'leakage_nw': leak1, 'lib_mix': mix1},
            'moves': total_moves, 'steps': [asdict(s) for s in steps], 'wns_regressed': wns_regressed,
            'buffers_inserted': buffers_inserted, 'delay_cells_inserted': delay_cells,
-           'hold_before': hold_before, 'hold_after': hold_after,
+           'hold_before': hold_before, 'hold_after': hold_after, 'runtime': runtime,
            # phase status says whether a phase ran to completion; this says whether timing closed
            'timing': {'setup_met': bool(sta.wns is not None and sta.wns >= margin - 1e-6),
                       'hold_met': (None if hold_after is None or hold_after[0] is None else bool(hold_after[0] >= -1e-6)),
@@ -1128,6 +1174,7 @@ def main() -> int:
     ap.add_argument('--max-fanout', type=int, default=8)
     ap.add_argument('--repair-hold', action='store_true', help='insert delay cells on failing hold endpoints (fast corner) while setup holds')
     ap.add_argument('--lib-fast', help='fast-corner liberty for hold analysis (default: --lib-sta)')
+    ap.add_argument('--time-budget-s', type=int, help='wall-clock budget for the whole post-pass; remaining phases stop when spent')
     ap.add_argument('--hold-max-paths', type=int, help='failing hold endpoints per STA (default: --max-paths)')
     ap.add_argument('--hold-sta-budget', type=int, default=60, help='max OpenSTA calls in the hold phase (default 60)')
     ap.add_argument('--macro-lib', action='append', default=[], help='hard-macro liberty: timing + pins, not counted in area (repeatable)')
@@ -1153,7 +1200,7 @@ def main() -> int:
                  recover_area=a.recover_area, recover_rounds=a.recover_rounds,
                  repair_design=a.repair_design, max_fanout=a.max_fanout,
                  repair_hold=a.repair_hold, lib_fast=a.lib_fast,
-                 hold_max_paths=a.hold_max_paths, hold_sta_budget=a.hold_sta_budget, extra_libs=a.extra_lib, macro_libs=a.macro_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
+                 hold_max_paths=a.hold_max_paths, hold_sta_budget=a.hold_sta_budget, time_budget_s=a.time_budget_s, extra_libs=a.extra_lib, macro_libs=a.macro_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
     if a.json:
         print(json.dumps(res, indent=2))
     return 0

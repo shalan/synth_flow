@@ -163,6 +163,15 @@ bench exists.
 
 ## Backlog from user reviews (2026-09)
 
+- **Persistent OpenSTA session for the post-pass.** Today each trial spawns
+  `sta`, re-reads every liberty and re-links the netlist; on a 350k-cell
+  design that is minutes per call and 45–60 min per candidate (uberSoC HD60
+  / HS80, three candidates in parallel). Keep one OpenSTA process per
+  candidate, mirror the netlist edits with `replace_cell`, `insert_buffer`,
+  `make_instance` / `make_net` / `connect_pin`, and use incremental timing;
+  scenario guards become `read_sdc` swaps in the same session. Expected
+  10–50× on large designs. Interim: parallel scenario checks,
+  `resize_time_budget_s`, per-phase runtime accounting (done).
 - Resumable, content-addressed sweeps (skip recipes whose inputs did not
   change) and a final-netlist frequency check (`Fmax` from the sign-off STA).
 - ~~Named constraint scenarios, constraint hook, clock budget~~ — done

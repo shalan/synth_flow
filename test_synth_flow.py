@@ -537,6 +537,18 @@ with tempfile.TemporaryDirectory() as td:
     check('a refusing guard rejects recovery and hold moves and keeps the phases healthy',
           _no['status']['recover_area'] == 'ok' and _no['status']['repair_hold'] == 'ok' and 'inv_2 i1' in _no_txt
           and '_rd_' not in _no_txt and _no['delay_cells_inserted'] == 0, str((_no['status'], _no['delay_cells_inserted'])))
+check('runtime accounting per phase is reported', 'runtime' in _no and set(_no['runtime']['phases']) >= {'repair_design', 'sizing', 'recover_area', 'repair_hold', 'final'} and _no['runtime']['sta_calls'] == sum(v['sta_calls'] for v in _no['runtime']['phases'].values()), str(_no.get('runtime')))
+with tempfile.TemporaryDirectory() as td:
+    _in = Path(td) / 'in.v'; _in.write_text(_nlt)
+    _orig = (_rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section)
+    _rz.run_sta = _fake_sta3; _rz.area_of = lambda *a, **k: 100.0
+    _rz.sf._sta_constraints = lambda **k: ''; _rz.sf._wire_load_section = lambda *a, **k: ''
+    try:
+        _tb = _rz.resize(_in, 'top', str(LIB_SS), str(LIB_SS), 1000, 'clk', Path(td) / 'tb', iters=3, recover_area=True,
+                         repair_hold=True, lib_fast=str(LIB_SS), time_budget_s=0, log=lambda *x: None)
+    finally:
+        _rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section = _orig
+    check('a spent time budget stops the phases, marks them and keeps the input netlist', _tb['runtime']['budget_hit'] and _tb['status']['sizing'] == 'ok (time budget)' and _tb['delay_cells_inserted'] == 0 and Path(_tb['output']).read_text() == _nlt, str((_tb['status'], _tb['runtime']['budget_hit'])))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'
