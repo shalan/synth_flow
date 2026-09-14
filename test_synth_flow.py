@@ -703,6 +703,32 @@ with tempfile.TemporaryDirectory() as td:
           str((_dr['status'], _dr['drc_before'], _dr['drc_after'], _dr['drc_buffers'], _dt.count('.A(n1)'))))
 from synth_flow import _rename_section, YOSYS_DRIVER_STD
 check('keep_names: rename -wire on flop types before dfflibmap, off by default', _rename_section({'keep_names': False}) == '' and _rename_section({'keep_names': True}).startswith('rename -wire -suffix _reg t:$_DFF*') and 't:$_DLATCH*' in _rename_section({'keep_names': True}) and YOSYS_DRIVER_STD.index('{rename_section}') < YOSYS_DRIVER_STD.index('dfflibmap'))
+# --- resumable sweeps: content keys; Fmax search --------------------------------
+from synth_flow import _recipe_key, _qsta_key, find_fmax
+with tempfile.TemporaryDirectory() as td:
+    _rtl = Path(td) / 'a.v'; _rtl.write_text('module a; endmodule\n')
+    _rc = Path(td) / 'r.abc'; _rc.write_text('strash\n'); _cn = Path(td) / 'c.txt'; _cn.write_text('set_load 0.01\n')
+    _cfgd = {'rtl_files': [str(_rtl)], 'lib_slow': str(LIB_SS), 'lib_typ': str(LIB_SS), 'yosys_opts': [], 'dont_use': [], 'period_ps': 5000, 'clock_port': 'clk', 'yosys': 'yosys'}
+    _a1 = {'module': 'a', 'recipe': 'r', 'recipe_path': str(_rc), 'constr': str(_cn), 'cfg': dict(_cfgd)}
+    _k1 = _recipe_key(_a1)
+    _a2 = dict(_a1, cfg=dict(_cfgd, yosys_opts=['booth']))
+    _rtl.write_text('module a; wire x; endmodule\n'); _k3 = _recipe_key(_a1)
+    check('recipe key: stable, changes with settings and with the RTL', _k1 == _recipe_key(dict(_a1, cfg=dict(_cfgd, yosys_opts=[]))) if False else (_k1 != _recipe_key(_a2) and _k1 != _k3 and _k3 == _recipe_key(_a1)))
+    _n = Path(td) / 'n.v'; _n.write_text('module a; endmodule\n')
+    _q1 = _qsta_key({'cfg': dict(_cfgd), 'netlist': str(_n), 'log': str(Path(td) / 'x.log')})
+    _q2 = _qsta_key({'cfg': dict(_cfgd, period_ps=4000), 'netlist': str(_n), 'log': str(Path(td) / 'x.log')})
+    check('quick-STA key changes with the constraints', _q1 != _q2 and _q1 == _qsta_key({'cfg': dict(_cfgd), 'netlist': str(_n), 'log': 'y'}))
+    import synth_flow as _sfm
+    _calls = []
+    def _fake_qsta(opensta, lib, netlist, module, period_ps, clock_port, log_path, **kw):
+        _calls.append(period_ps); return (period_ps - 4000) / 1000.0, 0.0      # meets exactly at 4000 ps
+    _o = _sfm._quick_sta; _sfm._quick_sta = _fake_qsta
+    try:
+        _fc = _sfm.Config(rtl_files=['x.v'], lib_typ=str(LIB_SS), lib_slow=str(LIB_SS), lib_fast=str(LIB_SS), top='a', period_ps=8000, clock_port='clk')
+        _fx = find_fmax(_fc, 'a', Path(td) / 'n.v', Path(td) / 'fmax', log=type('L', (), {'info': lambda self, *a: None})())
+    finally:
+        _sfm._quick_sta = _o
+    check('fmax search converges on the period that just meets timing', _fx['fmax_mhz'] == 250.0 and abs(_fx['period_ps'] - 4000) <= 5 and _fx['wns_ns_at_period'] >= 0 and len(_calls) <= 4, str((_fx, _calls)))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

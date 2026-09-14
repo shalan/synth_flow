@@ -176,8 +176,8 @@ bench exists.
   `replace_cell` / `make_instance` / `connect_pin` trials with undo,
   verified against fresh processes) behind `sta_session: true`. Remaining
   process-per-call spots: the scenario guard checks and the sign-off.
-- Resumable, content-addressed sweeps (skip recipes whose inputs did not
-  change) and a final-netlist frequency check (`Fmax` from the sign-off STA).
+- ~~Resumable, content-addressed sweeps and a final-netlist Fmax check~~ —
+  done (`resume`, `fmax_search`; architecture §2.21).
 - ~~Named constraint scenarios, constraint hook, clock budget~~ — done
   (`scenarios`, `constraint_hook`, `clock_budget`; architecture §2.15).
 - Regressions still to add: generated-clock endpoints in hold repair,
