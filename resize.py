@@ -170,6 +170,9 @@ class Netlist:
                                         for m in re.finditer(r'^\s*assign\s+(.+?)\s*=\s*(.+?)\s*;', text, re.M)}
         self.dropped_assigns: set[str] = set()
         self.extra_assigns: list[tuple[str, str]] = []
+        # edit log for the persistent OpenSTA session (sta_session.StaSession.apply):
+        # ('make_net', w) / ('make_instance', name, cell, pins) / ('reconnect', inst, pin, old, new) / ('unsupported', why)
+        self.ops: list = []
         self.widths: dict[str, tuple[int, int]] = {m.group(3): (int(m.group(1)), int(m.group(2)))
             for m in re.finditer(r'^\s*(?:output|input|inout|wire)\s+\[(\d+):(\d+)\]\s*(\\?[\w$\.]+)\s*;', text, re.M)}
 
@@ -257,18 +260,25 @@ class Netlist:
         item equal to `old` is."""
         pins = self.inst[inst]['pins']
         if pin in pins and self._concat_items(pins[pin]) is None:
+            self.ops.append(('reconnect', inst, pin, pins[pin], new))
             pins[pin] = new
             return True
         base, k = self._pin_index(pin)
         if base not in pins:
             return False
         bits = self._conn_bits(pins[base])
+        hi, lo = self.bus_ranges.get(self.inst[inst]['type'], {}).get(base, (len(bits) - 1, 0))
+        bit_index = (lambda pos: hi - pos) if hi >= lo else (lambda pos: pos + hi)     # inverse of _bit_pos
         if k is not None:
             pos = self._bit_pos(inst, base, k, len(bits))
             if pos is None:
                 return False
+            self.ops.append(('reconnect', inst, f'{base}[{k}]', bits[pos], new))
             bits[pos] = new
         elif old is not None and old in bits:
+            for pos, b in enumerate(bits):
+                if b == old:
+                    self.ops.append(('reconnect', inst, f'{base}[{bit_index(pos)}]', old, new))
             bits = [new if b == old else b for b in bits]
         else:
             return False
@@ -311,11 +321,13 @@ class Netlist:
     def add_inst(self, cell: str, pins: dict[str, str]) -> str:
         name = self.fresh('_rd_')
         self.inst[name] = {'type': cell, 'pins': dict(pins), 'span': None, 'indent': '  ', 'new': True}
+        self.ops.append(('make_instance', name, cell, dict(pins)))
         return name
 
     def add_wire(self) -> str:
         w = self.fresh('_rdn_')
         self.new_wires.append(w)
+        self.ops.append(('make_net', w))
         return w
 
     def buffer_tree(self, net: str, buf_cell: str, group: int, keep_ports: bool = True,
@@ -360,6 +372,7 @@ class Netlist:
                 return 0
             lhs, rhs_bit, pairs = src
             self.dropped_assigns.add(lhs)
+            self.ops.append(('unsupported', f'assign feed-through {lhs} rewritten'))
             self.extra_assigns.extend((lb, rb) for lb, rb in pairs.items() if lb != port
                                       and not any(lb == e[0] for e in self.extra_assigns))
             cur = rhs_bit
@@ -487,6 +500,35 @@ SESSIONS: dict = {}
 SESSION_LOG = print
 
 
+VERIFY_SESSION = False
+PENDING = {'base': None, 'ops': None}     # the trial about to be timed: edits relative to `base`
+
+
+def _trial_begin(base, ops) -> None:
+    """Declare the next run_sta calls as a trial derived from `base` by `ops`
+    (None or an 'unsupported' op = re-link from the file instead)."""
+    if ops is not None and any(o[0] == 'unsupported' for o in ops):
+        ops = None
+    PENDING['base'], PENDING['ops'] = (Path(base) if base is not None else None), (list(ops) if ops is not None else None)
+
+
+def _trial_end(accepted: bool, new_path) -> None:
+    """Close the pending trial in every session: commit the edits (the linked
+    design is now `new_path`) or undo them (it is `base` again)."""
+    for s in SESSIONS.values():
+        if s._undo:
+            try:
+                if accepted:
+                    s.commit(Path(new_path))
+                else:
+                    s.undo()
+            except Exception as e:      # the next run_sta re-links from the file
+                SESSION_LOG(f'sta session: {e}; re-linking on the next trial')
+                s.current = None
+                s._undo = []
+    PENDING['base'], PENDING['ops'] = None, None
+
+
 def _session_for(opensta, liberty, extra_libs):
     from sta_session import StaSession
     key = (str(liberty), tuple(str(l) for l in (extra_libs or [])))
@@ -552,10 +594,34 @@ def run_sta(opensta, liberty, netlist: Path, top, constraints, out_dir: Path, ta
         from sta_session import StaSessionError
         try:
             ses = _session_for(opensta, liberty, extra_libs)
-            if ses.current is None or Path(ses.current) != Path(netlist) or ses.top != top:
+            incremental = (PENDING['ops'] is not None and ses.current is not None and PENDING['base'] is not None
+                           and Path(ses.current) == PENDING['base'] and ses.top == top and not ses._undo
+                           and Path(netlist) != PENDING['base'])
+            if incremental:
+                try:
+                    ses.apply(PENDING['ops'])            # re-times only what the edits touch
+                except StaSessionError as e:
+                    SESSION_LOG(f'sta session: incremental edit failed ({e}); re-linking {Path(netlist).name}')
+                    ses._undo = []
+                    ses.link(Path(netlist), top, constraints)
+            elif ses.current is None or Path(ses.current) != Path(netlist) or ses.top != top:
                 ses.link(Path(netlist), top, constraints)
             text = ses.report(report)
             ok_run = True
+            if VERIFY_SESSION:
+                vt = out_dir / f'{tag}.verify.tcl'
+                vt.write_text(PATHS_TCL.format(liberty=liberty, netlist=netlist, top=top, constraints=constraints,
+                                               k=k, slack_max=slack_max, mode=mode,
+                                               extra_libs='\n'.join(f'read_liberty {l}' for l in (extra_libs or []))))
+                vr = subprocess.run([opensta, '-no_init', '-exit', str(vt)], capture_output=True, text=True, timeout=1800)
+                a, b = parse_sta_report(text), parse_sta_report(vr.stdout + vr.stderr)
+                same = (a.wns is not None and b.wns is not None and abs(a.wns - b.wns) < 5e-4
+                        and a.tns is not None and b.tns is not None and abs(a.tns - b.tns) < 5e-3)
+                STA_STATS['verify'] = STA_STATS.get('verify', 0) + 1
+                if not same:
+                    STA_STATS['verify_mismatch'] = STA_STATS.get('verify_mismatch', 0) + 1
+                    SESSION_LOG(f'sta session VERIFY MISMATCH {tag} ({"incremental" if incremental else "relink"}): '
+                                f'session WNS/TNS {a.wns}/{a.tns} vs fresh {b.wns}/{b.tns}')
         except StaSessionError as e:
             SESSION_LOG(f'sta session: {e}; falling back to a fresh OpenSTA process for {tag}')
             text, ok_run = None, False
@@ -679,9 +745,10 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
            extra_libs=(), extra_libs_fast=None, macro_libs=(), macro_libs_fast=None,
            dont_use=(), buffer_cell=None, delay_cell=None,
            budget_section='', hook_section='', guard=None, time_budget_s=None, sta_session=False,
-           log=print) -> dict:
-    global USE_SESSION, SESSION_LOG
-    USE_SESSION, SESSION_LOG = bool(sta_session), log
+           sta_session_verify=False, log=print) -> dict:
+    global USE_SESSION, SESSION_LOG, VERIFY_SESSION
+    USE_SESSION, SESSION_LOG, VERIFY_SESSION = bool(sta_session), log, bool(sta_session_verify)
+    PENDING['base'], PENDING['ops'] = None, None
     try:
         return _resize(netlist, top, liberty, sta_liberty, period_ps, clock_port, out_dir, sdc=sdc, iters=iters,
                        margin_ps=margin_ps, yosys=yosys, opensta=opensta, driving_cell=driving_cell, load_ff=load_ff,
@@ -699,8 +766,9 @@ def resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: i
         if SESSIONS:
             st = close_sessions()
             log(f"sta sessions: {st['sessions']} process(es), {st['relinks']} relinks, {st['incremental']} incremental trials, "
-                f"{st['commands']} commands, {st['seconds']:.1f}s")
-        USE_SESSION = False
+                f"{st['commands']} commands, {st['seconds']:.1f}s"
+                + (f"; verify: {STA_STATS.get('verify', 0)} compared, {STA_STATS.get('verify_mismatch', 0)} mismatches" if VERIFY_SESSION else ''))
+        USE_SESSION = VERIFY_SESSION = False
 
 
 def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: int, clock_port: str,
@@ -790,13 +858,14 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
     buffers_inserted = 0
     it = 0
 
-    def evaluate_text(new_text: str, tag: str):
+    def evaluate_text(new_text: str, tag: str, ops=None):
         new = out_dir / f'{tag}.v'
         new.write_text(new_text)
         probs = structural_problems(new_text, fam)
         if probs:
             log(f'{tag}: rejected before STA, netlist check failed: ' + '; '.join(probs))
             return new, StaOut(ok=False, log='structural: ' + '; '.join(probs))
+        _trial_begin(cur, ops)
         r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin, extra_libs=extra_libs)
         return new, r
 
@@ -853,9 +922,10 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
                         buffered |= set(batch)
                         break
                     it += 1
-                    new, sta_new = evaluate_text(nl.render(), f'it{it}')
+                    new, sta_new = evaluate_text(nl.render(), f'it{it}', ops=nl.ops)
                     ok = accept_tns(sta, sta_new)
                     ok = _guarded(ok, new)
+                    _trial_end(ok, new)
                     steps.append(Step(it=it, moves={net: f'buffer_tree({buf_cell})' for net in batch}, wns_before=sta.wns,
                                       tns_before=sta.tns, wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
                     log(f'it{it} (buffer): {len(batch)} nets, {nb} buffers -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
@@ -886,6 +956,7 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
         new_text = retype(text, moves)
         new = out_dir / f'{tag}.v'
         new.write_text(new_text)
+        _trial_begin(cur, [('replace_cell', i, c, types.get(i, '')) for i, c in moves.items()])
         r = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, tag, k=max_paths, slack_max=margin, extra_libs=extra_libs)
         return new, new_text, r
 
@@ -919,6 +990,7 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
             new, new_text, sta_new = evaluate(sub, f'it{it}')
             ok = accept(sta, sta_new)
             ok = _guarded(ok, new)
+            _trial_end(ok, new)
             steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
                               wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
             log(f'it{it}: {len(sub)} upsizes -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
@@ -960,6 +1032,7 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
         new, new_text, sta_new = evaluate(moves, f'it{it}')
         ok = sta_new.ok and sta_new.wns > sta.wns + 1e-6 and sta_new.tns >= sta.tns - 1e-6
         ok = _guarded(ok, new)
+        _trial_end(ok, new)
         steps.append(Step(it=it, moves=moves, wns_before=sta.wns, tns_before=sta.tns,
                           wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
         log(f'it{it} (wns repair): {len(moves)} upsizes -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
@@ -1000,6 +1073,7 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
                     new, new_text, sta_new = evaluate(sub, f'it{it}')
                     ok = (sta_new.ok and sta_new.wns >= floor_wns - 1e-6 and sta_new.tns >= sta.tns - 1e-6)
                     ok = _guarded(ok, new)
+                    _trial_end(ok, new)
                     steps.append(Step(it=it, moves=sub, wns_before=sta.wns, tns_before=sta.tns,
                                       wns_after=sta_new.wns, tns_after=sta_new.tns, accepted=ok))
                     log(f'it{it} (area): {len(sub)} downsizes/swaps -> WNS {sta.wns:+.3f}->{sta_new.wns:+.3f} '
@@ -1106,12 +1180,14 @@ def _resize(netlist: Path, top: str, liberty: str, sta_liberty: str, period_ps: 
                 log(f'it{it} (hold): rejected before STA, netlist check failed: ' + '; '.join(probs))
                 return False
             new.write_text(new_text)
+            _trial_begin(cur, nl.ops)
             hold_new = run_sta(opensta, hold_lib, new, top, constraints, out_dir, f'hold{it}', k=hk, slack_max=0.0, mode='min', extra_libs=extra_libs_fast)
             setup_new = run_sta(opensta, sta_liberty, new, top, constraints, out_dir, f'it{it}', k=max_paths, slack_max=margin, extra_libs=extra_libs)
             sta_calls += 2
             ok = (hold_new.ok and setup_new.ok and hold_new.tns is not None and hold_new.tns > hold.tns + 1e-6
                   and setup_new.wns >= setup_floor - 1e-6 and setup_new.tns >= sta.tns - 0.05)
             ok = _guarded(ok, new)
+            _trial_end(ok, new)
             steps.append(Step(it=it, moves={('hold:' + (t[1] if t[0] == 'port' else f'{t[1]}/{t[2]}')): dcell for t in batch},
                               wns_before=hold.wns, tns_before=hold.tns, wns_after=hold_new.wns, tns_after=hold_new.tns, accepted=ok))
             log(f'it{it} (hold): {n} delay cells on {len(batch)} endpoints -> hold WNS {_f(hold.wns)}->{_f(hold_new.wns)} '
@@ -1260,6 +1336,7 @@ def main() -> int:
     ap.add_argument('--max-fanout', type=int, default=8)
     ap.add_argument('--repair-hold', action='store_true', help='insert delay cells on failing hold endpoints (fast corner) while setup holds')
     ap.add_argument('--lib-fast', help='fast-corner liberty for hold analysis (default: --lib-sta)')
+    ap.add_argument('--sta-session-verify', action='store_true', help='with --sta-session: also time every trial in a fresh process and report mismatches')
     ap.add_argument('--sta-session', action='store_true', help='one persistent OpenSTA process per corner for the whole pass (liberties read once)')
     ap.add_argument('--time-budget-s', type=int, help='wall-clock budget for the whole post-pass; remaining phases stop when spent')
     ap.add_argument('--hold-max-paths', type=int, help='failing hold endpoints per STA (default: --max-paths)')
@@ -1287,7 +1364,7 @@ def main() -> int:
                  recover_area=a.recover_area, recover_rounds=a.recover_rounds,
                  repair_design=a.repair_design, max_fanout=a.max_fanout,
                  repair_hold=a.repair_hold, lib_fast=a.lib_fast,
-                 hold_max_paths=a.hold_max_paths, hold_sta_budget=a.hold_sta_budget, time_budget_s=a.time_budget_s, sta_session=a.sta_session, extra_libs=a.extra_lib, macro_libs=a.macro_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
+                 hold_max_paths=a.hold_max_paths, hold_sta_budget=a.hold_sta_budget, time_budget_s=a.time_budget_s, sta_session=a.sta_session, sta_session_verify=a.sta_session_verify, extra_libs=a.extra_lib, macro_libs=a.macro_lib, dont_use=a.dont_use, buffer_cell=a.buffer_cell, delay_cell=a.delay_cell, log=log)
     if a.json:
         print(json.dumps(res, indent=2))
     return 0

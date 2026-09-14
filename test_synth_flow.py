@@ -591,9 +591,37 @@ if _shutil.which('sta'):
         _tcl = Path(td) / 'ref.tcl'
         _tcl.write_text(f'read_liberty {LIB_SS}\nread_verilog {_sv}\nlink_design s\n{_con}report_worst_slack -max -digits 4\nexit\n')
         _ref = _sp.run(['sta', '-no_init', '-exit', str(_tcl)], capture_output=True, text=True).stdout
-        _w = lambda t: float(re.search(r'worst slack(?: max)?\s+(-?[0-9.]+)', t).group(1))
+        _w = lambda t: float(re.search(r'worst slack(?: max| min)?\s+(-?[0-9.]+)', t).group(1))
         check('sta session: link + report matches a fresh OpenSTA process', abs(_w(_r1) - _w(_ref)) < 1e-4, str((_r1.strip(), _ref.strip()[-30:])))
         check('sta session: incremental replace_cell changes timing and undo restores it', _w(_r2) != _w(_r1) and abs(_w(_r3) - _w(_r1)) < 1e-4 and abs(_w(_r4) - _w(_r1)) < 1e-4 and _n == 2, str((_w(_r1), _w(_r2), _w(_r3), _w(_r4))))
+# --- edit log for incremental OpenSTA trials --------------------------------------
+_bn2 = Netlist(_bt, liberty_output_pins(_bl), _bl.bus_ranges())
+_bn2.buffer_tree('\\q[0]', 'sky130_fd_sc_hd__buf_2', 2); _bn2.delay_pin('u_m', 'din0[1]', 'sky130_fd_sc_hd__buf_1', 1)
+_kinds = [o[0] for o in _bn2.ops]
+check('netlist edits are logged as make_net / make_instance / reconnect ops', _kinds.count('make_net') == 3 and _kinds.count('make_instance') == 3 and _kinds.count('reconnect') == 4 and 'unsupported' not in _kinds, str(_bn2.ops))
+_rc = [o for o in _bn2.ops if o[0] == 'reconnect']
+check('reconnect ops carry the old and new nets, bus bits by liberty index', ('reconnect', 'i1', 'A', '\\q[0]', '_rdn_1_') in _rc and ('reconnect', 'u_m', 'din0[1]', '\\a[2]', '_rdn_5_') in _rc, str(_rc))
+if _shutil.which('sta'):
+    with tempfile.TemporaryDirectory() as td:
+        _sv = Path(td) / 's.v'
+        _txt = ("module s(clk, a, y);\n  input clk; input a; output y;\n  wire n1;\n"
+                "  sky130_fd_sc_hd__inv_1 i1 (\n    .A(a),\n    .Y(n1)\n  );\n"
+                "  sky130_fd_sc_hd__dfxtp_1 f1 (\n    .CLK(clk),\n    .D(n1),\n    .Q(y)\n  );\nendmodule\n")
+        _sv.write_text(_txt)
+        _con = 'create_clock -name clk -period 2 [get_ports clk]\nset_input_delay -clock clk -max 1.0 [get_ports a]\nset_input_delay -clock clk -min 0.0 [get_ports a]\n'
+        _nlx = Netlist(_txt, liberty_output_pins(_lc)); _nlx.delay_pin('f1', 'D', 'sky130_fd_sc_hd__buf_1', 2)
+        _ed = Path(td) / 'e.v'; _ed.write_text(_nlx.render())
+        _ses = StaSession('sta', [str(LIB_SS)], log=lambda *x: None)
+        try:
+            _ses.start(); _ses.link(_sv, 's', _con); _ses.apply(_nlx.ops)
+            _inc = _ses.report('report_worst_slack -min -digits 4')
+        finally:
+            _ses.close()
+        import subprocess as _sp
+        _tcl = Path(td) / 'ref.tcl'
+        _tcl.write_text(f'read_liberty {LIB_SS}\nread_verilog {_ed}\nlink_design s\n{_con}report_worst_slack -min -digits 4\nexit\n')
+        _ref = _sp.run(['sta', '-no_init', '-exit', str(_tcl)], capture_output=True, text=True).stdout
+        check('incremental make_instance/reconnect trial times like the rendered netlist in a fresh process', abs(_w(_inc) - _w(_ref)) < 1e-4, str((_inc.strip(), _ref.strip()[-40:])))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

@@ -111,7 +111,9 @@ class StaSession:
             self.start()
         self.cmd(f'read_verilog {netlist}')
         self.cmd(f'link_design {top}')
-        self.cmd(constraints, check=False)
+        # an Error inside the constraints (e.g. a cell missing from this liberty)
+        # must not leave a half-constrained design behind: fail like a fresh process would
+        self.cmd(constraints, check=True)
         self.current, self.top, self.constraints = Path(netlist), top, constraints
         self._undo = []
         self.stats['relinks'] += 1

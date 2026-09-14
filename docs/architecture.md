@@ -613,10 +613,22 @@ alive for the whole pass (commands over stdin, a marker `puts` closes each
 reply): the liberties are read once and each trial is `read_verilog` +
 `link_design` + the constraints in that process. Same moves, same WNS and
 area, 2.7 s instead of 37.5 s. A failing session falls back to a fresh
-process for that trial. The next step (incremental trials: `replace_cell`,
-`make_instance`, `connect_pin` with undo on rejection, so OpenSTA re-times
-only what changed) is what makes the linking cost disappear as well; the
-session already implements `apply` / `undo` / `commit` for it.
+process for that trial.
+
+Stage B makes the trials incremental. The netlist model keeps an edit log
+(`make_net`, `make_instance`, `reconnect` with old and new net, bus bits by
+liberty index) and sizing moves become `replace_cell` ops; `run_sta` applies
+the pending trial's ops to the linked design instead of re-linking, the
+accept sites `commit` or `undo` them, and a trial the log cannot express
+(an `assign` feed-through rewritten by a hold repair on an output port)
+re-links. `sta_session_verify` times every trial in a fresh process as well:
+on the SRAM wrapper hold run (14 incremental trials, 627 delay cells on
+macro bus pins) and the HS+LS arbiter (49 trials: sizing, library swaps,
+recovery, hold) every one of 75 comparisons matched to 0.5 ps, and the
+delivered netlists are identical. One lesson from the verify mode: an
+`Error` inside the constraints must fail the session, or OpenSTA continues
+with a half-sourced SDC and reports numbers a fresh process would never
+produce; `link()` now checks for that.
 
 ## 3. Target architecture (revised after §2.5)
 

@@ -333,7 +333,8 @@ class Config:
     resize_time_budget_s: Optional[int] = None
     # one persistent OpenSTA process per corner for the whole post-pass instead
     # of a fresh `sta` (liberty re-read + relink) per trial. Also --sta-session.
-    sta_session: bool = False          # tns | wns (never regress WNS)
+    sta_session: bool = False
+    sta_session_verify: bool = False     # debug: also time every trial in a fresh process, report mismatches          # tns | wns (never regress WNS)
     path_groups: bool = False
     relaxed_factor: float = 3.0         # -D multiplier for false-path cones
     min_budget_frac: float = 0.25       # never hand ABC less than this fraction of T
@@ -2979,7 +2980,7 @@ def _run_resize(cfg: Config, module: str, netlist_in: Path, work_dir: Path, log)
             repair_design=cfg.repair_design, max_fanout=cfg.max_fanout,
             repair_hold=cfg.repair_hold, lib_fast=cfg.lib_fast,
             hold_max_paths=cfg.repair_hold_max_paths, hold_sta_budget=cfg.repair_hold_sta_budget,
-            time_budget_s=cfg.resize_time_budget_s, sta_session=cfg.sta_session,
+            time_budget_s=cfg.resize_time_budget_s, sta_session=cfg.sta_session, sta_session_verify=cfg.sta_session_verify,
             budget_section=_budget_section(cfg),
             hook_section=_hook_section(cfg, rank_scenario(cfg), 'slow' if cfg.lib_slow else 'typ', module),
             guard=_postpass_guard(cfg, module, netlist_in, work_dir),
