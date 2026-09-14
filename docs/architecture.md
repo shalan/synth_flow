@@ -602,6 +602,33 @@ switching (net capacitance) and leakage power per group; `summary.md` shows
 it in µW, `summary.json` keeps watts, the bench CSV carries dynamic, static
 and total. On the SRAM wrapper the macro is 92 % of the total, which is the
 kind of fact the area and slack tables could not show.
+### 2.17 A persistent OpenSTA process for the post-pass
+
+Every trial of the post-pass started `sta`, read every liberty and linked
+the netlist: on the reviewer's 350k-cell uberSoC that was minutes per call
+and 45–60 minutes per candidate; even on `rr_arbiter16` with the full HS+LS
+liberties the 57 calls of one post-pass took 37.5 s, of which almost all was
+liberty parsing. `sta_session: true` keeps one interactive `sta` per corner
+alive for the whole pass (commands over stdin, a marker `puts` closes each
+reply): the liberties are read once and each trial is `read_verilog` +
+`link_design` + the constraints in that process. Same moves, same WNS and
+area, 2.7 s instead of 37.5 s. A failing session falls back to a fresh
+process for that trial.
+
+Stage B makes the trials incremental. The netlist model keeps an edit log
+(`make_net`, `make_instance`, `reconnect` with old and new net, bus bits by
+liberty index) and sizing moves become `replace_cell` ops; `run_sta` applies
+the pending trial's ops to the linked design instead of re-linking, the
+accept sites `commit` or `undo` them, and a trial the log cannot express
+(an `assign` feed-through rewritten by a hold repair on an output port)
+re-links. `sta_session_verify` times every trial in a fresh process as well:
+on the SRAM wrapper hold run (14 incremental trials, 627 delay cells on
+macro bus pins) and the HS+LS arbiter (49 trials: sizing, library swaps,
+recovery, hold) every one of 75 comparisons matched to 0.5 ps, and the
+delivered netlists are identical. One lesson from the verify mode: an
+`Error` inside the constraints must fail the session, or OpenSTA continues
+with a half-sourced SDC and reports numbers a fresh process would never
+produce; `link()` now checks for that.
 
 ## 3. Target architecture (revised after §2.5)
 

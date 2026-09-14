@@ -171,7 +171,11 @@ bench exists.
   `make_instance` / `make_net` / `connect_pin`, and use incremental timing;
   scenario guards become `read_sdc` swaps in the same session. Expected
   10–50× on large designs. Interim: parallel scenario checks,
-  `resize_time_budget_s`, per-phase runtime accounting (done).
+  `resize_time_budget_s`, per-phase runtime accounting (done). Done: Stage A
+  (persistent process, re-link per trial) and Stage B (incremental
+  `replace_cell` / `make_instance` / `connect_pin` trials with undo,
+  verified against fresh processes) behind `sta_session: true`. Remaining
+  process-per-call spots: the scenario guard checks and the sign-off.
 - Resumable, content-addressed sweeps (skip recipes whose inputs did not
   change) and a final-netlist frequency check (`Fmax` from the sign-off STA).
 - ~~Named constraint scenarios, constraint hook, clock budget~~ — done
