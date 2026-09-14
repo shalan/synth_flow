@@ -69,9 +69,9 @@ jobs:
           ./bench.py --use-sdc --designs uart apb_timer --recipes orfs_speed delay_map --tag ci-postpass \
             --set resize_winner=true --set repair_hold=true --set repair_drc=true --set sta_session=true \
             --set sta_session_verify=true --set fmax_search=true --set keep_names=true
-          # a second run must reuse the mapped netlists and ranking STA
+          # a second run with the same script-shaping settings must reuse the mapped netlist and its ranking STA
           ./bench.py --use-sdc --designs uart --recipes orfs_speed --tag ci-resume --keep-work --set resume=true \
-            --set resize_winner=true --set sta_session=true
+            --set resize_winner=true --set sta_session=true --set keep_names=true
           python3 - <<'PY'
           import json, sys
           s = json.load(open('work/uart/results/summary.json'))
