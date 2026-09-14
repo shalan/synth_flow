@@ -20,28 +20,66 @@ jobs:
       - run: python3 test_synth_flow.py
 
   smoke-bench:
-    name: smoke bench (yosys + opensta via OSS CAD Suite)
+    name: smoke bench (yosys via OSS CAD Suite, OpenSTA built from source)
     runs-on: ubuntu-latest
     needs: unit
+    env:
+      OPENSTA_REF: master
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install pyyaml
-      - name: Install OSS CAD Suite (yosys, yosys-abc, sta)
+      - name: Install OSS CAD Suite (yosys, yosys-abc)
         uses: YosysHQ/setup-oss-cad-suite@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Cache OpenSTA
+        id: sta-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/opensta
+          key: opensta-${{ env.OPENSTA_REF }}-${{ runner.os }}-v1
+      - name: Build OpenSTA (cache miss only)
+        if: steps.sta-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y -qq cmake swig bison flex libfl-dev tcl-dev tcl8.6-dev libeigen3-dev zlib1g-dev autoconf automake libtool >/dev/null
+          git clone -q --depth 1 https://github.com/ivmai/cudd "$HOME/cudd-src"
+          (cd "$HOME/cudd-src" && autoreconf -fi >/dev/null 2>&1 && ./configure --prefix="$HOME/cudd" >/dev/null && make -j4 >/dev/null && make install >/dev/null)
+          git clone -q https://github.com/parallaxsw/OpenSTA "$HOME/opensta-src"
+          (cd "$HOME/opensta-src" && git checkout -q "$OPENSTA_REF" && mkdir -p build && cd build \
+             && cmake .. -DCUDD_DIR="$HOME/cudd" -DCMAKE_INSTALL_PREFIX="$HOME/opensta" -DCMAKE_BUILD_TYPE=Release >/dev/null \
+             && make -j4 >/dev/null && make install >/dev/null)
+      - run: echo "$HOME/opensta/bin" >> "$GITHUB_PATH"
       - name: Tool versions
         run: |
           yosys -V
           yosys-abc -q version | head -1
-          sta -version || echo "opensta not in this OSS CAD Suite build; bench falls back to ABC proxy"
+          sta -version
       - run: sudo apt-get install -y -qq tcl >/dev/null
+      - name: Unit tests with OpenSTA present (session and incremental-trial regressions run)
+        run: python3 test_synth_flow.py
       - name: Two-design smoke bench
         working-directory: bench
         run: ./bench.py --designs uart alu32 --recipes orfs_speed area_classic --tag ci
+      - name: Post-pass smoke (persistent session, sizing, hold and DRC repair, Fmax, resume)
+        working-directory: bench
+        run: |
+          ./bench.py --use-sdc --designs uart apb_timer --recipes orfs_speed delay_map --tag ci-postpass \
+            --set resize_winner=true --set repair_hold=true --set repair_drc=true --set sta_session=true \
+            --set sta_session_verify=true --set fmax_search=true --set keep_names=true
+          # a second run with the same script-shaping settings must reuse the mapped netlist and its ranking STA
+          ./bench.py --use-sdc --designs uart --recipes orfs_speed --tag ci-resume --keep-work --set resume=true \
+            --set resize_winner=true --set sta_session=true --set keep_names=true
+          python3 - <<'PY'
+          import json, sys
+          s = json.load(open('work/uart/results/summary.json'))
+          cands = s['modules']['uart']['candidates']
+          assert all(c.get('reused') for c in cands), f"resume did not reuse the mapping: {cands}"
+          print('resume reused', len(cands), 'candidate(s)')
+          PY
+          ! grep -rl "VERIFY MISMATCH" work/*/work/*/resize 2>/dev/null || (echo "session verify mismatch" && exit 1)
       - name: Every in-house design must synthesize with the reference recipe
         working-directory: bench
         run: |
