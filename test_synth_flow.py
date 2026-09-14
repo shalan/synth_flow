@@ -701,6 +701,8 @@ with tempfile.TemporaryDirectory() as td:
           _dr['status']['repair_drc'] == 'ok' and _dr['drc_before']['max_fanout'] == 1 and _dr['drc_after']['max_fanout'] == 0
           and _dr['drc_buffers'] == 2 and _dt.count('buf_2 _rd_') == 2 and _dt.count('.A(n1)') == 2,
           str((_dr['status'], _dr['drc_before'], _dr['drc_after'], _dr['drc_buffers'], _dt.count('.A(n1)'))))
+from synth_flow import _rename_section, YOSYS_DRIVER_STD
+check('keep_names: rename -wire on flop types before dfflibmap, off by default', _rename_section({'keep_names': False}) == '' and _rename_section({'keep_names': True}).startswith('rename -wire -suffix _reg t:$_DFF*') and 't:$_DLATCH*' in _rename_section({'keep_names': True}) and YOSYS_DRIVER_STD.index('{rename_section}') < YOSYS_DRIVER_STD.index('dfflibmap'))
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

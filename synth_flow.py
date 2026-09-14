@@ -244,7 +244,10 @@ class Config:
     verilog_defines: list[str] = field(default_factory=list)  # -D flags
     verilog_includes: list[str] = field(default_factory=list) # -I include dirs
     pre_read_files: list[str] = field(default_factory=list)  # DFFRAM netlists etc.
-    keep_hierarchy_modules: list[str] = field(default_factory=list)  # preserve hierarchy
+    keep_hierarchy_modules: list[str] = field(default_factory=list)
+    # name register instances after their RTL wire (+ `_reg`) before mapping,
+    # so they survive flattening into STA reports and hook bindings. Also --keep-names.
+    keep_names: bool = False  # preserve hierarchy
 
     # --- ABC constraints (Sky130 HD defaults) ---
     driving_cell: str = 'sky130_fd_sc_hd__inv_2'
@@ -1002,6 +1005,7 @@ hierarchy -top {module}
 synth -top {module} -flatten -noabc {synth_flags}
 {post_synth}
 write_verilog -noattr {syn_netlist}
+{rename_section}
 dfflibmap -liberty {liberty} {dont_use}
 abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
 setundef -zero
@@ -1025,6 +1029,7 @@ hierarchy -top {module}
 synth -top {module} -flatten -noabc {synth_flags}
 {post_synth}
 write_verilog -noattr {syn_netlist}
+{rename_section}
 dfflibmap -liberty {liberty} {dont_use}
 {group_section}
 setundef -zero
@@ -1052,6 +1057,7 @@ synth -top {module} -flatten -noabc {synth_flags}
 {post_synth}
 write_verilog -noattr {syn_netlist}
 # ABC with -dff: generic flops are part of the optimization
+{rename_section}
 abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
 dfflibmap -liberty {liberty} {dont_use}
 setundef -zero
@@ -1081,6 +1087,7 @@ hierarchy -top {module}
 synth -top {module} -flatten -noabc {synth_flags}
 {post_synth}
 write_verilog -noattr {syn_netlist}
+{rename_section}
 dfflibmap -liberty {liberty} {dont_use}
 abc -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use}
 setundef -zero
@@ -1129,6 +1136,7 @@ select -set domain_2 @ffs_2 %x:+@ffs %d %xe*:+@ffs_2 @ffs_2
 select -set domain_2 @domain_2 @domain_1 %d
 
 # ABC on domain 1 (fast clock)
+{rename_section}
 abc -dff -liberty {liberty} -constr {constr} -script {recipe} -D {period_ps} {dont_use} @domain_1
 
 # ABC on domain 2 (slow clock)
@@ -1336,6 +1344,20 @@ def _macro_lib_quick_sta_section(cfg) -> str:
     if not libs:
         return ''
     return '\n'.join(f'read_liberty {f}' for f in libs)
+
+# Yosys internal flop / latch cell types after `synth`, before dfflibmap
+_FF_TYPES = ('$_DFF*', '$_DFFE*', '$_SDFF*', '$_SDFFE*', '$_DFFSR*', '$_DFFSRE*', '$_ALDFF*', '$_ALDFFE*', '$_DLATCH*', '$_DLATCHSR*')
+
+
+def _rename_section(cfg) -> str:
+    """`keep_names`: name every register instance after the wire it drives plus
+    `_reg` (`\\acc[3]_reg`) before mapping; dfflibmap and ABC keep the names, so
+    STA reports, hook bindings (`get_cells acc*`) and the post-pass log show
+    RTL register names instead of `_889_`. Combinational cells stay auto-named."""
+    if not _cfg_get(cfg, 'keep_names', False):
+        return ''
+    return 'rename -wire -suffix _reg ' + ' '.join(f't:{t}' for t in _FF_TYPES)
+
 
 def _keep_hierarchy_section(cfg: dict) -> str:
     lines = []
@@ -1792,6 +1814,7 @@ def run_recipe(args: dict) -> RecipeResult:
         group_section=(_group_section(groups_spec, _liberty_arg(cfg), constr, recipe_path, str(groups_txt),
                                       _dont_use_flags(cfg.get('dont_use')))
                        if groups_spec else ''),
+        rename_section=_rename_section(cfg),
         synth_flags=_front_end(cfg.get('yosys_opts'))[0],
         post_synth=_front_end(cfg.get('yosys_opts'))[1],
         dont_use=_dont_use_flags(cfg.get('dont_use')),
@@ -3209,6 +3232,7 @@ def parse_cli() -> argparse.Namespace:
     p.add_argument('--strict', action='store_true', help=f'exit {EXIT_NOT_CLOSED} when any module is NOT CLOSED under its required scenarios or misses setup at sign-off (post-pass phase failures always exit {EXIT_POSTPASS_FAIL})')
     p.add_argument('--recover-power', action='store_true', help='recovery with total power (report_power) as the objective: swap/downsize off-critical cells while power drops, area does not grow and WNS holds')
     p.add_argument('--recover-area', action='store_true', help='after the winner meets timing, downsize or swap off-critical cells to a slower library while WNS holds (implies --resize)')
+    p.add_argument('--keep-names', action='store_true', help='name register instances after their RTL wire (+_reg) so they survive flattening into STA reports and hook bindings')
     p.add_argument('--repair-drc', action='store_true', help='fix max transition / capacitance / fanout violations on the winner (driver upsize, else buffer trees; needs OpenSTA)')
     p.add_argument('--repair-hold', action='store_true', help='delay cells on failing hold endpoints at the fast corner (needs OpenSTA + lib_fast)')
     p.add_argument('--max-fanout', type=int, help='sink group size for repair_design (default 8; SDC set_max_fanout overrides)')
@@ -3292,6 +3316,8 @@ def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.repair_hold = True
     if getattr(args, 'repair_drc', False):
         cfg.repair_drc = True
+    if getattr(args, 'keep_names', False):
+        cfg.keep_names = True
     if getattr(args, 'max_fanout', None):
         cfg.max_fanout = args.max_fanout
     if getattr(args, 'yosys_opts', None):
