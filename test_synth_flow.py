@@ -549,6 +549,21 @@ with tempfile.TemporaryDirectory() as td:
     finally:
         _rz.run_sta, _rz.area_of, _rz.sf._sta_constraints, _rz.sf._wire_load_section = _orig
     check('a spent time budget stops the phases, marks them and keeps the input netlist', _tb['runtime']['budget_hit'] and _tb['status']['sizing'] == 'ok (time budget)' and _tb['delay_cells_inserted'] == 0 and Path(_tb['output']).read_text() == _nlt, str((_tb['status'], _tb['runtime']['budget_hit'])))
+from synth_flow import _parse_power, _power_section
+_pw = _parse_power('''>>> POWER_BEGIN
+Group                    Internal    Switching      Leakage        Total
+                            Power        Power        Power        Power (Watts)
+------------------------------------------------------------------------
+Sequential           3.857342e-04 1.233023e-05 1.309025e-09 3.980657e-04   5.8%
+Combinational        7.209578e-05 5.055626e-05 2.170053e-09 1.226542e-04   1.8%
+Clock                0.000000e+00 0.000000e+00 0.000000e+00 0.000000e+00   0.0%
+Macro                6.344357e-03 0.000000e+00 9.512000e-06 6.353869e-03  92.4%
+Pad                  0.000000e+00 0.000000e+00 0.000000e+00 0.000000e+00   0.0%
+------------------------------------------------------------------------
+Total                6.802209e-03 6.288646e-05 9.515309e-06 6.874611e-03 100.0%
+>>> POWER_END''')
+check('report_power table parsed per group (internal, switching, leakage, total)', _pw['total']['total_w'] == 6.874611e-03 and _pw['macro']['leakage_w'] == 9.512e-06 and _pw['sequential']['switching_w'] == 1.233023e-05 and set(_pw) == {'sequential', 'combinational', 'clock', 'macro', 'pad', 'total'}, str(_pw.get('total')))
+check('power section: uniform activity by default, VCD/SAIF when a file is given', 'set_power_activity -input -activity 0.1 -duty 0.5' in _power_section({'power_activity': 0.1, 'power_duty': 0.5}) and 'read_power_activities -saif act.saif -scope tb/dut' in _power_section({'power_activity_file': 'act.saif', 'power_scope': 'tb/dut'}) and _power_section({'report_power': False}) == '')
 check('retype swaps only the named instance', 'sky130_fd_sc_hd__inv_4 _7_ (' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}) and 'buf_2 _8_' in retype(_nl, {'_7_': 'sky130_fd_sc_hd__inv_4'}))
 cfg.abc_target = '4321'; check('explicit ps target', resolve_abc_target(cfg)[0] == 4321)
 cfg.period_ps = 1000; cfg.abc_target = 'reg2reg'

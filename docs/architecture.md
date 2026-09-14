@@ -590,6 +590,19 @@ both candidates pass 4 required checks and the module is closed; with a
 delivered NOT CLOSED with `sleep@slow: setup -4.256` listed, and a hook
 requiring a non-existent cell aborts the run before ranking.
 
+### 2.16 Power
+
+Leakage from the liberty (`cell_leakage_power`) was the only power number,
+and only the HS liberties populate it. The sign-off session now runs
+OpenSTA's `report_power` at the nominal corner: with a uniform activity
+assumption (`power_activity` toggles per cycle, `power_duty`) on every input,
+or with real activities from a VCD/SAIF (`power_activity_file`,
+`power_scope`). The report gives internal (cell-internal and short-circuit),
+switching (net capacitance) and leakage power per group; `summary.md` shows
+it in µW, `summary.json` keeps watts, the bench CSV carries dynamic, static
+and total. On the SRAM wrapper the macro is 92 % of the total, which is the
+kind of fact the area and slack tables could not show.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```
