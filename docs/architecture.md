@@ -665,6 +665,20 @@ upsizes (`dfrtp_1` → `dfrtp_2` on the flops feeding the wide nets), setup
 SRAM address pins whose 40 ps transition limit no standard-cell driver
 meets.
 
+### 2.20 Register names through flattening
+
+Flattened flops came out of Yosys as `_889_`, so a hook binding
+`get_cells acc*` failed, STA reports were unreadable and the post-pass log
+named moves by numbers. `keep_names: true` runs `rename -wire -suffix _reg`
+on Yosys's flop and latch cell types after `synth`, before `dfflibmap`: each
+register instance takes the name of the wire it drives plus `_reg`
+(`acc[3]_reg`); `dfflibmap` and ABC keep the instance names, combinational
+cells stay auto-named, timing and area are unchanged. On the SRAM wrapper
+the hook bindings `acc*` and `key_r*` resolve to 32 registers each and the
+sign-off report reads `u_sram → acc[23]_reg`. The escaped-name mapping of
+§2.14 is what makes OpenSTA's `acc[23]_reg` and the netlist's
+`\\acc[23]_reg` the same object to the resizer.
+
 ## 3. Target architecture (revised after §2.5)
 
 ```

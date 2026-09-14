@@ -139,6 +139,7 @@ These are required only when `run_gls: true` (the default). Set
 | `recipes` | list of strings | `[]` | Subset of recipe names (without `.abc`) to sweep. **Empty means all available** in `recipes_dir`. Use this to restrict during fast iteration: `recipes: [balanced]`. |
 | `verilog_defines` | list of strings | `[]` | Verilog `-D` flags passed to every `read_verilog` invocation. Example: `[NRV_SINGLE_PORT_REGF, NRV_SHARED_ADDER]`. |
 | `pre_read_files` | list of strings | `[]` | Files read *before* RTL (after loading liberty). Used for pre-mapped IP netlists (e.g. DFFRAM) that reference library cells. Globs allowed. |
+| `keep_names` | bool | `false` | Name every register instance after the RTL wire it drives plus `_reg` (`acc[3]_reg`, `\\u_fifo.wptr[0]_reg`) before mapping (`rename -wire` on Yosys's flop and latch types). `dfflibmap` and ABC keep the names, so STA reports, `get_cells acc*` in a constraint hook and the post-pass log show RTL names instead of `_889_`. Combinational cells stay auto-named. No effect on timing or area. Also `--keep-names`. |
 | `keep_hierarchy_modules` | list of strings | `[]` | Module names to mark with `keep_hierarchy` before `synth -flatten`. Preserves hand-crafted structures (e.g. DFFRAM) from being re-optimized by ABC. |
 
 ### ABC constraints
