@@ -352,6 +352,15 @@ class Config:
     run_sta: bool = True
     run_gls: bool = True
     fail_on_timing: bool = True
+    # --- power report (OpenSTA report_power at the nominal corner, sign-off) ---
+    # Without a VCD/SAIF every input toggles `power_activity` times per clock
+    # cycle at `power_duty`; propagation gives internal (short-circuit +
+    # cell internal), switching (net capacitance) and leakage power per group.
+    report_power: bool = True
+    power_activity: float = 0.1
+    power_duty: float = 0.5
+    power_activity_file: Optional[str] = None      # .vcd or .saif from a simulation of the netlist/RTL
+    power_scope: Optional[str] = None              # hierarchical scope of the DUT in that file
     # --strict: non-zero exit (EXIT_NOT_CLOSED) when any module is NOT CLOSED
     # under its required scenarios or misses setup at sign-off. A post-pass
     # phase failure always exits EXIT_POSTPASS_FAIL, strict or not.
@@ -380,7 +389,7 @@ class Config:
         # Expand ~ and env vars in path-like fields
         for key in ('lib_typ', 'lib_fast', 'lib_slow', 'lib_synth', 'sdc',
                     'primitives_dir', 'work_dir', 'results_dir', 'recipes_dir',
-                    'cell_blackbox'):
+                    'cell_blackbox', 'power_activity_file'):
             if key in data and isinstance(data[key], str):
                 data[key] = os.path.expandvars(os.path.expanduser(data[key]))
             elif key in data and isinstance(data[key], list):
@@ -2157,9 +2166,49 @@ report_checks -path_delay max -group_path_count 1 -format slack_only -digits 4
 puts "GROUPS HOLD"
 report_checks -path_delay min -group_path_count 1 -format slack_only -digits 4
 puts ">>> GROUPS_END"
+{power_section}
 {sdf_line}
 exit
 """
+
+POWER_TCL = """\
+puts ">>> POWER_BEGIN"
+{activity}
+report_power -digits 6
+puts ">>> POWER_END"
+"""
+
+_POWER_GROUPS = ('Sequential', 'Combinational', 'Clock', 'Macro', 'Pad', 'Total')
+
+
+def _power_section(cfg) -> str:
+    """OpenSTA power report for the sign-off session: activities from a VCD /
+    SAIF when given (`power_activity_file`, `power_scope`), else a uniform
+    toggle rate (`power_activity`, `power_duty`) on every input."""
+    if not _cfg_get(cfg, 'report_power', True):
+        return ''
+    f = _cfg_get(cfg, 'power_activity_file')
+    if f:
+        kind = '-saif' if str(f).lower().endswith('.saif') else '-vcd'
+        scope = _cfg_get(cfg, 'power_scope')
+        act = f'read_power_activities {kind} {f}' + (f' -scope {scope}' if scope else '')
+    else:
+        act = f"set_power_activity -input -activity {_cfg_get(cfg, 'power_activity', 0.1)} -duty {_cfg_get(cfg, 'power_duty', 0.5)}"
+    return POWER_TCL.format(activity=act)
+
+
+def _parse_power(section: str) -> dict:
+    """`report_power` table -> {group: {internal_w, switching_w, leakage_w, total_w}}."""
+    out = {}
+    for line in section.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[0] in _POWER_GROUPS:
+            try:
+                vals = [float(x) for x in parts[1:5]]
+            except ValueError:
+                continue
+            out[parts[0].lower()] = dict(zip(('internal_w', 'switching_w', 'leakage_w', 'total_w'), vals))
+    return out
 
 
 def _parse_group_slacks(section: str) -> dict:
@@ -2203,6 +2252,9 @@ class CornerResult:
     failing: list = field(default_factory=list)
     bindings: list = field(default_factory=list)
     uncertainty: list = field(default_factory=list)
+    # OpenSTA report_power at the nominal corner: {sequential|combinational|clock|macro|pad|total: {internal_w, switching_w, leakage_w, total_w}}
+    power: dict = field(default_factory=dict)
+    power_note: str = ''
 
 def run_corner_sta(cfg: Config, module: str, netlist: Path,
                    results_dir: Path) -> CornerResult:
@@ -2217,6 +2269,7 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
 
     period_ns = cfg.period_ps / 1000.0
     corners = [('slow', cfg.lib_slow, 'slow'), ('typical', cfg.lib_typ, 'typ'), ('fast', cfg.lib_fast, 'fast')]
+    power_corner = 'typical' if cfg.lib_typ else ('slow' if cfg.lib_slow else 'fast')   # power at the nominal corner
     res = CornerResult(module=module, success=True, report_path=str(rpt))
     report_parts, log_parts = [], []
 
@@ -2245,6 +2298,7 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
             liberty=lib, macro_libs='\n'.join(f'read_liberty {f}' for f in macro),
             netlist=netlist, module=module, constraints=constraints,
             sdf_line=(f'write_sdf {sdf}' if name == 'slow' else ''),
+            power_section=(_power_section(cfg) if name == power_corner else ''),
         ))
         try:
             r = subprocess.run([cfg.opensta, '-no_init', '-exit', str(tcl)],
@@ -2261,6 +2315,10 @@ def run_corner_sta(cfg: Config, module: str, netlist: Path,
         setup = out[out.find('>>> SETUP_BEGIN'):out.find('>>> SETUP_END')]
         hold = out[out.find('>>> HOLD_BEGIN'):out.find('>>> HOLD_END')]
         groups = _parse_group_slacks(out[out.find('>>> GROUPS_BEGIN'):out.find('>>> GROUPS_END')])
+        if name == power_corner and '>>> POWER_BEGIN' in out:
+            res.power = _parse_power(out[out.find('>>> POWER_BEGIN'):out.find('>>> POWER_END')])
+            res.power_note = (f'{name} corner, ' + (f"activities from {Path(cfg.power_activity_file).name}" if cfg.power_activity_file
+                              else f'uniform activity {cfg.power_activity} toggles/cycle, duty {cfg.power_duty} on all inputs'))
         ws = grab(setup, r'^worst slack(?:\s+max)?\s+([-0-9.eE+]+)')
         ts = grab(setup, r'^tns(?:\s+max)?\s+([-0-9.eE+]+)')
         wh = grab(hold, r'^worst slack(?:\s+min)?\s+([-0-9.eE+]+)')
@@ -2519,6 +2577,24 @@ def write_reports(cfg: Config, selections: dict[str, Selection],
         md.append('| Module | Scenario | Corner | Setup | Hold | Recovery | Removal | Worst group | Verdict |')
         md.append('|---|---|---|---|---|---|---|---|---|')
         md.extend(sc_rows)
+        md.append('')
+    pw_rows, pw_note = [], ''
+    for m, sel in selections.items():
+        corner = corners.get(m)
+        if corner and corner.power:
+            pw_note = pw_note or corner.power_note
+            for g in ('sequential', 'combinational', 'clock', 'macro', 'pad', 'total'):
+                p_ = corner.power.get(g)
+                if p_ and (g == 'total' or p_['total_w'] > 0):
+                    pw_rows.append(f"| `{m}` | {g} | {p_['internal_w'] * 1e6:.2f} | {p_['switching_w'] * 1e6:.2f} | {p_['leakage_w'] * 1e6:.3f} | **{p_['total_w'] * 1e6:.2f}** |")
+    if pw_rows:
+        md.append('### Power (OpenSTA `report_power`, µW)')
+        md.append('')
+        md.append(f'{pw_note}. Dynamic = internal + switching; static = leakage (from the liberty).')
+        md.append('')
+        md.append('| Module | Group | Internal | Switching | Leakage | Total |')
+        md.append('|---|---|---|---|---|---|')
+        md.extend(pw_rows)
         md.append('')
     if unc_rows:
         md.append('### Clock uncertainty budget')

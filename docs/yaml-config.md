@@ -323,6 +323,11 @@ uppercase (e.g. `YOSYS=/opt/yosys/bin/yosys`).
 | `run_sta` | bool | `true` | Run corner STA (slow + fast) on winners. Set false to skip and avoid the `lib_fast`/`lib_slow` requirements. |
 | `run_gls` | bool | `true` | Run gate-level simulation. Set false to skip and avoid the `tb_files`/`tb_top`/`primitives_dir` requirements. |
 | `strict` | bool | `false` | Exit code 6 when any module is NOT CLOSED under its required scenarios or misses setup at sign-off. A post-pass phase failure always exits 5, strict or not. Also `--strict`. |
+| `report_power` | bool | `true` | OpenSTA `report_power` in the nominal-corner sign-off session (typical, else slow): internal, switching and leakage power per group (sequential, combinational, clock, macro, pad, total) in `summary.md`, `summary.json` → `corner.power`, and the bench CSV (`power_dynamic_uw`, `power_static_uw`, `power_total_uw`). |
+| `power_activity` | float | `0.1` | Without an activity file: toggles per clock cycle assumed on every input (`set_power_activity -input`); propagated through the netlist. |
+| `power_duty` | float | `0.5` | Probability of an input being high, same command. |
+| `power_activity_file` | path | — | `.vcd` or `.saif` from a simulation, read with `read_power_activities`; replaces the uniform assumption. |
+| `power_scope` | string | — | Hierarchical scope of the DUT inside that file (`tb/dut`). |
 | `fail_on_timing` | bool | `true` | When `true`, exit code 2 if any winner has setup violation at the slow corner. When `false`, timing violations are reported but exit code stays 0 (useful for early characterization runs). |
 | `sdf_back_annotate` | bool | `true` | When true, GLS uses SDF back-annotation. The script writes SDF during STA and passes `+sdf_<module>=<path>` plusargs to vvp. The testbench is responsible for `$sdf_annotate` calls. |
 

@@ -39,6 +39,9 @@ gate-level simulation for ASIC designs using **Yosys + ABC**, **OpenSTA**, and
   library on failing paths, slower one off-critical with `--recover-area`)
   and reports leakage and the per-library mix ([docs/yaml-config.md](docs/yaml-config.md))
 - **Multi-corner STA** — SS (setup), TT (setup+hold), FF (hold) via OpenSTA
+- **Power report** — OpenSTA `report_power` at the nominal corner: dynamic
+  (internal + switching) and static (leakage) per cell group, from a uniform
+  activity assumption or a VCD/SAIF of your simulation
 - **Hierarchical (bottom-up) synthesis** — leaf modules first, winning
   netlists reused by parents
 - **Gate-level simulation** — iverilog + vvp with optional SDF

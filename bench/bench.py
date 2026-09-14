@@ -68,7 +68,9 @@ COLUMNS = ['design', 'category', 'top', 'recipe', 'is_winner', 'cells', 'area_um
            # winner-only, after post-passes (resize) and the multi-corner STA:
            'final_wns_slow', 'final_tns_slow', 'final_area_um2',
            # post-pass extras when a resize.json exists: leakage (uW, from the liberty) and cells per library
-           'leakage_uw_before', 'leakage_uw_after', 'lib_mix_before', 'lib_mix_after']
+           'leakage_uw_before', 'leakage_uw_after', 'lib_mix_before', 'lib_mix_after',
+           # OpenSTA report_power at sign-off (winner only): dynamic = internal + switching, static = leakage
+           'power_dynamic_uw', 'power_static_uw', 'power_total_uw']
 
 
 # --------------------------------------------------------------------------
@@ -224,6 +226,11 @@ def run_design(d: dict, args, run_sta: bool) -> list[dict]:
         return [dict(base, recipe='', status='failed', error='top module missing from summary')]
 
     corner = mod.get('corner') or {}
+    power = {}
+    tot = (corner.get('power') or {}).get('total')
+    if tot:
+        power = {'power_dynamic_uw': f"{(tot['internal_w'] + tot['switching_w']) * 1e6:.2f}",
+                 'power_static_uw': f"{tot['leakage_w'] * 1e6:.3f}", 'power_total_uw': f"{tot['total_w'] * 1e6:.2f}"}
     final_area = ''
     extras = {}
     rj = work / 'results' / d['top'] / 'resize.json'
@@ -261,6 +268,7 @@ def run_design(d: dict, args, run_sta: bool) -> list[dict]:
             final_tns_slow=(f"{corner['tns_setup_slow']:.3f}" if recipe == mod.get('winner') and corner.get('tns_setup_slow') is not None else ''),
             final_area_um2=(final_area if recipe == mod.get('winner') else ''),
             **(extras if recipe == mod.get('winner') else {}),
+            **(power if recipe == mod.get('winner') else {}),
         ))
     return rows
 
