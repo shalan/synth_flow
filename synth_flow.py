@@ -2143,7 +2143,7 @@ def _quick_sta_job(args: dict) -> tuple[str, Optional[float], Optional[float], b
     """Pool worker: one quick STA. Returns (recipe, wns_ns, tns_ns, reused)."""
     cfg = args['cfg']
     corner = 'slow' if cfg.get('lib_slow') else 'typ'
-    cache = Path(args['log']).with_suffix('.qsta.json')
+    cache = Path(args['log']).with_name(f"{args['recipe']}.qsta.json")
     key = _qsta_key(args)
     if cfg.get('resume') and cache.exists():
         try:
@@ -2182,6 +2182,7 @@ class Candidate:
     cells: int
     area: float
     runtime_s: float
+    reused: bool = False      # --resume: mapping taken from the checkpoint
 
 @dataclass
 class Selection:
@@ -3811,7 +3812,7 @@ def main() -> int:
                 recipe=rec, netlist=r.netlist,
                 wns_ns=wns, tns_ns=tns,
                 cells=r.cells, area=r.area,
-                runtime_s=r.runtime_s,
+                runtime_s=r.runtime_s, reused=r.reused,
             ))
 
         sel = select_winner(cands, cfg.objective, cfg.select_margin_ps / 1000.0, cfg.fallback,
